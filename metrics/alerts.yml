@@ -1,0 +1,206 @@
+# RAG v14 — Prometheus 告警规则
+# 覆盖设计文档 §8.3 全部关键指标
+# 用法：在 prometheus.yml 中引用此文件
+#
+# 告警严重级别：
+#   critical — 需立即响应（PagerDuty/电话告警）
+#   warning  — 需在 1 小时内处理（Slack/邮件）
+
+groups:
+  - name: rag_v14_authz
+    rules:
+      # ── 权限服务不可达 ──
+      - alert: AuthzServiceDown
+        expr: rate(authz_call_failed_total[5m]) > 0.1
+        for: 2m
+        labels:
+          severity: critical
+          component: authz
+        annotations:
+          summary: "权限服务 (Cerbos) 调用失败率异常"
+          description: "过去 5 分钟内 authz 调用失败率 {{ $value }}/s，端点: {{ $labels.endpoint }}，故障类型: {{ $labels.kind }}"
+          runbook: "1. 检查 Cerbos PDP 是否存活: curl http://cerbos:3592/api/policies\n2. 检查网络连通性\n3. 若熔断器已打开，等待 60s 半开探测自动恢复"
+
+      # ── 熔断器打开 ──
+      - alert: AuthzCircuitBreakerOpen
+        expr: rate(authz_call_failed_total{kind="connection"}[5m]) > 1
+        for: 1m
+        labels:
+          severity: critical
+          component: authz
+        annotations:
+          summary: "权限服务熔断器可能已打开"
+          description: "连接失败持续高发 ({{ $value }}/s)，所有授权请求被直接拒绝（fail-closed）"
+
+      # ── indeterminate 判定异常（应恒为 0） ──
+      - alert: AuthzIndeterminateRate
+        expr: rate(authz_decision_total{decision="indeterminate"}[10m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+          component: authz
+        annotations:
+          summary: "权限服务返回 indeterminate 判定"
+          description: "indeterminate 判定应极为罕见。{{ $value }}/s，需排查权限服务策略评估异常"
+
+      # ── 未知 obligation key ──
+      - alert: AuthzUnknownObligation
+        expr: rate(authz_obligation_unknown_total[10m]) > 0
+        for: 1m
+        labels:
+          severity: warning
+          component: authz
+        annotations:
+          summary: "权限服务返回了本系统不认识的 obligation key"
+          description: "可能意味着权限服务契约升级，需同步更新 P-AUTHC 的 obligation 检查逻辑"
+
+  - name: rag_v14_stamping
+    rules:
+      # ── 结构镜像对账缺口 ──
+      - alert: MirrorGapHigh
+        expr: mirror_gap > 10
+        for: 5m
+        labels:
+          severity: warning
+          component: stamping
+        annotations:
+          summary: "结构镜像对账缺口过大 ({{ $value }} 条)"
+          description: "document_kb_mount 与权限服务镜像不一致。若持续增大说明写路径 register/link/unlink 调用有遗漏"
+
+      # ── 戳记漂移 ──
+      - alert: StampDriftDetected
+        expr: stamp_drift > 0
+        for: 10m
+        labels:
+          severity: warning
+          component: stamping
+        annotations:
+          summary: "检测到戳记漂移 ({{ $value }} 条)"
+          description: "向量库 chunk 戳记与权限服务当前投影不一致。对账任务应自动修复，持续漂移说明盖戳管道有缺陷"
+
+      # ── 孤儿戳记（绕过盖戳管道的写入） ──
+      - alert: OrphanStampDetected
+        expr: orphan_stamp > 0
+        for: 5m
+        labels:
+          severity: critical
+          component: stamping
+        annotations:
+          summary: "检测到孤儿戳记 ({{ $value }} 个)"
+          description: "chunk 缺少 vis_version 字段——有人绕过盖戳管道直写向量库。这是安全事件，需立即排查"
+
+      # ── 盖戳延迟过大 ──
+      - alert: StampLagHigh
+        expr: histogram_quantile(0.95, rate(stamp_lag_seconds_bucket[10m])) > 300
+        for: 10m
+        labels:
+          severity: warning
+          component: stamping
+        annotations:
+          summary: "盖戳延迟 P95 > 5 分钟 ({{ $value }}s)"
+          description: "VisibilityChanged 事件到戳记落盘的延迟过高。检查 stamping_queue 积压和 /v1/visibility 响应时间"
+
+      # ── 盖戳任务死信 ──
+      - alert: StampTaskDeadLetter
+        expr: rate(stamp_task_dead_letter[30m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+          component: stamping
+        annotations:
+          summary: "盖戳任务出现死信 ({{ $value }}/s)"
+          description: "盖戳重试用尽进入死信队列，需人工介入。检查 /v1/visibility 可用性和向量库写入"
+
+  - name: rag_v14_ingestion
+    rules:
+      # ── 摄入任务死信 ──
+      - alert: IngestTaskDeadLetter
+        expr: rate(ingest_task_dead_letter[30m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+          component: ingestion
+        annotations:
+          summary: "摄入任务出现死信 ({{ $value }}/s)"
+          description: "文档解析重试用尽，需排查解析失败原因（文件格式、存储可达性、模型可用性）"
+
+      # ── 挂载-执行对账缺口 ──
+      - alert: MountExecutionGap
+        expr: mount_execution_gap > 5
+        for: 10m
+        labels:
+          severity: warning
+          component: ingestion
+        annotations:
+          summary: "挂载-执行记录对账缺口 ({{ $value }} 条)"
+          description: "有文档挂载但无摄入执行记录。对账任务应自动补发 DocumentMounted 事件"
+
+  - name: rag_v14_retrieval
+    rules:
+      # ── 检索不足率异常 ──
+      - alert: RetrievalInsufficientHigh
+        expr: rate(retrieval_insufficient_total[30m]) > 0.3
+        for: 10m
+        labels:
+          severity: warning
+          component: retrieval
+        annotations:
+          summary: "检索返回"未找到足够信息"的比例过高 ({{ $value }}/s)"
+          description: "需联合 filtered_rate 指标分析：过滤率高且不足 → 权限问题；过滤率正常但不足 → 检索质量问题"
+
+      # ── 过滤率异常 ──
+      - alert: Layer1FilterRateHigh
+        expr: histogram_quantile(0.95, rate(filtered_rate_bucket{layer="layer1"}[10m])) > 0.8
+        for: 15m
+        labels:
+          severity: warning
+          component: retrieval
+        annotations:
+          summary: "层 1 prefilter 过滤率 P95 > 80%"
+          description: "大部分检索结果被六条件过滤器拦截，可能是权限变更导致大量内容对用户不可见"
+
+  - name: rag_v14_infra
+    rules:
+      # ── 向量库不可达 ──
+      - alert: VectorStoreDown
+        expr: up{job="milvus"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          component: infrastructure
+        annotations:
+          summary: "Milvus 向量库不可达"
+          description: "全部检索请求将失败。检查 Milvus 进程和 etcd/MinIO 依赖"
+
+      # ── 数据库不可达 ──
+      - alert: DatabaseDown
+        expr: up{job="postgres"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          component: infrastructure
+        annotations:
+          summary: "PostgreSQL 数据库不可达"
+          description: "全系统不可用。检查 PostgreSQL 进程和数据目录"
+
+      # ── Redis 不可达 ──
+      - alert: RedisDown
+        expr: up{job="redis"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          component: infrastructure
+        annotations:
+          summary: "Redis 不可达"
+          description: "Celery 任务队列中断，流式回传中断。检查 Redis 进程"
+
+      # ── Worker 无心跳 ──
+      - alert: WorkerDown
+        expr: absent(up{job=~"ingestion-worker|retrieval-worker|stamping-worker"})
+        for: 3m
+        labels:
+          severity: critical
+          component: worker
+        annotations:
+          summary: "Celery Worker 无心跳 ({{ $labels.job }})"
+          description: "Worker 进程可能已退出。检查 Celery worker 日志和资源使用"

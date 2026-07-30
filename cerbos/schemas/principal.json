@@ -1,0 +1,15 @@
+{
+  "$schema": "https://cerbos.dev/cerbos-policy/v1/jsonschema/principal.json",
+  "type": "object",
+  "properties": {
+    "tenant_id": { "type": "string" },
+    "granted_actions": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "array",
+        "items": { "type": "string" }
+      }
+    }
+  },
+  "required": ["tenant_id"]
+}

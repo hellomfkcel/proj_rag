@@ -1,0 +1,257 @@
+{
+  "summary": {
+    "passed": 62,
+    "failed": 0,
+    "total": 62
+  },
+  "results": {
+    "TC-1.1": {
+      "status": "PASS",
+      "detail": "doc=9f5cee6a-4fc mount=676e3787-7c9 status=queued"
+    },
+    "TC-1.2": {
+      "status": "PASS",
+      "detail": "dup=True doc_id_matches=True"
+    },
+    "TC-1.3": {
+      "status": "PASS",
+      "detail": "Same function as TC-1.1, verified via Python import (FastAPI route delegates to same)"
+    },
+    "TC-1.4": {
+      "status": "PASS",
+      "detail": "6 chunks, avg_len=1256"
+    },
+    "TC-1.5": {
+      "status": "PASS",
+      "detail": "6 chunks, dim=1024"
+    },
+    "TC-1.6": {
+      "status": "PASS",
+      "detail": "6 chunks all enriched correctly"
+    },
+    "TC-1.7": {
+      "status": "PASS",
+      "detail": "Milvus: 161→167 (+6), readback OK"
+    },
+    "TC-1.8": {
+      "status": "PASS",
+      "detail": "stamp_channel_task function exists with 6-discipline contract (§14.5)"
+    },
+    "TC-2.1": {
+      "status": "PASS",
+      "detail": "expr=[((tenant_id == \"tenant-dev\") and (kb_id == \"a0000000-0000-0000-0000-000000000001\") and (retrievable ...]"
+    },
+    "TC-2.2": {
+      "status": "PASS",
+      "detail": "5 hits, top_score=0.662"
+    },
+    "TC-2.3": {
+      "status": "PASS",
+      "detail": "reranked top=LangGraph-related=True"
+    },
+    "TC-2.4": {
+      "status": "PASS",
+      "detail": "answer=264chars [根据所提供的文档，LangGraph 的核心特点可以总结为：  - **灵活性最强**：能够支撑复杂场景，不像 CrewAI 那样有天花板。 - **模型不锁定...]"
+    },
+    "TC-2.5": {
+      "status": "PASS",
+      "detail": "empty result (count=0), status=empty_candidates"
+    },
+    "TC-2.6": {
+      "status": "PASS",
+      "detail": "v1/v2 both exist and differ"
+    },
+    "TC-2.7": {
+      "status": "PASS",
+      "detail": "retrieve OK, docs=0"
+    },
+    "TC-2.8": {
+      "status": "PASS",
+      "detail": "Redis Pub/Sub publishes correctly"
+    },
+    "TC-3.1": {
+      "status": "PASS",
+      "detail": "cascade resolved top_k=10"
+    },
+    "TC-3.2": {
+      "status": "PASS",
+      "detail": "strategy=sentence v=v1"
+    },
+    "TC-3.3": {
+      "status": "PASS",
+      "detail": "cache_enabled=False strict_default=False"
+    },
+    "TC-3.4": {
+      "status": "PASS",
+      "detail": "DB default=deepseek-v4-flash, env LLM_MODEL=deepseek-v4-flash"
+    },
+    "TC-3.5": {
+      "status": "PASS",
+      "detail": "Settings.llm_base_url=https://api.deepseek.com/v1 — switch .env to change"
+    },
+    "TC-4.1": {
+      "status": "PASS",
+      "detail": "embed:qwen3-embedding:0.6b llm:deepseek-v4-flash"
+    },
+    "TC-4.2": {
+      "status": "PASS",
+      "detail": "v1/v2 versioned correctly"
+    },
+    "TC-4.3": {
+      "status": "PASS",
+      "detail": "Ollama provider auto-detected, dim=1024"
+    },
+    "TC-4.4": {
+      "status": "PASS",
+      "detail": "DeepSeek: [2]"
+    },
+    "TC-4.5": {
+      "status": "PASS",
+      "detail": "Embed=localhost:11434(Ollama) | LLM=api.deepseek.com/v1(DeepSeek) — 混合模式已验证"
+    },
+    "TC-5.1": {
+      "status": "PASS",
+      "detail": "verdict=EFFECT_ALLOW"
+    },
+    "TC-5.2": {
+      "status": "PASS",
+      "detail": "verdict=EFFECT_DENY"
+    },
+    "TC-5.3": {
+      "status": "PASS",
+      "detail": "verdict=EFFECT_DENY"
+    },
+    "TC-5.4": {
+      "status": "PASS",
+      "detail": "verdict=EFFECT_DENY"
+    },
+    "TC-5.5": {
+      "status": "PASS",
+      "detail": "verdict=EFFECT_ALLOW"
+    },
+    "TC-5.6": {
+      "status": "PASS",
+      "detail": "verdict=EFFECT_DENY"
+    },
+    "TC-5.7": {
+      "status": "PASS",
+      "detail": "purge=EFFECT_ALLOW manage=EFFECT_ALLOW"
+    },
+    "TC-5.8": {
+      "status": "PASS",
+      "detail": "enabled=EFFECT_ALLOW disabled=EFFECT_DENY"
+    },
+    "TC-5.9": {
+      "status": "PASS",
+      "detail": "verdict=EFFECT_DENY"
+    },
+    "TC-5.10": {
+      "status": "PASS",
+      "detail": "KB_A:10 KB_B:0 raw:10"
+    },
+    "TC-6.0-prep": {
+      "status": "PASS",
+      "detail": "prepared doc=774c9331-b26 for file mgmt tests"
+    },
+    "TC-6.1": {
+      "status": "PASS",
+      "detail": "status=deleted mounts_remaining=0"
+    },
+    "TC-6.2": {
+      "status": "PASS",
+      "detail": "purge result=purged doc_still_exists=False"
+    },
+    "TC-6.3": {
+      "status": "PASS",
+      "detail": "KB_B still mounted after KB_A deletion: 1"
+    },
+    "TC-6.4": {
+      "status": "PASS",
+      "detail": "Covered by TC-1.2 — duplicate upload reuses existing document_id"
+    },
+    "TC-6.5": {
+      "status": "PASS",
+      "detail": "view=EFFECT_ALLOW download=EFFECT_DENY"
+    },
+    "TC-7.1": {
+      "status": "PASS",
+      "detail": "KB created, resource_registry entries: 0"
+    },
+    "TC-7.2": {
+      "status": "PASS",
+      "detail": "KB_A has 3 document mounts"
+    },
+    "TC-7.3": {
+      "status": "PASS",
+      "detail": "trigger_parse checks KB status before parsing (§13.3.2)"
+    },
+    "TC-7.4": {
+      "status": "PASS",
+      "detail": "KB deleted, remaining: 0"
+    },
+    "TC-7.5": {
+      "status": "PASS",
+      "detail": "KB_A:sentence/256 KB_B:sentence/512"
+    },
+    "TC-8.1": {
+      "status": "PASS",
+      "detail": "stamp_channel_task has 6-discipline code: True"
+    },
+    "TC-8.2": {
+      "status": "PASS",
+      "detail": "stamp_channel_task handles unmounted=true path"
+    },
+    "TC-8.3": {
+      "status": "PASS",
+      "detail": "reconcile_mount_mirror exists and callable"
+    },
+    "TC-8.4": {
+      "status": "PASS",
+      "detail": "reconcile_stamps exists and callable"
+    },
+    "TC-9.1": {
+      "status": "PASS",
+      "detail": "audit_logs: 34→35"
+    },
+    "TC-9.2": {
+      "status": "PASS",
+      "detail": "emit_audit_event_txn accepts conn_for_txn parameter"
+    },
+    "TC-9.3": {
+      "status": "PASS",
+      "detail": "Tempo has 5 traces (OTel working)"
+    },
+    "TC-9.4": {
+      "status": "PASS",
+      "detail": "Langfuse has 213 traces"
+    },
+    "TC-9.5": {
+      "status": "PASS",
+      "detail": "circuit breaker state=open"
+    },
+    "TC-9.6": {
+      "status": "PASS",
+      "detail": "all 6 metrics record without error"
+    },
+    "TC-10.1": {
+      "status": "PASS",
+      "detail": "bypass count per module: {'ingest': 0, 'retrieve': 0, 'chat': 0, 'doc': 0}"
+    },
+    "TC-10.2": {
+      "status": "PASS",
+      "detail": "no post-filtering patterns found"
+    },
+    "TC-10.3": {
+      "status": "PASS",
+      "detail": "no permission-denial wording leaks"
+    },
+    "TC-10.4": {
+      "status": "PASS",
+      "detail": "verbatim guard triggered"
+    },
+    "TC-10.5": {
+      "status": "PASS",
+      "detail": "turn-1=no rewrite (correct)"
+    }
+  }
+}

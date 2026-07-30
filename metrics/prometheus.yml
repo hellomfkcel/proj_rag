@@ -1,0 +1,40 @@
+# RAG v14 — Prometheus 配置
+# 由 OTel Collector 统一采集，Prometheus 从 Collector 拉取指标
+# 生产环境请替换 targets 为实际服务地址
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+# 加载告警规则
+rule_files:
+  - "alerts.yml"
+
+# Alertmanager 配置（生产环境替换为实际地址）
+# alerting:
+#   alertmanagers:
+#     - static_configs:
+#         - targets: ["alertmanager:9093"]
+
+scrape_configs:
+  # ── RAG 应用指标（由 OTel Collector 暴露） ──
+  - job_name: rag-v14
+    scrape_interval: 10s
+    static_configs:
+      - targets:
+          - "otel-collector:8889"
+        labels:
+          service: rag-v14
+
+  # ── 基础设施健康检查 ──
+  - job_name: postgres
+    static_configs:
+      - targets: ["postgres:9187"]
+
+  - job_name: redis
+    static_configs:
+      - targets: ["redis:9121"]
+
+  - job_name: milvus
+    static_configs:
+      - targets: ["milvus:9091"]

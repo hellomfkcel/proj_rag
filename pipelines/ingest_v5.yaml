@@ -1,0 +1,35 @@
+components:
+  splitter:
+    type: src.ingest.components.hierarchical_splitter.HierarchicalDocumentSplitter
+    init_parameters:
+      parent_split_length: ${CHUNK_PARENT_LENGTH}
+      parent_split_overlap: 128
+      child_split_length: ${CHUNK_CHILD_LENGTH}
+      child_split_overlap: 32
+      parent_split_by: sentence
+      child_split_by: sentence
+  dense_embedder:
+    type: src.ingest.components.ollama_embedder.OllamaDocumentEmbedder
+    init_parameters:
+      model: qwen3-embedding:0.6b
+  sparse_embedder:
+    type: src.ingest.components.sparse_embedder.BGE_M3SparseEmbedder
+    init_parameters: {}
+  perm_enricher:
+    type: src.ingest.components.perm_enricher.PermissionMetadataEnricher
+    init_parameters: {}
+  writer:
+    type: src.ingest.components.milvus_writer.MilvusDocumentStoreWriter
+    init_parameters:
+      collection_name: rag_documents
+      milvus_host: ${MILVUS_HOST}
+      milvus_port: ${MILVUS_PORT}
+connections:
+- sender: splitter.documents
+  receiver: dense_embedder.documents
+- sender: dense_embedder.documents
+  receiver: sparse_embedder.documents
+- sender: sparse_embedder.documents
+  receiver: perm_enricher.documents
+- sender: perm_enricher.documents
+  receiver: writer.documents

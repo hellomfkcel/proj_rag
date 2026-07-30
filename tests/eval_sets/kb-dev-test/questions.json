@@ -1,0 +1,67 @@
+{
+  "kb_id": "a0000000-0000-0000-0000-000000000001",
+  "kb_name": "开发测试KB",
+  "user_id": "dev-user",
+  "triplets": [
+    {
+      "question": "什么是RAG系统？",
+      "context": "RAG（检索增强生成）系统是面向企业的多知识库问答平台。",
+      "ground_truth": "RAG是检索增强生成系统，面向企业提供多知识库问答能力。"
+    },
+    {
+      "question": "本系统的权限设计是什么？",
+      "context": "权限外置是本系统的核心设计：本系统零权限判定，所有授权决策由外部Cerbos服务完成。",
+      "ground_truth": "本系统零权限判定，所有授权决策由外部Cerbos服务完成，权限完全外置。"
+    },
+    {
+      "question": "多知识库之间如何隔离？",
+      "context": "多知识库隔离通过六条件MetadataFilter实现，不同KB的文档互不可见。",
+      "ground_truth": "通过六条件MetadataFilter实现多知识库隔离，不同KB的文档互不可见。"
+    },
+    {
+      "question": "什么是盖戳管道？",
+      "context": "盖戳管道是chunk从对任何人不可见变为正确可见的唯一路径。",
+      "ground_truth": "盖戳管道是chunk从不可见变为正确可见的唯一路径，负责写入权限戳记。"
+    },
+    {
+      "question": "盖戳管道有哪些纪律？",
+      "context": "盖戳管道有六条纪律：失败不落盘、unmounted清空、版本单调性、分批让渡、断点续跑、审计fail-open。",
+      "ground_truth": "六条纪律：失败不落盘、unmounted清空、版本单调性、分批让渡、断点续跑、审计fail-open。"
+    },
+    {
+      "question": "本系统的混合检索使用什么算法？",
+      "context": "混合检索融合了稠密向量和稀疏向量，通过RRF算法排序。",
+      "ground_truth": "混合检索融合稠密向量和稀疏向量，通过RRF（倒数排名融合）算法排序。"
+    },
+    {
+      "question": "系统使用了哪些技术组件？",
+      "context": "技术栈包括Haystack 2.x、Milvus向量库、PostgreSQL、SeaweedFS对象存储。",
+      "ground_truth": "技术栈包括Haystack 2.x、Milvus向量库、PostgreSQL关系库、SeaweedFS对象存储。"
+    },
+    {
+      "question": "嵌入模型使用什么？",
+      "context": "嵌入模型使用BGE-M3，支持稠密和稀疏双路嵌入。",
+      "ground_truth": "使用BGE-M3嵌入模型，支持稠密和稀疏双路向量嵌入。"
+    },
+    {
+      "question": "本系统的任务队列是如何组织的？",
+      "context": "任务队列使用Celery加Redis，支持ingestion、retrieval、stamping三类队列。",
+      "ground_truth": "使用Celery加Redis作为任务队列，分为摄入、检索、盖戳三类队列。"
+    },
+    {
+      "question": "权限系统使用什么外部服务？",
+      "context": "权限外置是本系统的核心设计：本系统零权限判定，所有授权决策由外部Cerbos服务完成。",
+      "ground_truth": "权限判定由外部Cerbos服务完成，本系统不做任何本地权限判定。"
+    },
+    {
+      "question": "RRF融合算法有什么特点？",
+      "context": "混合检索融合了稠密向量和稀疏向量，通过RRF算法排序。",
+      "ground_truth": "RRF算法将稠密和稀疏两路检索结果融合排序，比较排名而非分数。"
+    },
+    {
+      "question": "盖戳管道失败时如何处理？",
+      "context": "盖戳管道有六条纪律：失败不落盘、unmounted清空、版本单调性、分批让渡、断点续跑、审计fail-open。",
+      "ground_truth": "盖戳失败时不落盘任何数据，不ack消息，交给Celery重试，绝不写入空戳记。"
+    }
+  ]
+}

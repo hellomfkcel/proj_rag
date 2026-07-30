@@ -1,0 +1,40 @@
+components:
+  text_embedder:
+    type: src.retrieve.components.ollama_text_embedder.OllamaTextEmbedder
+    init_parameters:
+      model: qwen3-embedding:0.6b
+  retriever:
+    type: src.retrieve.components.dense_retriever.MilvusDenseRetriever
+    init_parameters:
+      collection_name: rag_documents
+      top_k: 20
+      milvus_host: ${MILVUS_HOST}
+      milvus_port: ${MILVUS_PORT}
+  prompt_builder:
+    type: haystack.components.builders.prompt_builder.PromptBuilder
+    init_parameters:
+      template: '你是企业知识库助手，请基于以下文档内容回答问题。
+
+        如文档中没有相关信息，请如实说明，不要编造。
+
+        {% for doc in documents %}
+
+        [来源 {{ loop.index }}] {{ doc.content }}
+
+        {% endfor %}
+
+        问题：{{ query }}
+
+        '
+  generator:
+    type: haystack.components.generators.openai.OpenAIGenerator
+    init_parameters:
+      api_base_url: ${LLM_BASE_URL}
+      model: ${LLM_MODEL}
+connections:
+- sender: text_embedder.embedding
+  receiver: retriever.query_embedding
+- sender: retriever.documents
+  receiver: prompt_builder.documents
+- sender: prompt_builder.prompt
+  receiver: generator.prompt
