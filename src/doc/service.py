@@ -70,11 +70,17 @@ def submit_ingest_task(
 ) -> dict:
     """文档上传入口：只登记不解析。
 
-    行为契约：
+    行为契约（§13.3.1 + §13.7 先调权限服务后提交本地）：
     1. 计算指纹，按 (tenant_id, fingerprint) 查 document → 存在则复用
-    2. 不存在：写 SeaweedFS + 建 document 记录，同事务调 register_resource
-    3. 查/建挂载关系，同事务调 link_resource
+    2. 不存在：生成 doc_id → 写 SeaweedFS → ★先调 register_resource
+       → 成功后 INSERT INTO documents
+       → register 失败即中止，不写 documents 表
+    3. 查/建挂载关系 → ★先调 link_resource → 成功后 INSERT INTO document_kb_mounts
+       → link 失败即中止，不写挂载表
     4. 如果 auto_parse=true：登记后立即内部调 trigger_parse
+
+    异常安全：唯一可能的不一致是"权限服务有、本地无"（孤儿镜像），
+    安全且可被 §13.7b 结构镜像对账回收。绝不会出现"本地有、权限服务无"。
     """
     store = _get_store()
     fingerprint = _compute_fingerprint(file_content)
@@ -100,12 +106,22 @@ def submit_ingest_task(
             is_duplicate = doc_id is not None
 
             if not doc_id:
-                # 写入 SeaweedFS
+                # 生成 doc_id（在写 S3 和 register 之前）
                 doc_id = str(uuid.uuid4())
+
+                # 写入 SeaweedFS（物理存储先于 DB——S3 不可回滚，
+                # 若后续 register 失败则留下孤儿 S3 对象，可被定期清理脚本回收）
                 s3_key = f"docs/{tenant_id}/{doc_id}/{filename}"
                 storage_path = store.put(s3_key, file_content, "application/octet-stream")
 
-                # 建 document
+                # ★ 先调权限服务 register_resource（§13.7）
+                # 失败即中止：不写 documents 表，S3 孤儿可接受
+                ctx = _build_ctx(user_id, tenant_id, request_id, credential)
+                register_resource(ctx, "document", doc_id, f"user:{user_id}")
+
+                # register 成功后写 documents 表
+                # 若此步失败：resource_registry 中有记录而 documents 表无记录
+                # → 孤儿镜像，安全方向，可被 §13.7b 对账回收
                 await conn.execute(
                     """INSERT INTO documents (id, tenant_id, filename, content_fingerprint,
                        storage_path, file_size, mime_type, uploaded_by)
@@ -113,10 +129,6 @@ def submit_ingest_task(
                     doc_id, tenant_id, filename, fingerprint,
                     storage_path, len(file_content), "", user_id,
                 )
-
-                # 同步调权限服务 register_resource（经 P-AUTHC 门面，单一出口）
-                ctx = _build_ctx(user_id, tenant_id, request_id, credential)
-                register_resource(ctx, "document", doc_id, f"user:{user_id}")
 
             # 2. 挂载关系
             mount_row = await conn.fetchrow(
@@ -127,15 +139,20 @@ def submit_ingest_task(
 
             if not mount_id:
                 mount_id = str(uuid.uuid4())
+
+                # ★ 先调权限服务 link_resource（§13.7）
+                # 失败即中止：不写 document_kb_mounts 表
+                ctx = _build_ctx(user_id, tenant_id, request_id, credential)
+                link_resource(ctx, doc_id, kb_id)
+
+                # link 成功后写 document_kb_mounts 表
+                # 若此步失败：mount_registry 中有记录而 document_kb_mounts 表无记录
+                # → 孤儿镜像，安全方向
                 await conn.execute(
                     """INSERT INTO document_kb_mounts (id, document_id, kb_id, mounted_by)
                        VALUES ($1,$2,$3,$4)""",
                     mount_id, doc_id, kb_id, user_id,
                 )
-
-                # 同步调权限服务 link_resource（经 P-AUTHC 门面，单一出口）
-                ctx = _build_ctx(user_id, tenant_id, request_id, credential)
-                link_resource(ctx, doc_id, kb_id)
 
             # 3. 如果 auto_parse，触发解析
             parse_status = "not_parsed"
@@ -284,7 +301,16 @@ def delete_document_from_kb(
 
 def _purge_document(user_id: str, doc_id: str, tenant_id: str,
                     request_id: str = "", credential: str = "") -> dict:
-    """彻底删除文档（阶段三 v14.md §13.4.3，不可颠倒）。"""
+    """彻底删除文档（阶段三 v14.md §13.4.3 + §13.7 先调权限服务后提交本地）。
+
+    操作顺序（不可颠倒）：
+    1. 快照——取当前全部挂载
+    2. ★ 先调权限服务 retire_resource（四合一原子操作）
+       → 失败即中止，不删任何本地数据
+    3. retire 成功后：逐个删除挂载 → 发事件 → 清理 Milvus chunk
+    4. 删除 S3 文件
+    5. 审计 + 删除 document 记录
+    """
 
     async def _do():
         s = Settings()
@@ -294,6 +320,7 @@ def _purge_document(user_id: str, doc_id: str, tenant_id: str,
         store = _get_store()
 
         try:
+            # 1. 快照：取当前全部挂载（在 retire 之前）
             mounts = await conn.fetch(
                 "SELECT id, kb_id FROM document_kb_mounts WHERE document_id = $1", doc_id
             )
@@ -301,6 +328,18 @@ def _purge_document(user_id: str, doc_id: str, tenant_id: str,
             mount_count = len(mounts)
             log = get_logger(__name__)
 
+            if mount_count == 0:
+                return {"status": "not_found", "reason": "no mounts for document", "doc_id": doc_id}
+
+            # 2. ★ 先调权限服务 retire_resource（§13.7 + §13.4.3）
+            #    retire 在权限服务侧原子完成四件事：
+            #    a. 回收全部 acl  b. 回收全部 restriction
+            #    c. 解除全部挂载镜像（unlinked=true） d. 置 retired=true
+            #    失败即中止——不删任何本地数据
+            ctx = _build_ctx(user_id, tenant_id, request_id, credential)
+            retire_resource(ctx, "document", doc_id)
+
+            # 3. retire 成功后：清理本地挂载 + Milvus chunk
             for row in mounts:
                 mount_id = str(row["id"]); kb_id = str(row["kb_id"])
                 await conn.execute("DELETE FROM document_kb_mounts WHERE id = $1", mount_id)
@@ -320,21 +359,14 @@ def _purge_document(user_id: str, doc_id: str, tenant_id: str,
                 from src.ingest.service import cleanup_mount_chunks
                 cleanup_mount_chunks(mount_id, doc_id, kb_id)
 
-            remaining = await conn.fetchval(
-                "SELECT count(*) FROM document_kb_mounts WHERE document_id = $1", doc_id)
-            if remaining > 0:
-                return {"status": "partial", "reason": f"{remaining} mounts remaining", "doc_id": doc_id}
-
-            # 同步调权限服务 retire_resource（经 P-AUTHC 门面，单一出口）
-            ctx = _build_ctx(user_id, tenant_id, request_id, credential)
-            retire_resource(ctx, "document", doc_id)
-
+            # 4. 删除 S3 文件
             storage_path = await conn.fetchval(
                 "SELECT storage_path FROM documents WHERE id = $1", doc_id)
             if storage_path:
                 try: store.delete(storage_path.replace("s3://rag-files/", ""))
                 except Exception: log.warning("s3_delete_failed", key=storage_path)
 
+            # 5. 审计 + 删除 document 记录
             from src.platform.audit.service import emit_audit_event_txn
             emit_audit_event_txn(event_type="DOC_DELETE", user_id=user_id, tenant_id=tenant_id,
                                  action="doc:purge", resource_type="document", resource_id=doc_id,

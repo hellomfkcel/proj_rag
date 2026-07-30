@@ -131,6 +131,7 @@ export default function ChatPage() {
   const handleSend = async (overrides?: {
     retrieval_mode?: string; fusion_method?: string; strict?: boolean; top_k?: number;
     dense_weight?: number; sparse_weight?: number; synthesis_mode?: string;
+    oversample_factor?: number; min_results?: number; refetch_max_rounds?: number;
   }) => {
     const q = input.trim();
     if (!q || selectedKBs.length === 0) return;
@@ -144,13 +145,35 @@ export default function ChatPage() {
     setMessages(prev => [...prev, loadingMsg]);
     setLoading(true);
 
-    let sseDone = false;
     let sseAnswer = "";
     let sseSources: { chunk_id: string; content: string }[] = [];
 
     try {
-      // SSE listener in parallel — runs independently
-      const streamUrl = `/api/v1/conversations/${activeConvId || "new"}/stream?turn_index=1`;
+      // ── Step 1: Fire the query FIRST ──
+      // The POST response gives us the canonical conversation_id and turn_index.
+      // We need these to subscribe to the correct Redis Pub/Sub channel.
+      // (Design doc §3.3: POST → SSE, not SSE → POST.)
+      const result = await queryAPI(q, selectedKBs, activeConvId || undefined, overrides);
+      const activeConvIdNew = result.conversation_id || activeConvId;
+      if (!activeConvId) setActiveConvId(activeConvIdNew);
+      const turnIndex = result.turn_index || 1;
+
+      // Handle typed error codes from the query response (#32, #33, #34)
+      if (result.error_code) {
+        setStreamError(result.error_code);
+        if (result.error_code === "retrieve:vector_store_unavailable") {
+          setRetryCountdown(10);
+        } else if (result.error_code === "retrieve:insufficient_evidence") {
+          setStreamError(null);
+        }
+      }
+
+      // ── Step 2: Open SSE with CORRECT conversation_id + turn_index ──
+      // The Celery worker hasn't published yet (retrieval+generation take seconds).
+      // By the time it publishes, this SSE subscription is already active.
+      // Browser EventSource cannot send Authorization headers; pass JWT as ?token= query param.
+      const streamUrl = `/api/v1/conversations/${activeConvIdNew}/stream?turn_index=${turnIndex}&token=${encodeURIComponent(token || "")}`;
+      let sseDone = false;
       const evtSource = new EventSource(streamUrl);
 
       // Timeout fallback — close after 60s
@@ -236,24 +259,6 @@ export default function ChatPage() {
         }
       };
 
-      // Fire the query — this publishes to Redis, SSE picks it up
-      const result = await queryAPI(q, selectedKBs, activeConvId || undefined, overrides);
-      if (!activeConvId) setActiveConvId(result.conversation_id);
-
-      // Handle typed error codes from the query response (#32, #33, #34)
-      if (result.error_code) {
-        setStreamError(result.error_code);
-
-        if (result.error_code === "retrieve:vector_store_unavailable") {
-          // Auto-retry with countdown (#34)
-          setRetryCountdown(10);
-        } else if (result.error_code === "retrieve:insufficient_evidence") {
-          // Show as normal text, not as error bar (#32)
-          // The answer is already "未找到足够信息。" — just clear streamError so no red bar
-          setStreamError(null);
-        }
-      }
-
       // If SSE didn't deliver content, use the synchronous result as fallback
       setMessages(prev => {
         const next = [...prev];
@@ -272,7 +277,7 @@ export default function ChatPage() {
         return [...next];
       });
 
-      // Wait briefly for SSE to catch up before giving up on stream
+      // Wait for SSE to deliver remaining events
       if (!sseDone) {
         await new Promise(r => setTimeout(r, 500));
       }

@@ -42,6 +42,8 @@ def _load_pipeline_with_env_vars(pipeline_name: str,
     replacements = {
         "${MILVUS_HOST}": s.milvus_host,
         "${MILVUS_PORT}": str(s.milvus_port),
+        "${EMBEDDING_MODEL}": s.embedding_model,
+        "${EMBEDDING_BASE_URL}": s.embedding_base_url,
         "${OLLAMA_BASE_URL}": s.ollama_base_url,
         "${OLLAMA_MODEL}": s.ollama_model,
         "${LLM_BASE_URL}": s.llm_base_url,
@@ -63,37 +65,84 @@ def _preload_component_modules() -> None:
     Haystack 2.3.1 的 component registry 依赖 @component 装饰器在模块导入时
     自动注册。此函数确保所有已知组件在 Pipeline.loads() 之前已完成注册。
 
-    新增自定义组件时，在此函数中添加对应的 import。
+    Haystack >=2.9 引入了反序列化可信模块白名单，自定义组件模块需要通过
+    allow_deserialization_module() 显式注册，否则 Pipeline.loads() 会拒绝加载。
+
+    每个模块独立 import + 注册——一个模块失败不影响其他模块。
+    新增自定义组件时，在此函数中添加对应的 _try_register() 调用。
     """
+    import logging
+    _log = logging.getLogger(__name__)
+
     try:
-        # Haystack 内置组件
-        import haystack.components.preprocessors.document_splitter  # noqa: F401 — DocumentSplitter
-        import haystack.components.joiners.document_joiner          # noqa: F401 — DocumentJoiner
-        import haystack.components.builders.prompt_builder          # noqa: F401 — PromptBuilder
-        import haystack.components.generators.openai                # noqa: F401 — OpenAIGenerator
-
-        # milvus-haystack 集成
-        import milvus_haystack.milvus_embedding_retriever  # noqa: F401 — MilvusEmbeddingRetriever et al.
-
-        # 本系统自定义组件（摄入 Pipeline）
-        import src.ingest.components.ollama_embedder     # noqa: F401
-        import src.ingest.components.sparse_embedder     # noqa: F401
-        import src.ingest.components.perm_enricher       # noqa: F401
-        import src.ingest.components.semantic_splitter   # noqa: F401
-        import src.ingest.components.hierarchical_splitter  # noqa: F401
-        import src.ingest.components.milvus_writer       # noqa: F401 — MilvusDocumentStoreWriter
-
-        # 本系统自定义组件（查询 Pipeline）
-        import src.retrieve.components.ollama_text_embedder   # noqa: F401
-        import src.retrieve.components.sparse_text_embedder   # noqa: F401
-        import src.retrieve.components.dense_retriever        # noqa: F401
-        import src.retrieve.components.sparse_retriever       # noqa: F401
-        import src.retrieve.components.reranker               # noqa: F401
-        import src.retrieve.components.hierarchical_merger     # noqa: F401
-        import src.retrieve.components.prefilter_injector     # noqa: F401
-        import src.retrieve.components.weighted_fusion       # noqa: F401
+        from haystack.core.serialization import allow_deserialization_module  # noqa: F401
     except ImportError:
-        pass
+        # Haystack < 2.9 — allow_deserialization_module not available,
+        # component registry relies on @component decorator side-effects alone.
+        allow_deserialization_module = None  # type: ignore
+
+    def _try_register(import_path: str, module_name: str) -> None:
+        """Import a module and optionally register it for deserialization.
+
+        Each call is independently tolerant — a failure here does not
+        prevent other modules from being registered.
+        """
+        try:
+            importlib = __import__(import_path, fromlist=["_"])
+        except ImportError:
+            _log.debug("component_module_unavailable", module=import_path)
+            return
+        if allow_deserialization_module is not None:
+            try:
+                allow_deserialization_module(module_name)
+            except Exception:
+                _log.debug("deserialization_allowlist_failed", module=module_name)
+
+    # Haystack 内置组件
+    _try_register("haystack.components.preprocessors.document_splitter",
+                  "haystack.components.preprocessors.document_splitter")
+    _try_register("haystack.components.joiners.document_joiner",
+                  "haystack.components.joiners.document_joiner")
+    _try_register("haystack.components.builders.prompt_builder",
+                  "haystack.components.builders.prompt_builder")
+    _try_register("haystack.components.generators.openai",
+                  "haystack.components.generators.openai")
+
+    # milvus-haystack 集成
+    _try_register("milvus_haystack.milvus_embedding_retriever",
+                  "milvus_haystack.milvus_embedding_retriever")
+
+    # 本系统自定义组件（摄入 Pipeline）
+    _try_register("src.ingest.components.ollama_embedder",
+                  "src.ingest.components.ollama_embedder")
+    _try_register("src.ingest.components.sparse_embedder",
+                  "src.ingest.components.sparse_embedder")
+    _try_register("src.ingest.components.perm_enricher",
+                  "src.ingest.components.perm_enricher")
+    _try_register("src.ingest.components.semantic_splitter",
+                  "src.ingest.components.semantic_splitter")
+    _try_register("src.ingest.components.hierarchical_splitter",
+                  "src.ingest.components.hierarchical_splitter")
+    _try_register("src.ingest.components.milvus_writer",
+                  "src.ingest.components.milvus_writer")
+
+    # 本系统自定义组件（查询 Pipeline）
+    _try_register("src.retrieve.components.ollama_text_embedder",
+                  "src.retrieve.components.ollama_text_embedder")
+    _try_register("src.retrieve.components.sparse_text_embedder",
+                  "src.retrieve.components.sparse_text_embedder")
+    _try_register("src.retrieve.components.dense_retriever",
+                  "src.retrieve.components.dense_retriever")
+    _try_register("src.retrieve.components.sparse_retriever",
+                  "src.retrieve.components.sparse_retriever")
+    _try_register("src.retrieve.components.reranker",
+                  "src.retrieve.components.reranker")
+    _try_register("src.retrieve.components.hierarchical_merger",
+                  "src.retrieve.components.hierarchical_merger")
+    _try_register("src.retrieve.components.prefilter_injector",
+                  "src.retrieve.components.prefilter_injector")
+    _try_register("src.retrieve.components.weighted_fusion",
+                  "src.retrieve.components.weighted_fusion")
 
 
 def run_pipeline_sync(

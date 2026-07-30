@@ -13,6 +13,9 @@ export interface QueryOverrides {
   dense_weight?: number;
   sparse_weight?: number;
   synthesis_mode?: string;
+  oversample_factor?: number;
+  min_results?: number;
+  refetch_max_rounds?: number;
 }
 
 interface Props {
@@ -33,6 +36,9 @@ export default function InputBar({ input, onInputChange, onSend, disabled, kbNam
   const [topK, setTopK] = useState(10);
   const [sparseWeight, setSparseWeight] = useState(0.5);
   const [synthesisMode, setSynthesisMode] = useState("auto");
+  const [oversampleFactor, setOversampleFactor] = useState(1.5);
+  const [minResults, setMinResults] = useState(3);
+  const [refetchMaxRounds, setRefetchMaxRounds] = useState(2);
 
   // 从 settings 页的 DB 配置加载当前 KB 的检索默认值
   useEffect(() => {
@@ -44,6 +50,9 @@ export default function InputBar({ input, onInputChange, onSend, disabled, kbNam
       if (cfg.top_k) setTopK(cfg.top_k);
       if (cfg.strict !== undefined) setStrict(cfg.strict);
       if (cfg.sparse_weight !== undefined) setSparseWeight(cfg.sparse_weight);
+      if (cfg.oversample_factor) setOversampleFactor(cfg.oversample_factor);
+      if (cfg.min_results !== undefined) setMinResults(cfg.min_results);
+      if (cfg.refetch_max_rounds !== undefined) setRefetchMaxRounds(cfg.refetch_max_rounds);
     }).catch(() => {});
   }, [kbId]);
 
@@ -66,6 +75,9 @@ export default function InputBar({ input, onInputChange, onSend, disabled, kbNam
         synthesis_mode: synthesisMode,
         dense_weight: Math.round((1 - sparseWeight) * 100) / 100,
         sparse_weight: Math.round(sparseWeight * 100) / 100,
+        oversample_factor: oversampleFactor,
+        min_results: minResults,
+        refetch_max_rounds: refetchMaxRounds,
       });
     } else {
       onSend(undefined);
@@ -110,6 +122,25 @@ export default function InputBar({ input, onInputChange, onSend, disabled, kbNam
             <input type="range" min={1} max={50} value={topK}
               onChange={(e) => setTopK(parseInt(e.target.value))}
               className="w-full h-1.5 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-blue-600" />
+          </div>
+
+          <div>
+            <label className="text-xs text-gray-500 block mb-1">过采样: <span className="font-bold">{oversampleFactor.toFixed(1)}x</span></label>
+            <input type="range" min={1.0} max={3.0} step={0.1} value={oversampleFactor}
+              onChange={(e) => setOversampleFactor(parseFloat(e.target.value))}
+              className="w-full h-1.5 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-cyan-500" />
+          </div>
+          <div>
+            <label className="text-xs text-gray-500 block mb-1">最少结果: <span className="font-bold">{minResults}</span></label>
+            <input type="range" min={1} max={20} step={1} value={minResults}
+              onChange={(e) => setMinResults(parseInt(e.target.value))}
+              className="w-full h-1.5 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-cyan-500" />
+          </div>
+          <div>
+            <label className="text-xs text-gray-500 block mb-1">补检索轮数: <span className="font-bold">{refetchMaxRounds}</span></label>
+            <input type="range" min={0} max={5} step={1} value={refetchMaxRounds}
+              onChange={(e) => setRefetchMaxRounds(parseInt(e.target.value))}
+              className="w-full h-1.5 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-cyan-500" />
           </div>
 
           {/* Weight slider — only when weighted_sum is selected */}

@@ -44,6 +44,9 @@ class QueryRequest(BaseModel):
     dense_weight: float = 0.5                   # dense 路权重 (weighted_sum 模式)
     sparse_weight: float = 0.5                  # sparse 路权重 (weighted_sum 模式)
     synthesis_mode: Optional[str] = None         # compact / refine / tree_summarize / no_synthesis / auto
+    oversample_factor: Optional[float] = None    # 过采样系数（默认 1.5）
+    min_results: Optional[int] = None            # 最小结果数（补检索触发阈值，默认 3）
+    refetch_max_rounds: Optional[int] = None     # 最大补检索轮数（默认 2）
 
 
 class QueryResponse(BaseModel):
@@ -129,7 +132,15 @@ async def query(request: QueryRequest, ctx: RequestContext = Depends(get_request
     # 3. 铸造 ctx_token（替代 JWT 原文传给 worker，TTL ≤600s）
     ctx_token = mint_ctx_token(ctx, audience="retrieval-worker", ttl_s=600)
 
-    # 4. 分发到 retrieval_queue（API 进程不执行任何 Pipeline 计算）
+    # 4. 从 P-CONFIG 解析 Pipeline 名称（§12.1 haystack_pipeline_name）
+    #    检索时实际 Pipeline 由 retrieve() 按 retrieval_mode + fusion_mode 动态选择；
+    #    haystack_pipeline_name 作为 KB 粒度的默认/后备 Pipeline 标识，
+    #    写入 conversation_turn 参数快照供审计追溯。
+    from src.platform.config.service import resolve_retrieval_config
+    kb_id = request.kb_ids[0] if request.kb_ids else ""
+    retrieval_cfg = resolve_retrieval_config(kb_id=kb_id, tenant_id=ctx.tenant_id)
+
+    # 5. 分发到 retrieval_queue（API 进程不执行任何 Pipeline 计算）
     retrieve_and_generate_task.delay(
         conversation_id=conv_id,
         turn_index=turn_index,
@@ -137,7 +148,7 @@ async def query(request: QueryRequest, ctx: RequestContext = Depends(get_request
         kb_ids=request.kb_ids,
         tenant_id=ctx.tenant_id,
         ctx_token=ctx_token,
-        pipeline_name="query_v4",
+        pipeline_name=retrieval_cfg.haystack_pipeline_name,
         yaml_version="v1",
         retrieval_mode=request.retrieval_mode,
         fusion_method=request.fusion_method,
@@ -146,9 +157,12 @@ async def query(request: QueryRequest, ctx: RequestContext = Depends(get_request
         dense_weight=request.dense_weight,
         sparse_weight=request.sparse_weight,
         synthesis_mode=request.synthesis_mode,
+        oversample_factor=request.oversample_factor,
+        min_results=request.min_results,
+        refetch_max_rounds=request.refetch_max_rounds,
     )
 
-    # 5. 立即返回 — answer 和 chunk_ids 由 worker 经 Redis Pub/Sub → SSE 推送
+    # 6. 立即返回 — answer 和 chunk_ids 由 worker 经 Redis Pub/Sub → SSE 推送
     return QueryResponse(
         answer="",          # dispatched to worker — results via SSE
         chunk_ids=[],       # dispatched to worker — sources via SSE "retrieved" event
@@ -163,11 +177,14 @@ async def query_stream(conversation_id: str, turn_index: int = 1):
     """SSE 流式订阅查询结果。
 
     从 Redis Pub/Sub 转发流事件到客户端。
+    §9.3: 设 30s 空闲超时——无消息即发 error 断开。
     """
     from src.config import Settings
     import redis
+    import time as _time
 
     s = Settings()
+    SSE_IDLE_TIMEOUT = 30  # 秒，设计 §9.3
 
     async def _stream():
         r = redis.from_url(s.redis_url)
@@ -175,22 +192,41 @@ async def query_stream(conversation_id: str, turn_index: int = 1):
         channel = f"query-stream:{conversation_id}:{turn_index}"
         pubsub.subscribe(channel)
 
-        try:
-            for message in pubsub.listen():
-                if message["type"] == "message":
-                    data = json.loads(message["data"])
-                    event_type = data.get("event", "unknown")
+        last_msg_time = _time.time()
 
-                    if event_type == "retrieved":
-                        yield f"event: retrieved\ndata: {json.dumps(data, default=str)}\n\n"
-                    elif event_type == "token":
-                        yield f"event: token\ndata: {json.dumps(data, default=str)}\n\n"
-                    elif event_type == "done":
-                        yield f"event: done\ndata: {json.dumps(data, default=str)}\n\n"
+        try:
+            while True:
+                # 非阻塞获取消息，超时 1s 便于检查空闲时长
+                message = pubsub.get_message(timeout=1.0)
+                if message is None:
+                    # 检查是否超过空闲超时
+                    if _time.time() - last_msg_time > SSE_IDLE_TIMEOUT:
+                        error_data = json.dumps({
+                            "event": "error",
+                            "error_code": "chat:stream_timeout",
+                            "message": "流式传输超时，请重试",
+                        }, default=str)
+                        yield f"event: error\ndata: {error_data}\n\n"
                         break
-                    elif event_type == "error":
-                        yield f"event: error\ndata: {json.dumps(data, default=str)}\n\n"
-                        break
+                    continue
+
+                if message["type"] != "message":
+                    continue
+
+                last_msg_time = _time.time()
+                data = json.loads(message["data"])
+                event_type = data.get("event", "unknown")
+
+                if event_type == "retrieved":
+                    yield f"event: retrieved\ndata: {json.dumps(data, default=str)}\n\n"
+                elif event_type == "token":
+                    yield f"event: token\ndata: {json.dumps(data, default=str)}\n\n"
+                elif event_type == "done":
+                    yield f"event: done\ndata: {json.dumps(data, default=str)}\n\n"
+                    break
+                elif event_type == "error":
+                    yield f"event: error\ndata: {json.dumps(data, default=str)}\n\n"
+                    break
         finally:
             pubsub.close()
             r.close()

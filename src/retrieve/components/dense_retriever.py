@@ -53,37 +53,40 @@ class MilvusDenseRetriever:
         Dict filters → milvus-haystack MilvusEmbeddingRetriever (standard path).
         Str filters  → direct PyMilvus search (json_contains/not_json_contains).
         """
-        # String expression → direct PyMilvus (json_contains operators)
+        # String expression → MilvusClient (json_contains operators)
+        # MilvusClient handles connection management internally — no explicit
+        # connect/load needed. Replaces deprecated ORM-style API
+        # (connections.connect / Collection / Collection.load / Collection.search).
         if isinstance(filters, str):
-            from pymilvus import connections, Collection
-            connections.connect("default", host=self.milvus_host, port=str(self.milvus_port))
-            col = Collection(self.collection_name)
-            col.load()
-            try:
-                hits = col.search(
-                    [query_embedding], "vector",
-                    {"metric_type": "IP", "params": {"nprobe": 16}},
-                    self.top_k, filters,
-                    output_fields=["content", "document_id", "kb_id", "vis_version"],
-                )
-                docs = []
-                if hits and hits[0]:
-                    for h in hits[0]:
-                        fields = h.entity.fields
-                        doc = Document(
-                            content=fields.get("content", ""),
-                            meta={
-                                "document_id": fields.get("document_id", ""),
-                                "kb_id": fields.get("kb_id", ""),
-                                "score": h.distance,
-                                "source": "dense",
-                            },
-                        )
-                        doc.id = str(h.id)
-                        docs.append(doc)
-                return {"documents": docs}
-            finally:
-                pass  # keep connection for shared use
+            from dataclasses import replace
+            from pymilvus import MilvusClient
+
+            client = MilvusClient(uri=f"http://{self.milvus_host}:{self.milvus_port}")
+            hits = client.search(
+                collection_name=self.collection_name,
+                data=[query_embedding],
+                anns_field="vector",
+                filter=filters,
+                limit=self.top_k,
+                output_fields=["content", "document_id", "kb_id", "vis_version"],
+                search_params={"metric_type": "IP", "params": {"nprobe": 16}},
+            )
+            docs = []
+            if hits and hits[0]:
+                for h in hits[0]:
+                    entity = h.get("entity", {})
+                    doc = Document(
+                        content=entity.get("content", ""),
+                        meta={
+                            "document_id": entity.get("document_id", ""),
+                            "kb_id": entity.get("kb_id", ""),
+                            "score": h.get("distance", 0.0),
+                            "source": "dense",
+                        },
+                    )
+                    doc = replace(doc, id=str(h.get("id", "")))
+                    docs.append(doc)
+            return {"documents": docs}
 
         # Dict (or None) → standard milvus-haystack path
         retriever = self._get_retriever()

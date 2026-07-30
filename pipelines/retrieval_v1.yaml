@@ -2,7 +2,7 @@ components:
   text_embedder:
     type: src.retrieve.components.ollama_text_embedder.OllamaTextEmbedder
     init_parameters:
-      model: qwen3-embedding:0.6b
+      model: ${EMBEDDING_MODEL}
   retriever:
     type: src.retrieve.components.dense_retriever.MilvusDenseRetriever
     init_parameters:

@@ -18,7 +18,7 @@ class RetrievalConfig:
     top_k: int = 10
     retrieval_mode: str = "hybrid"
     fusion_method: str = "rrf"
-    synthesis_mode: str = "compact"
+    synthesis_mode: str = "auto"
     rerank_model_id: str = ""
     strict: bool = False
     oversample_factor: float = 1.5

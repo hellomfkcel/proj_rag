@@ -13,6 +13,8 @@ class OllamaDocumentEmbedder:
     """Document embedder that calls Ollama via P-MODEL."""
 
     def __init__(self, model: str = "qwen3-embedding:0.6b"):
+        # Model name is normally provided by Pipeline YAML via ${EMBEDDING_MODEL}
+        # env var placeholder; this default is a fallback for direct instantiation.
         self.model = model
 
     @component.output_types(documents=List[Document])

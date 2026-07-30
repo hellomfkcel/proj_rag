@@ -94,6 +94,36 @@ def resolve_model(model_id: str) -> ModelConfig:
     return ModelConfig(s.llm_model, s.llm_base_url, s.llm_api_key, "ollama", "llm")
 
 
+def _resolve_default_reranker() -> Optional[ModelConfig]:
+    """Resolve the default reranker model from model_registry DB table.
+
+    Returns None if no default reranker is configured.
+    """
+    async def _query():
+        conn = await asyncpg.connect(_get_db_dsn())
+        try:
+            row = await conn.fetchrow(
+                "SELECT model_name, base_url, api_key, provider, model_type "
+                "FROM model_registry WHERE model_type='reranker' AND is_default=true "
+                "LIMIT 1")
+            if row:
+                return ModelConfig(
+                    model_name=row["model_name"],
+                    base_url=row["base_url"] or "",
+                    api_key=row["api_key"] or "",
+                    provider=row["provider"] or "",
+                    model_type=row["model_type"] or "reranker",
+                )
+        finally:
+            await conn.close()
+        return None
+
+    try:
+        return _run_async(_query())
+    except Exception:
+        return None
+
+
 # ── invoke_embedding（provider-aware）────────────────────────────
 
 def invoke_embedding(texts: List[str], mode: str = "document") -> List[List[float]]:
@@ -233,10 +263,10 @@ def invoke_llm(prompt: str, model_id: Optional[str] = None) -> str:
 # ── invoke_rerank ───────────────────────────────────────────────
 
 _reranker_cache: Dict[str, Any] = {}
-_DEFAULT_RERANK_MODEL = "BAAI/bge-reranker-v2-m3"
+_DEFAULT_RERANK_MODEL_NAME = "BAAI/bge-reranker-v2-m3"
 
 
-def _get_reranker(model_name: str = _DEFAULT_RERANK_MODEL):
+def _get_reranker(model_name: str = _DEFAULT_RERANK_MODEL_NAME):
     """Get or create a reranker instance by model name (cached)."""
     if model_name not in _reranker_cache:
         from FlagEmbedding import FlagReranker
@@ -245,15 +275,28 @@ def _get_reranker(model_name: str = _DEFAULT_RERANK_MODEL):
 
 
 def invoke_rerank(query: str, documents: List[str], model_name: str = "") -> List[str]:
-    """Re-rank documents using BGE Reranker (P1-6: dynamic model support).
+    """Re-rank documents using BGE Reranker.
 
-    Args:
-        query: The search query.
-        documents: List of document contents to re-rank.
-        model_name: Reranker model name (default: BAAI/bge-reranker-v2-m3).
-                   Can be overridden via P-CONFIG rerank_model_id.
+    Model resolution order (§11.1):
+    1. model_name parameter (from P-CONFIG rerank_model_id → resolve_model)
+    2. DB model_registry (reranker type, is_default=true)
+    3. Fallback: BAAI/bge-reranker-v2-m3
     """
-    effective_model = model_name or _DEFAULT_RERANK_MODEL
+    effective_model = model_name
+
+    # If no model specified, try to resolve from DB model_registry
+    if not effective_model:
+        try:
+            # Find default reranker from model_registry
+            cfg = _resolve_default_reranker()
+            if cfg:
+                effective_model = cfg.model_name
+                log.info("rerank_model_from_db", model_name=effective_model)
+        except Exception:
+            pass
+
+    if not effective_model:
+        effective_model = _DEFAULT_RERANK_MODEL_NAME
 
     # OTel span
     span = None

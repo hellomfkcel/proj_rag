@@ -474,7 +474,12 @@ class CerbosClient:
         self, request_id: str, credential: str,
         resource_type: str, resource_id: str, owner: str,
     ) -> str:
-        """注册资源到权限服务镜像 → INSERT resource_registry。"""
+        """注册资源到权限服务镜像 → INSERT resource_registry。
+
+        Raises:
+            RuntimeError: 注册失败时抛出，调用方必须回滚本地事务。
+            设计依据 §13.7："调用失败即回滚本地业务事务"。
+        """
 
         async def _do():
             conn = await asyncpg.connect(_dsn())
@@ -494,13 +499,20 @@ class CerbosClient:
         try:
             return _run_async(_do())
         except Exception as exc:
-            log.warning("register_failed", type=resource_type, id=resource_id, error=str(exc))
-            return f"reg-{resource_type}-{resource_id}"
+            log.error("register_failed", type=resource_type, id=resource_id, error=str(exc))
+            raise RuntimeError(
+                f"Failed to register {resource_type}/{resource_id} in permission service: {exc}"
+            ) from exc
 
     def link_resource(
         self, request_id: str, credential: str, doc_id: str, kb_id: str,
     ) -> str:
-        """建立文档到 KB 的挂载镜像 → INSERT mount_registry。"""
+        """建立文档到 KB 的挂载镜像 → INSERT mount_registry。
+
+        Raises:
+            RuntimeError: 挂载失败时抛出，调用方必须回滚本地事务。
+            设计依据 §13.7："调用失败即回滚本地业务事务"。
+        """
 
         async def _do():
             conn = await asyncpg.connect(_dsn())
@@ -533,13 +545,19 @@ class CerbosClient:
         try:
             return _run_async(_do())
         except Exception as exc:
-            log.warning("link_failed", doc_id=doc_id, kb_id=kb_id, error=str(exc))
-            return f"link-{doc_id}-{kb_id}"
+            log.error("link_failed", doc_id=doc_id, kb_id=kb_id, error=str(exc))
+            raise RuntimeError(
+                f"Failed to link {doc_id} to {kb_id} in permission service: {exc}"
+            ) from exc
 
     def unlink_resource(
         self, request_id: str, credential: str, doc_id: str, kb_id: str,
     ) -> str:
-        """解除文档到 KB 的挂载镜像 → UPDATE mount_registry SET unlinked=true。"""
+        """解除文档到 KB 的挂载镜像 → UPDATE mount_registry SET unlinked=true。
+
+        Raises:
+            RuntimeError: 解除挂载失败时抛出，调用方必须回滚本地事务。
+        """
 
         async def _do():
             conn = await asyncpg.connect(_dsn())
@@ -557,14 +575,21 @@ class CerbosClient:
         try:
             return _run_async(_do())
         except Exception as exc:
-            log.warning("unlink_failed", doc_id=doc_id, kb_id=kb_id, error=str(exc))
-            return f"unlink-{doc_id}-{kb_id}"
+            log.error("unlink_failed", doc_id=doc_id, kb_id=kb_id, error=str(exc))
+            raise RuntimeError(
+                f"Failed to unlink {doc_id} from {kb_id} in permission service: {exc}"
+            ) from exc
 
     def retire_resource(
         self, request_id: str, credential: str,
         resource_type: str, resource_id: str,
     ) -> str:
-        """退役资源 → UPDATE resource_registry SET retired=true + 级联删除所有挂载。"""
+        """退役资源 → UPDATE resource_registry SET retired=true + 级联删除所有挂载。
+
+        Raises:
+            RuntimeError: 退役失败时抛出，调用方必须回滚本地事务。
+            设计依据 §13.7："调用失败即回滚本地业务事务"。
+        """
 
         async def _do():
             conn = await asyncpg.connect(_dsn())
@@ -592,8 +617,10 @@ class CerbosClient:
         try:
             return _run_async(_do())
         except Exception as exc:
-            log.warning("retire_failed", type=resource_type, id=resource_id, error=str(exc))
-            return f"retire-{resource_type}-{resource_id}"
+            log.error("retire_failed", type=resource_type, id=resource_id, error=str(exc))
+            raise RuntimeError(
+                f"Failed to retire {resource_type}/{resource_id} in permission service: {exc}"
+            ) from exc
 
     def _headers(self, client_id: str) -> Dict[str, str]:
         return {

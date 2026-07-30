@@ -7,15 +7,8 @@ This component bypasses the broken write_documents() and uses pymilvus directly.
 from typing import Any, Dict, List
 
 from haystack import Document, component
-from pymilvus import Collection, connections, DataType
+from pymilvus import MilvusClient
 
-
-COLLECTION_SCHEMA = {
-    "id": DataType.VARCHAR,
-    "content": DataType.VARCHAR,
-    "vector": DataType.FLOAT_VECTOR,
-    "sparse_vector": DataType.SPARSE_FLOAT_VECTOR,
-}
 
 # BGE-M3 embedding dimensions (dense=1024, sparse=250002)
 DENSE_DIM = 1024
@@ -23,9 +16,10 @@ DENSE_DIM = 1024
 
 @component
 class MilvusDocumentStoreWriter:
-    """Write Haystack Documents to Milvus via direct pymilvus API.
+    """Write Haystack Documents to Milvus via MilvusClient API.
 
-    Bypasses milvus-haystack's broken write_documents() in pymilvus 2.5.x.
+    Uses the recommended MilvusClient API (pymilvus >= 2.6) instead of the
+    deprecated ORM-style Collection/connections API.
     """
 
     def __init__(
@@ -37,22 +31,18 @@ class MilvusDocumentStoreWriter:
         self._collection_name = collection_name
         self._milvus_host = milvus_host
         self._milvus_port = str(milvus_port)
-        self._collection: Any = None
+        self._client: Any = None
 
-    def _get_collection(self) -> Collection:
-        if self._collection is None:
-            # Connect to Milvus
-            connections.connect(
-                alias="default",
-                host=self._milvus_host,
-                port=self._milvus_port,
+    def _get_client(self) -> MilvusClient:
+        if self._client is None:
+            self._client = MilvusClient(
+                uri=f"http://{self._milvus_host}:{self._milvus_port}"
             )
-            self._collection = Collection(self._collection_name)
-        return self._collection
+        return self._client
 
     @component.output_types(documents=List[Document])
     def run(self, documents: List[Document]):
-        col = self._get_collection()
+        client = self._get_client()
 
         # Prepare data rows for insertion
         data: List[Dict[str, Any]] = []
@@ -84,13 +74,11 @@ class MilvusDocumentStoreWriter:
 
         if data:
             try:
-                col.insert(data)
-                col.flush()
+                client.insert(self._collection_name, data)
             except Exception as exc:
-                # Fallback: try upsert-style insert
+                # Fallback: try upsert (MilvusClient handles flush internally)
                 try:
-                    col.upsert(data)
-                    col.flush()
+                    client.upsert(self._collection_name, data)
                 except Exception:
                     # Re-raise original error for task retry
                     raise exc
