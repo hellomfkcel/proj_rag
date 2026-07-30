@@ -5,15 +5,15 @@
 # ========================================================
 
 # ── Haystack 核心 ────────────────────────────────────────
-haystack-ai==2.3.1
-haystack-experimental==0.2.0
+haystack-ai>=2.19.0
 
 # ── Haystack 官方 Integration ────────────────────────────
-milvus-haystack==0.0.18
+haystack-experimental>=0.19.0
 FlagEmbedding==1.4.0
 
 # ── 向量库客户端 ──────────────────────────────────────────
-pymilvus==2.5.6
+milvus-haystack==0.0.18
+pymilvus>=2.6.15,<3.0.0   # 3.x 有 breaking changes，暂持观望
 
 # ── LLM 网关 ─────────────────────────────────────────────
 litellm==1.42.0

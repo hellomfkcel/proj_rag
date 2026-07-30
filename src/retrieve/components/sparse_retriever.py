@@ -39,68 +39,64 @@ class MilvusSparseRetriever:
         query_sparse_embedding: SparseEmbedding from BGE_M3SparseTextEmbedder
         filters: Milvus expression string (from _compile_filter_expr) or dict
         """
-        from pymilvus import connections, Collection
+        from dataclasses import replace
+        from pymilvus import MilvusClient
         from milvus_haystack.filters import parse_filters
 
-        connections.connect(
-            "default", host=self.milvus_host, port=str(self.milvus_port)
-        )
-        col = Collection(self.collection_name, using="default")
-        col.load()
+        # MilvusClient handles connection management internally — no explicit
+        # connect/load needed. Replaces deprecated ORM-style API
+        # (connections.connect / Collection / Collection.load / Collection.search).
+        client = MilvusClient(uri=f"http://{self.milvus_host}:{self.milvus_port}")
 
-        try:
-            # Build sparse vector for search.
-            # BGE_M3SparseTextEmbedder outputs {token_id: weight} directly —
-            # this is already a valid pymilvus sparse vector, no extra unwrapping needed.
-            # Only unwrap if the dict has an explicit "sparse_vector" key (legacy wrapper).
-            if hasattr(query_sparse_embedding, "sparse_vector"):
-                sparse_vec = query_sparse_embedding.sparse_vector
-            elif isinstance(query_sparse_embedding, dict):
-                if "sparse_vector" in query_sparse_embedding:
-                    sparse_vec = query_sparse_embedding["sparse_vector"]
-                else:
-                    sparse_vec = query_sparse_embedding
+        # Build sparse vector for search.
+        # BGE_M3SparseTextEmbedder outputs {token_id: weight} directly —
+        # this is already a valid pymilvus sparse vector, no extra unwrapping needed.
+        # Only unwrap if the dict has an explicit "sparse_vector" key (legacy wrapper).
+        if hasattr(query_sparse_embedding, "sparse_vector"):
+            sparse_vec = query_sparse_embedding.sparse_vector
+        elif isinstance(query_sparse_embedding, dict):
+            if "sparse_vector" in query_sparse_embedding:
+                sparse_vec = query_sparse_embedding["sparse_vector"]
             else:
                 sparse_vec = query_sparse_embedding
+        else:
+            sparse_vec = query_sparse_embedding
 
-            # Compile filter expression: str → use directly, dict → parse_filters
-            if isinstance(filters, str):
-                expr = filters
-            elif filters:
-                try:
-                    expr = parse_filters(filters)
-                except Exception:
-                    expr = None
-            else:
+        # Compile filter expression: str → use directly, dict → parse_filters
+        if isinstance(filters, str):
+            expr = filters
+        elif filters:
+            try:
+                expr = parse_filters(filters)
+            except Exception:
                 expr = None
+        else:
+            expr = None
 
-            search_params = {"metric_type": "IP", "params": {"nprobe": 16}}
+        hits = client.search(
+            collection_name=self.collection_name,
+            data=[sparse_vec],
+            anns_field="sparse_vector",
+            filter=expr,
+            limit=self.top_k,
+            output_fields=["content", "document_id", "kb_id", "vis_version"],
+            search_params={"metric_type": "IP", "params": {"nprobe": 16}},
+        )
 
-            hits = col.search(
-                [sparse_vec],
-                "sparse_vector",
-                search_params,
-                self.top_k,
-                expr,
-                output_fields=["content", "document_id", "kb_id", "vis_version"],
-            )
-
-            docs = []
+        docs = []
+        if hits and hits[0]:
             for h in hits[0]:
-                fields = h.entity.fields
+                entity = h.get("entity", {})
                 doc = Document(
-                    content=fields.get("content", ""),
+                    content=entity.get("content", ""),
                     meta={
-                        "document_id": fields.get("document_id", ""),
-                        "kb_id": fields.get("kb_id", ""),
-                        "score": h.distance,
-                        "score": h.distance,
+                        "document_id": entity.get("document_id", ""),
+                        "kb_id": entity.get("kb_id", ""),
+                        "score": h.get("distance", 0.0),
                         "source": "sparse",
                     },
                 )
-                doc.id = str(h.id)
+                doc = replace(doc, id=str(h.get("id", "")))
                 docs.append(doc)
 
-            return {"documents": docs}
-        finally:
-            pass  # keep connection alive — shared with dense_retriever
+        return {"documents": docs}

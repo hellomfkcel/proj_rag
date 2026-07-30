@@ -13,7 +13,16 @@
       "Bash(curl -s -o /dev/null -w \"  HTTP %{http_code}, Size: %{size_download} bytes\\\\n\" http://localhost:3001/)",
       "Bash(PYTHONPATH=/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages conda run *)",
       "Bash(/home/mfkcel/miniconda3/envs/rag_dev_v14/bin/python *)",
-      "Bash(npx tsc *)"
+      "Bash(npx tsc *)",
+      "Bash(git *)",
+      "Bash(PYTHONPATH=/home/mfkcel/proj_rag_dev conda run -n rag_dev_v14 python -c ' *)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:8000/api/v1/ping)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:8000/api/v1/conversations)",
+      "Bash(curl -s http://localhost:8000/api/v1/conversations)",
+      "Bash(curl -s http://localhost:8000/openapi.json)",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); [print\\(p\\) for p in sorted\\(d.get\\('paths',{}\\).keys\\(\\)\\)]\")",
+      "Bash(curl *)",
+      "Bash(awk '{print $2}')"
     ]
   }
 }

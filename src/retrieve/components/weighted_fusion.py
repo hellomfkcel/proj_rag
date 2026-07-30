@@ -8,6 +8,7 @@
   fuse(dense_results, sparse_results) → list[Document]
 """
 
+from dataclasses import replace
 from typing import Any, Dict, Iterable, List, Optional
 
 from typing_extensions import Annotated
@@ -99,7 +100,7 @@ class WeightedFusionJoiner:
             scores[doc.id] = scores.get(doc.id, 0.0) + score * w_b
 
         for doc_id, doc in seen.items():
-            doc.score = scores[doc_id]
+            seen[doc_id] = replace(doc, score=scores[doc_id])
 
         return list(seen.values())
 
@@ -140,6 +141,6 @@ class WeightedFusionJoiner:
             scores[doc.id] = scores.get(doc.id, 0.0) + wb / (k + rank + 1)
 
         for doc_id, doc in seen.items():
-            doc.score = scores[doc_id]
+            seen[doc_id] = replace(doc, score=scores[doc_id])
 
         return list(seen.values())

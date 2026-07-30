@@ -17,6 +17,9 @@ export interface QueryOverrides {
   dense_weight?: number;
   sparse_weight?: number;
   synthesis_mode?: string;
+  oversample_factor?: number;
+  min_results?: number;
+  refetch_max_rounds?: number;
 }
 
 export interface QueryResult {
@@ -59,6 +62,9 @@ export async function query(question: string, kbIds: string[], convId?: string, 
     dense_weight: overrides?.dense_weight,
     sparse_weight: overrides?.sparse_weight,
     synthesis_mode: overrides?.synthesis_mode,
+    oversample_factor: overrides?.oversample_factor,
+    min_results: overrides?.min_results,
+    refetch_max_rounds: overrides?.refetch_max_rounds,
   });
   return data;
 }

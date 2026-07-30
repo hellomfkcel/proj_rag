@@ -7,6 +7,7 @@ reconstructing the parent document context around each retrieved chunk.
 Design reference: RAG系统设计v14.md §15.5
 """
 
+from dataclasses import replace
 from typing import Any, Dict, List, Optional
 from haystack import component, Document
 from src.platform.obs.logger import get_logger
@@ -46,8 +47,6 @@ class HierarchicalMerger:
         if len(documents) <= 1:
             return {"documents": documents}
 
-        from pymilvus import connections, Collection
-
         # Group chunks by document_id
         doc_groups: Dict[str, List[Document]] = {}
         for d in documents:
@@ -62,11 +61,10 @@ class HierarchicalMerger:
             return {"documents": documents}
 
         try:
+            from pymilvus import MilvusClient
             from src.config import Settings
             s = Settings()
-            connections.connect("merger", host=s.milvus_host, port=str(s.milvus_port))
-            col = Collection("rag_documents")
-            col.load()
+            client = MilvusClient(uri=f"http://{s.milvus_host}:{s.milvus_port}")
 
             merged: List[Document] = []
             seen_content: set = set()
@@ -74,8 +72,9 @@ class HierarchicalMerger:
             for doc_id, chunks in doc_groups.items():
                 # Get all chunk IDs for this document from Milvus
                 try:
-                    results = col.query(
-                        expr=f'document_id == "{doc_id}"',
+                    results = client.query(
+                        collection_name="rag_documents",
+                        filter=f'document_id == "{doc_id}"',
                         output_fields=["content", "document_id"],
                         limit=self.max_total_chunks * 2,
                     )
@@ -124,12 +123,11 @@ class HierarchicalMerger:
                                 "window_end": end,
                             },
                         )
-                        merged_doc.id = chunk.id
+                        merged_doc = replace(merged_doc, id=chunk.id)
                         merged.append(merged_doc)
                     elif chunk_content not in [m.content for m in merged]:
                         merged.append(chunk)
 
-            connections.disconnect("merger")
             log.debug("hierarchical_merge_complete",
                      input_count=len(documents),
                      output_count=len(merged))

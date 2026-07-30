@@ -42,6 +42,9 @@ def retrieve_and_generate_task(
     dense_weight: float = 0.5,
     sparse_weight: float = 0.5,
     synthesis_mode: Optional[str] = None,
+    oversample_factor: Optional[float] = None,
+    min_results: Optional[int] = None,
+    refetch_max_rounds: Optional[int] = None,
 ) -> Dict[str, Any]:
     """检索 + 生成 Celery 任务。
 
@@ -82,6 +85,9 @@ def retrieve_and_generate_task(
     effective_fusion = fusion_method or retrieval_cfg.fusion_method
     effective_strict = strict if strict is not None else retrieval_cfg.strict
     effective_top_k = top_k or retrieval_cfg.top_k
+    effective_oversample = oversample_factor or retrieval_cfg.oversample_factor
+    effective_min_results = min_results if min_results is not None else retrieval_cfg.min_results
+    effective_refetch = refetch_max_rounds if refetch_max_rounds is not None else retrieval_cfg.refetch_max_rounds
 
     ret = retrieve(
         query=resolved_query,
@@ -95,6 +101,9 @@ def retrieve_and_generate_task(
         dense_weight=dense_weight,
         sparse_weight=sparse_weight,
         strict=effective_strict,
+        oversample_factor=effective_oversample,
+        min_results=effective_min_results,
+        refetch_max_rounds=effective_refetch,
     )
 
     documents = ret.get("documents", [])
@@ -291,8 +300,8 @@ def validate_citations(answer: str, candidate_chunk_ids: set) -> str:
     if not found_any and len(answer) > 50:
         # 答案中没有引用任何已知 chunk_id → 可能是幻觉生成
         log.warning("citation_validation_no_match",
-                   answer_len=len(answer),
-                   candidate_count=len(candidate_chunk_ids))
+                    answer_len=len(answer),
+                    candidate_count=len(candidate_chunk_ids))
 
     return cleaned
 
@@ -304,8 +313,11 @@ def validate_citations(answer: str, candidate_chunk_ids: set) -> str:
 def check_verbatim_ratio(answer: str, documents: list, threshold: float = 0.60) -> str:
     """检测 LLM 是否逐字复述超过 chunk 原文 60%。
 
-    对每个候选 chunk 计算最长公共子串长度 / chunk 长度。
-    超阈值的片段用 "[原文引用 #N]" 替代。
+    设计依据 §16.4：LLM 不得逐字复述超出必要长度的原文，
+    否则 doc:retrieve 权限被当作 doc:download 用。
+
+    对每个候选 chunk 查找最长公共子串，若比率超阈值：
+    将超限片段替换为 "[原文引用 #N]" 标记，而非仅追加提示。
     返回处理后的 answer。
     """
     if not answer or not documents:
@@ -318,50 +330,71 @@ def check_verbatim_ratio(answer: str, documents: list, threshold: float = 0.60) 
         if len(content) < 20:  # skip very short chunks
             continue
 
-        # 找 answer 中与 chunk 的最长公共子串
-        lcs_len = _longest_common_substring_length(cleaned, content)
+        # 找 answer 中与 chunk 的最长公共子串及其位置
+        lcs_text, lcs_start = _longest_common_substring(cleaned, content)
 
-        ratio = lcs_len / len(content)
+        if not lcs_text or lcs_start < 0:
+            continue
+
+        ratio = len(lcs_text) / len(content)
         if ratio > threshold:
             log.warning("verbatim_guard_triggered",
                        doc_index=i,
                        ratio=round(ratio, 3),
-                       lcs_len=lcs_len,
+                       lcs_len=len(lcs_text),
                        chunk_len=len(content),
-                       answer_len=len(cleaned))
+                       answer_len=len(cleaned),
+                       lcs_start=lcs_start)
 
-            # 截断策略：在 answer 末尾追加引用提示
-            if f"[原文引用 #{i+1}]" not in cleaned[-200:]:
-                cleaned += f"\n\n[原文引用 #{i+1}：为避免长段复制，此处改为引用原文]"
+            # 截断策略 §16.4：将逐字复述的超限文本替换为引用标记
+            # 保留原文本前 100 字符作为摘要，其余替换为引用提示
+            snippet = lcs_text[:100]
+            replacement = (
+                f"[原文引用 #{i+1} — 基于检索结果，详细内容请查看源文档]\n"
+                f"> {snippet}..."
+            )
+            lcs_end = lcs_start + len(lcs_text)
+            cleaned = cleaned[:lcs_start] + replacement + cleaned[lcs_end:]
 
-            break  # 只报告第一个超限
+            break  # 只处理第一个超限（最长的匹配）
 
     return cleaned
 
 
-def _longest_common_substring_length(a: str, b: str) -> int:
-    """计算两个字符串的最长公共子串长度。
+def _longest_common_substring(a: str, b: str) -> tuple:
+    """返回两个字符串的最长公共子串及其在 a 中的起始位置。
 
-    使用动态规划，O(n*m)，对大文本做截断保护。
+    使用动态规划 O(n*m)，对大文本做截断保护。
+    返回 (substring, start_position_in_a)，若找不到公共子串返回 ("", -1)。
     """
     a = a[:5000]
     b = b[:5000]
     m, n = len(a), len(b)
-    max_len = 0
 
     # 滚动数组降低空间复杂度
     prev = [0] * (n + 1)
+    max_len = 0
+    end_pos = 0  # 在 a 中的结束位置
+
     for i in range(1, m + 1):
         curr = [0] * (n + 1)
         for j in range(1, n + 1):
             if a[i - 1] == b[j - 1]:
                 curr[j] = prev[j - 1] + 1
-                max_len = max(max_len, curr[j])
+                if curr[j] > max_len:
+                    max_len = curr[j]
+                    end_pos = i
         prev = curr
 
-    return max_len
+    if max_len == 0:
+        return ("", -1)
 
-    return cleaned
+    start_pos = end_pos - max_len
+    return (a[start_pos:end_pos], start_pos)
+
+
+# 保留旧函数名以兼容现有调用（如测试）
+_longest_common_substring_length = lambda a, b: len(_longest_common_substring(a, b)[0])
 
 
 # ══════════════════════════════════════════════════════════════════

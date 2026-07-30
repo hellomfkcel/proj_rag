@@ -95,6 +95,14 @@ async def create_kb(body: KBCreateRequest, ctx: RequestContext = Depends(get_req
     kb_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc)
 
+    # ★ 先调权限服务 register_resource（§13.7）
+    # 失败即中止：不写 knowledge_bases 表
+    from src.permission.authz import register_resource
+    try:
+        register_resource(ctx, "kb", kb_id, f"user:{ctx.user_id}")
+    except RuntimeError:
+        raise HTTPException(502, "doc:authz_write_failed — failed to register KB in permission service")
+
     conn = await asyncpg.connect(_dsn())
     try:
         await conn.execute(
@@ -119,9 +127,6 @@ async def create_kb(body: KBCreateRequest, ctx: RequestContext = Depends(get_req
             "VALUES ($1,$2,$3,'kb_bound',$4,$5)",
             str(uuid.uuid4()), ctx.tenant_id, body.name, kb_id, ctx.user_id,
         )
-        # 权限服务镜像注册（经 P-AUTHC 门面，唯一出口）
-        from src.permission.authz import register_resource
-        register_resource(ctx, "kb", kb_id, f"user:{ctx.user_id}")
     finally:
         await conn.close()
 
@@ -166,12 +171,20 @@ def delete_kb(kb_id: str, ctx: RequestContext = Depends(get_request_context)):
             if not row: raise HTTPException(404, "doc:not_found")
             mounts = await conn.fetchval("SELECT count(*) FROM document_kb_mounts WHERE kb_id=$1", kb_id)
             if mounts > 0: raise HTTPException(409, f"KB has {mounts} active document mounts — remove them first")
+
+            # ★ 先调权限服务 retire_resource（§13.7）
+            # 失败即中止：不删本地数据
+            from src.permission.authz import retire_resource
+            try:
+                retire_resource(ctx, "kb", kb_id)
+            except RuntimeError:
+                raise HTTPException(502, "doc:authz_write_failed — failed to retire KB in permission service")
+
+            # retire 成功后清理本地数据
             await conn.execute("DELETE FROM knowledge_bases WHERE id=$1", kb_id)
             await conn.execute("DELETE FROM directories WHERE bound_kb_id=$1", kb_id)
             await conn.execute("DELETE FROM chunking_configs WHERE kb_id=$1", kb_id)
             await conn.execute("DELETE FROM retrieval_configs WHERE scope_type='kb' AND scope_id=$1", kb_id)
-            from src.permission.authz import retire_resource
-            retire_resource(ctx, "kb", kb_id)
             return {"status": "deleted", "kb_id": kb_id}
         finally:
             await conn.close()
@@ -546,6 +559,137 @@ async def trigger_parse(doc_id: str, ctx: RequestContext = Depends(get_request_c
     # outbox_relay 负责从 outbox 中取出 DocumentMounted 事件并分发 Celery 任务。
     # API 进程不直接调 ingest_document_task.delay()——遵循单一分发路径原则。
     return TriggerParseResponse(mount_id=mount_id, parse_status="queued")
+
+
+# ── PATCH /documents/{doc_id} — 重命名文档（P1 #19） ─────────────
+
+class DocRenameRequest(BaseModel):
+    filename: str
+
+@router.patch("/documents/{doc_id}")
+async def rename_document(doc_id: str, body: DocRenameRequest,
+                          ctx: RequestContext = Depends(get_request_context)):
+    """重命名文档（仅改显示名，不改存储路径）。"""
+    conn = await asyncpg.connect(_dsn())
+    try:
+        row = await conn.fetchrow(
+            "SELECT id, filename FROM documents WHERE id=$1 AND tenant_id=$2",
+            doc_id, ctx.tenant_id)
+        if not row:
+            raise HTTPException(404, "doc:not_found")
+
+        new_name = body.filename.strip()
+        if not new_name:
+            raise HTTPException(422, "common:validation_error — filename must not be empty")
+
+        await conn.execute(
+            "UPDATE documents SET filename=$1 WHERE id=$2", new_name, doc_id)
+        return {"id": str(row["id"]), "filename": new_name,
+                "old_filename": row["filename"]}
+    finally:
+        await conn.close()
+
+
+# ── POST /documents/batch/delete — 批量删除（P1 #27） ─────────────
+
+class BatchDeleteRequest(BaseModel):
+    items: List[dict]  # [{"doc_id": "...", "kb_id": "..."}]
+
+class BatchDeleteResponse(BaseModel):
+    results: List[dict]  # [{"doc_id": "...", "kb_id": "...", "status": "deleted|failed", "error": "..."}]
+
+@router.post("/documents/batch/delete", response_model=BatchDeleteResponse)
+async def batch_delete_documents(body: BatchDeleteRequest,
+                                 ctx: RequestContext = Depends(get_request_context)):
+    """批量删除文档——逐资源独立权限校验、独立执行、独立审计。
+
+    设计依据 §13.4.4：某文档权限不足则该文档单独失败，不影响其余。
+    """
+    from src.permission.authz import check
+    from src.doc.service import delete_document_from_kb
+
+    results = []
+    for item in body.items:
+        doc_id = item.get("doc_id", "")
+        kb_id = item.get("kb_id", "")
+        try:
+            # 逐资源独立权限校验（经 P-AUTHC 门面）
+            decision = check(ctx, "doc:unmount", "document", doc_id,
+                           channel_kb=kb_id)
+            if decision.get("decision") != "allow":
+                results.append({"doc_id": doc_id, "kb_id": kb_id,
+                              "status": "failed", "error": "auth:forbidden"})
+                continue
+
+            # 独立执行删除
+            delete_document_from_kb(
+                user_id=ctx.user_id, doc_id=doc_id, kb_id=kb_id,
+                tenant_id=ctx.tenant_id, purge=False,
+                request_id=ctx.request_id, credential=ctx.credential,
+            )
+            results.append({"doc_id": doc_id, "kb_id": kb_id, "status": "deleted"})
+        except Exception as exc:
+            results.append({"doc_id": doc_id, "kb_id": kb_id,
+                          "status": "failed", "error": str(exc)[:200]})
+
+    return BatchDeleteResponse(results=results)
+
+
+# ── POST /documents/batch/parse — 批量解析（P1 #28） ──────────────
+
+class BatchParseRequest(BaseModel):
+    mount_ids: List[str]  # list of mount_id to trigger parsing
+
+class BatchParseResponse(BaseModel):
+    results: List[dict]
+
+@router.post("/documents/batch/parse", response_model=BatchParseResponse)
+async def batch_trigger_parse(body: BatchParseRequest,
+                              ctx: RequestContext = Depends(get_request_context)):
+    """批量触发文档解析——逐 mount 独立权限校验、独立执行。
+
+    设计依据 §13.4.2：按需而非自动；§13.4.4：某文档失败不影响其余。
+    """
+    from src.permission.authz import check
+
+    results = []
+    for mount_id in body.mount_ids:
+        try:
+            # 从 mount 反查 kb_id（权限校验需要 kb_id）
+            conn = await asyncpg.connect(_dsn())
+            try:
+                mount_row = await conn.fetchrow(
+                    "SELECT document_id, kb_id FROM document_kb_mounts WHERE id=$1",
+                    mount_id)
+            finally:
+                await conn.close()
+
+            if not mount_row:
+                results.append({"mount_id": mount_id, "status": "failed",
+                              "error": "doc:not_found"})
+                continue
+
+            doc_id = str(mount_row["document_id"])
+            kb_id = str(mount_row["kb_id"])
+
+            # 独立权限校验
+            decision = check(ctx, "kb:write", "kb", kb_id)
+            if decision.get("decision") != "allow":
+                results.append({"mount_id": mount_id, "status": "failed",
+                              "error": "auth:forbidden"})
+                continue
+
+            # 独立触发解析
+            from src.doc.service import trigger_parse
+            trigger_parse(mount_id=mount_id, kb_id=kb_id,
+                         tenant_id=ctx.tenant_id)
+            results.append({"mount_id": mount_id, "status": "queued",
+                          "document_id": doc_id})
+        except Exception as exc:
+            results.append({"mount_id": mount_id, "status": "failed",
+                          "error": str(exc)[:200]})
+
+    return BatchParseResponse(results=results)
 
 
 # ── helpers ──

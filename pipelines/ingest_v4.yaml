@@ -8,7 +8,7 @@ components:
   dense_embedder:
     type: src.ingest.components.ollama_embedder.OllamaDocumentEmbedder
     init_parameters:
-      model: qwen3-embedding:0.6b
+      model: ${EMBEDDING_MODEL}
   sparse_embedder:
     type: src.ingest.components.sparse_embedder.BGE_M3SparseEmbedder
     init_parameters: {}

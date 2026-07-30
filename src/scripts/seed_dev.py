@@ -90,7 +90,7 @@ async def main():
                 ("deepseek-chat", "llm", "openai_compat", "deepseek-chat", "https://api.deepseek.com", False),
                 ("qwen3-embed", "embedding", "ollama", "qwen3-embedding:0.6b", "http://localhost:11434", True),
                 ("bge-m3", "embedding", "sentence_transformers", "BAAI/bge-m3", "", True),
-                ("bge-reranker-v2-m3", "ranker", "sentence_transformers", "BAAI/bge-reranker-v2-m3", "", True),
+                ("bge-reranker-v2-m3", "reranker", "sentence_transformers", "BAAI/bge-reranker-v2-m3", "", True),
             ]
             for model_id, mtype, provider, model_name, base_url, is_default in models:
                 await conn.execute("""

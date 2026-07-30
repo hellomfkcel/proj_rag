@@ -30,13 +30,9 @@ Decision = Dict[str, Any]
 # 熔断器（v14.md §25.3）
 # ══════════════════════════════════════════════════════════════════
 
-_authz_circuit_breaker = CircuitBreaker(
-    failure_threshold=10,          # 连续失败 10 次 → 熔断打开
-    recovery_timeout=60,           # 60s 后半开探测
-    name="authz",
-    expected_exception=Exception,
-    fallback_function=None,
-)
+# 熔断器由 _with_circuit_breaker 装饰器按函数独立创建（每函数一个 CB 实例）。
+# 熔断配置：连续失败 10 次 → 打开；60s 后半开探测。
+# 熔断打开时所有调用经 _circuit_open_fallback 返回 deny/unavailable。
 
 
 def _with_circuit_breaker(func):
@@ -83,16 +79,24 @@ def _with_circuit_breaker(func):
 
 
 def _circuit_open_fallback(func_name: str):
-    """熔断打开时的 fallback：返回 deny/unavailable。"""
+    """熔断打开时的 fallback：根据函数签名返回正确类型的 deny 值。
+
+    设计依据 §25.3：熔断打开 → 拒答型降级，所有调用直接拒绝。
+    """
     endpoint = _endpoint_for(func_name)
     logger.error("authz_circuit_open", endpoint=endpoint,
                  message="权限服务熔断器打开，所有调用直接拒绝")
 
-    if func_name in ("filter_items", "get_prefilter"):
-        if func_name == "get_prefilter":
-            return {"suspended": True}  # 型一封禁 → 跳过检索
+    if func_name == "get_prefilter":
+        return {"suspended": True}  # 型一封禁 → 跳过检索
+    if func_name == "filter_items":
         return []  # filter_items → 整批 deny
+    if func_name == "check_batch":
+        return {}  # check_batch → 空 dict（所有资源判否）
+    if func_name == "mint_ctx_token":
+        raise RuntimeError("authz_unavailable: circuit breaker open — cannot mint ctx_token")
 
+    # check → 单条 deny
     return {"decision": "deny", "decision_id": "", "reasons": ["authz_unavailable"]}
 
 

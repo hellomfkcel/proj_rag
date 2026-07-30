@@ -2,7 +2,7 @@ components:
   text_embedder:
     type: src.retrieve.components.ollama_text_embedder.OllamaTextEmbedder
     init_parameters:
-      model: qwen3-embedding:0.6b
+      model: ${EMBEDDING_MODEL}
   sparse_embedder:
     type: src.retrieve.components.sparse_text_embedder.BGE_M3SparseTextEmbedder
     init_parameters: {}
