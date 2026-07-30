@@ -1,0 +1,41 @@
+name: Quality Gate
+
+on:
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'pipelines/**'
+      - 'scripts/**'
+  push:
+    branches: [main]
+
+jobs:
+  contract-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.11' }
+      - run: pip install -r requirements.txt
+      - run: pytest tests/contract/ -v --tb=short
+
+  ragas-eval:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.11' }
+      - run: pip install -r requirements.txt
+      - name: Run RAGAS evaluation
+        id: eval
+        run: |
+          python scripts/eval_ragas.py \
+            --eval-set tests/eval_sets/ \
+            --baseline metrics/baseline.json \
+            --threshold-recall 0.70 \
+            --threshold-faithfulness 0.75
+      - name: Fail on regression
+        if: failure()
+        run: |
+          echo "Quality gate failed: Context Recall or Faithfulness below threshold."
+          exit 1

@@ -1,0 +1,15 @@
+components:
+  text_embedder:
+    type: src.retrieve.components.ollama_text_embedder.OllamaTextEmbedder
+    init_parameters:
+      model: qwen3-embedding:0.6b
+  retriever:
+    type: src.retrieve.components.dense_retriever.MilvusDenseRetriever
+    init_parameters:
+      collection_name: rag_documents
+      top_k: 20
+      milvus_host: ${MILVUS_HOST}
+      milvus_port: ${MILVUS_PORT}
+connections:
+- sender: text_embedder.embedding
+  receiver: retriever.query_embedding

@@ -1,0 +1,186 @@
+version: "3.9"
+
+networks:
+  rag-network-v14:
+    name: rag-network-v14
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
+  etcd_data:
+  minio_data:
+  milvus_data:
+  seaweedfs_data:
+  cerbos_audit:
+
+services:
+
+  # ════════════════════════════════════════════════════════
+  # 存储层
+  # ════════════════════════════════════════════════════════
+
+  # 用途：业务关系库（文档登记、挂载关系、对话记录、审计日志、outbox）
+  # 本地连接：postgresql://rag:<password>@localhost:5432/rag
+  # 使用方：api / ingestion-worker / retrieval-worker / stamping-worker / outbox-relay
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: rag
+      POSTGRES_USER: rag
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "25432:5432"
+    networks:
+      - rag-network-v14
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rag"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  # 用途：① Celery broker（ingestion / retrieval / stamping 三类任务队列）
+  #        ② Celery result backend
+  #        ③ 检索结果流式回传（query-stream:{task_id} 频道）
+  # 本地连接：redis://:${REDIS_PASSWORD}@localhost:6379/0
+  # 使用方：api / 三类 worker / outbox-relay
+  redis:
+    image: redis:7-alpine
+    command: redis-server --requirepass ${REDIS_PASSWORD} --appendonly yes
+    volumes:
+      - redis_data:/data
+    ports:
+      - "16379:6379"
+    networks:
+      - rag-network-v14
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  # 用途：Milvus 的元数据存储（仅 milvus 内部依赖，业务代码不直接访问）
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.14
+    environment:
+      ETCD_AUTO_COMPACTION_MODE: revision
+      ETCD_AUTO_COMPACTION_RETENTION: "1000"
+      ETCD_QUOTA_BACKEND_BYTES: "4294967296"
+    volumes:
+      - etcd_data:/etcd
+    command: >
+      etcd
+      --advertise-client-urls=http://0.0.0.0:2379
+      --listen-client-urls=http://0.0.0.0:2379
+      --data-dir=/etcd
+    networks:
+      - rag-network-v14
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # 用途：Milvus 的原始向量数据持久化（仅 milvus 内部依赖，业务代码不直接访问）
+  minio:
+    image: minio/minio:latest
+    environment:
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
+    volumes:
+      - minio_data:/data
+    command: minio server /data --console-address ":9001"
+    networks:
+      - rag-network-v14
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # 用途：向量库，存储 chunk 向量 + 权限戳记 payload
+  #        B-INGEST 写入 / B-RETRIEVE 查询 / B-INGEST 盖戳管道更新戳记
+  # 本地连接：localhost:19530（gRPC，Haystack MilvusDocumentStore 使用）
+  # 使用方：ingestion-worker / retrieval-worker / stamping-worker
+  milvus:
+    image: milvusdb/milvus:v2.4.13
+    command: milvus run standalone
+    environment:
+      ETCD_ENDPOINTS: etcd:2379
+      MINIO_ADDRESS: minio:9000
+      MINIO_ACCESS_KEY_ID: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_SECRET_ACCESS_KEY: ${MINIO_SECRET_KEY:-minioadmin}
+    volumes:
+      - milvus_data:/var/lib/milvus
+    ports:
+      - "19530:19530"
+      - "9091:9091"
+    networks:
+      - rag-network-v14
+    depends_on:
+      etcd:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  # 用途：文档原文件对象存储（S3 兼容网关）
+  #        B-DOC 上传时写入 / B-INGEST 读取原文解析 / B-DOC 删除时清理
+  # 本地连接：http://localhost:8333
+  # 使用方：api（上传/删除）/ ingestion-worker（读原文）
+  seaweedfs:
+    image: chrislusf/seaweedfs:3.68
+    command: server -s3 -s3.port=8333
+    volumes:
+      - seaweedfs_data:/data
+    ports:
+      - "18333:8333"
+    networks:
+      - rag-network-v14
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8333/"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ════════════════════════════════════════════════════════
+  # 权限服务（Cerbos PDP）
+  # ════════════════════════════════════════════════════════
+
+  # 用途：外部权限服务，承担本系统全部授权判定（本系统零判定）
+  #   /v1/check       → P-AUTHC 交互端点门禁（api 调用）
+  #   /v1/check/batch → P-AUTHC 批量权限判定（api 调用）
+  #   /v1/filter      → P-AUTHC 检索后逐条复核，strict 库专用（retrieval-worker 调用）
+  #   /v1/prefilter   → P-AUTHC 检索前编译六条件过滤器（retrieval-worker 调用）
+  #   /v1/context     → P-AUTHC 铸造异步任务主体 token（api 调用）
+  #   /v1/visibility  → B-INGEST 盖戳管道取 allow_stamps/deny_stamps（stamping-worker 调用）
+  #   管理面 register/link/unlink/retire → P-AUTHC 写路径同步调用（api 调用）
+  # 本地连接：http://localhost:3592
+  # 使用方：api / retrieval-worker / stamping-worker
+  cerbos:
+    image: ghcr.io/cerbos/cerbos:0.39.0
+    command: server --config=/config/.cerbos.yaml
+    volumes:
+      - ./cerbos/.cerbos.yaml:/config/.cerbos.yaml:ro
+      - ./cerbos/policies:/policies:ro
+      - ./cerbos/schemas:/schemas:ro
+      - cerbos_audit:/audit
+    ports:
+      - "13592:3592"
+      - "13593:3593"
+    networks:
+      - rag-network-v14
+    restart: unless-stopped

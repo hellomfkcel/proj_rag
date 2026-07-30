@@ -1,0 +1,183 @@
+version: "3.9"
+
+networks:
+  rag-network:
+    name: rag-network
+    external: true    # 复用 infra 已创建的网络
+
+volumes:
+  model_cache:        # BGE-M3 等模型缓存，ingestion-worker 和 retrieval-worker 共享
+
+services:
+
+  # 用途：FastAPI HTTP 服务，对外唯一入口
+  #        接收上传、查询、管理请求；派发 Celery 任务；转发流式结果给客户端
+  #        不执行任何 Haystack Pipeline（计算全部在 worker 中运行）
+  # 依赖：postgres / redis / milvus / cerbos（由 infra 提供）
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: uvicorn src.main:app --host 0.0.0.0 --port 8000
+    environment: &app_env
+      DATABASE_URL: postgresql+asyncpg://rag:${POSTGRES_PASSWORD}@postgres:5432/rag
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      MILVUS_HOST: milvus
+      MILVUS_PORT: "19530"
+      S3_ENDPOINT_URL: http://seaweedfs:8333
+      S3_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
+      S3_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
+      S3_BUCKET: rag-files
+      AUTHZ_BASE_URL: http://cerbos:3592
+      AUTHZ_TIMEOUT_MS: ${AUTHZ_TIMEOUT_MS:-2000}
+      AUTHZ_EVENT_STREAM_URL: ${AUTHZ_EVENT_STREAM_URL:-}
+      AUTHZ_CLIENT_CREDENTIAL: ${AUTHZ_CLIENT_CREDENTIAL:-}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:7b}
+      JWT_PUBLIC_KEY_URL: ${JWT_PUBLIC_KEY_URL}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_COLLECTOR_ENDPOINT}
+      OTEL_SERVICE_NAME: api
+      PIPELINE_YAML_DIR: /app/pipelines
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - ./pipelines:/app/pipelines
+    ports:
+      - "8000:8000"
+    networks:
+      - rag-network
+    restart: unless-stopped
+
+  # 用途：摄入任务 worker，消费 ingestion_queue
+  #        执行 Haystack 摄入 Pipeline：文档解析 → 切分 → BGE-M3 嵌入 → 写 Milvus
+  #        摄取完成后提交盖戳任务到 stamping_queue
+  # 依赖：postgres / redis / milvus / seaweedfs（由 infra 提供）
+  ingestion-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: >
+      celery -A src.platform.task.celery_app worker
+      -Q ingestion_queue
+      --concurrency=2
+      -n ingestion-worker@%h
+      --loglevel=${LOG_LEVEL:-info}
+    environment:
+      <<: *app_env
+      OTEL_SERVICE_NAME: ingestion-worker
+      SENTENCE_TRANSFORMERS_HOME: /models
+    volumes:
+      - ./pipelines:/app/pipelines
+      - model_cache:/models
+    networks:
+      - rag-network
+    restart: unless-stopped
+
+  # 用途：检索任务 worker，消费 retrieval_queue
+  #        执行 Haystack 查询 Pipeline：嵌入 → Milvus 混合检索（六条件过滤）
+  #        → RRF 融合 → Rerank → PromptBuilder → LLM 生成 → 流式推送到 Redis
+  # 依赖：postgres / redis / milvus / cerbos（由 infra 提供）
+  retrieval-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: >
+      celery -A src.platform.task.celery_app worker
+      -Q retrieval_queue
+      --concurrency=4
+      -n retrieval-worker@%h
+      --loglevel=${LOG_LEVEL:-info}
+    environment:
+      <<: *app_env
+      OTEL_SERVICE_NAME: retrieval-worker
+      SENTENCE_TRANSFORMERS_HOME: /models
+    volumes:
+      - ./pipelines:/app/pipelines
+      - model_cache:/models
+    networks:
+      - rag-network
+    restart: unless-stopped
+
+  # 用途：盖戳任务 worker，消费 stamping_queue（独立队列，不与摄入混用）
+  #        从 Cerbos /v1/visibility 取戳记，批量 upsert 到 Milvus chunk payload
+  #        独立队列防止大 KB 权限变更产生的大量盖戳任务挤压摄入任务
+  # 依赖：redis / milvus / cerbos（由 infra 提供）
+  stamping-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: >
+      celery -A src.platform.task.celery_app worker
+      -Q stamping_queue
+      --concurrency=4
+      -n stamping-worker@%h
+      --loglevel=${LOG_LEVEL:-info}
+    environment:
+      <<: *app_env
+      OTEL_SERVICE_NAME: stamping-worker
+    volumes:
+      - ./pipelines:/app/pipelines
+    networks:
+      - rag-network
+    restart: unless-stopped
+
+  # 用途：B-DOC outbox relay
+  #        轮询 outbox 表，将领域事件可靠投递到 Redis 消息总线
+  #        发布 DocumentMounted / DocumentUnmounted / MountEnabledChanged 等事件
+  # 依赖：postgres / redis（由 infra 提供）
+  outbox-relay:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: python -m src.platform.task.outbox_relay
+    environment:
+      <<: *app_env
+      OTEL_SERVICE_NAME: outbox-relay
+    networks:
+      - rag-network
+    restart: unless-stopped
+
+  # ════════════════════════════════════════════════════════════
+  # 前端（Next.js 14 standalone 模式）
+  # ════════════════════════════════════════════════════════════
+
+  # 用途：Next.js 14 前端应用，独立构建和运行
+  #        开发期：可直接用 "npm run dev" 在宿主机运行（支持热更新）
+  #        生产期：通过此容器化服务部署
+  # 依赖：api（后端 FastAPI 服务）
+  # 注意：生产环境通过 nginx 反代统一入口（端口 80），不直接暴露本服务端口
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    environment:
+      NODE_ENV: production
+      PORT: "3001"
+    # 不直接暴露端口（通过 nginx 访问）
+    networks:
+      - rag-network
+    restart: unless-stopped
+    depends_on:
+      - api
+
+  # ════════════════════════════════════════════════════════════
+  # Nginx 反向代理（统一入口）
+  # ════════════════════════════════════════════════════════════
+
+  # 用途：统一前端 + 后端入口，消除跨域问题
+  #   /          → 前端 Next.js :3001
+  #   /api/*     → 后端 FastAPI :8000
+  #   /healthz   → 后端 FastAPI :8000
+  # 访问：http://localhost（端口 80，生产可映射为 443）
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"          # 统一入口
+      - "3001:3001"       # 开发兼容（直接访问前端）
+    volumes:
+      - ./frontend/nginx.conf:/etc/nginx/nginx.conf:ro
+    networks:
+      - rag-network
+    restart: unless-stopped
+    depends_on:
+      - api
+      - frontend

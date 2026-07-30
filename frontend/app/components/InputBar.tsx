@@ -1,0 +1,176 @@
+"use client";
+// Chat Input Bar — textarea with Shift+Enter for newline, Enter to send
+// P1-5: Advanced Options panel for per-query retrieval parameter overrides
+
+import { useState, useEffect } from "react";
+import { getRetrievalConfig } from "@/lib/settings";
+
+export interface QueryOverrides {
+  retrieval_mode?: string;
+  fusion_method?: string;
+  strict?: boolean;
+  top_k?: number;
+  dense_weight?: number;
+  sparse_weight?: number;
+  synthesis_mode?: string;
+}
+
+interface Props {
+  input: string;
+  onInputChange: (v: string) => void;
+  onSend: (overrides?: QueryOverrides) => void;
+  disabled: boolean;
+  kbName: string;
+  kbId: string;
+}
+
+export default function InputBar({ input, onInputChange, onSend, disabled, kbName, kbId }: Props) {
+  const canSend = !disabled && input.trim().length > 0 && kbName !== "请选择知识库";
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [retrievalMode, setRetrievalMode] = useState("hybrid");
+  const [fusionMethod, setFusionMethod] = useState("rrf");
+  const [strict, setStrict] = useState(false);
+  const [topK, setTopK] = useState(10);
+  const [sparseWeight, setSparseWeight] = useState(0.5);
+  const [synthesisMode, setSynthesisMode] = useState("auto");
+
+  // 从 settings 页的 DB 配置加载当前 KB 的检索默认值
+  useEffect(() => {
+    if (!kbId) return;
+    getRetrievalConfig(kbId).then(cfg => {
+      if (cfg.retrieval_mode) setRetrievalMode(cfg.retrieval_mode);
+      if (cfg.fusion_method) setFusionMethod(cfg.fusion_method);
+      if (cfg.synthesis_mode) setSynthesisMode(cfg.synthesis_mode);
+      if (cfg.top_k) setTopK(cfg.top_k);
+      if (cfg.strict !== undefined) setStrict(cfg.strict);
+      if (cfg.sparse_weight !== undefined) setSparseWeight(cfg.sparse_weight);
+    }).catch(() => {});
+  }, [kbId]);
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      if (canSend) handleSend();
+    }
+  };
+
+  const handleSend = () => {
+    if (!canSend) return;
+    // 打开 ⚙️ 面板时，始终发送用户可见的全部参数值
+    if (showAdvanced) {
+      onSend({
+        retrieval_mode: retrievalMode,
+        fusion_method: fusionMethod,
+        top_k: topK,
+        strict,
+        synthesis_mode: synthesisMode,
+        dense_weight: Math.round((1 - sparseWeight) * 100) / 100,
+        sparse_weight: Math.round(sparseWeight * 100) / 100,
+      });
+    } else {
+      onSend(undefined);
+    }
+  };
+
+  return (
+    <div className="border-t border-gray-200 px-6 py-3 bg-white">
+      {/* Advanced Options */}
+      {showAdvanced && (
+        <div className="max-w-4xl mx-auto mb-3 p-3 bg-gray-50 rounded-lg border border-gray-200 grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+          <div>
+            <label className="text-xs text-gray-500 block mb-1">检索模式</label>
+            <select value={retrievalMode} onChange={(e) => setRetrievalMode(e.target.value)}
+              className="w-full px-2 py-1 border border-gray-300 rounded text-xs bg-white outline-none focus:ring-1 focus:ring-blue-500">
+              <option value="hybrid">🔀 混合检索</option>
+              <option value="vector_only">🧬 仅稠密向量</option>
+              <option value="keyword_only">🔤 仅关键词</option>
+            </select>
+          </div>
+          <div>
+            <label className="text-xs text-gray-500 block mb-1">融合方式</label>
+            <select value={fusionMethod} onChange={(e) => setFusionMethod(e.target.value)}
+              className="w-full px-2 py-1 border border-gray-300 rounded text-xs bg-white outline-none focus:ring-1 focus:ring-blue-500">
+              <option value="rrf">📊 RRF</option>
+              <option value="weighted_sum">⚖️ Weighted Sum</option>
+            </select>
+          </div>
+          <div>
+            <label className="text-xs text-gray-500 block mb-1">合成模式</label>
+            <select value={synthesisMode} onChange={(e) => setSynthesisMode(e.target.value)}
+              className="w-full px-2 py-1 border border-gray-300 rounded text-xs bg-white outline-none focus:ring-1 focus:ring-blue-500">
+              <option value="auto">🤖 自动选择</option>
+              <option value="compact">📝 Compact</option>
+              <option value="refine">🔄 Refine</option>
+              <option value="tree_summarize">🌳 Tree Summarize</option>
+              <option value="no_synthesis">📋 仅返回文档</option>
+            </select>
+          </div>
+          <div>
+            <label className="text-xs text-gray-500 block mb-1">Top-K: <span className="font-bold">{topK}</span></label>
+            <input type="range" min={1} max={50} value={topK}
+              onChange={(e) => setTopK(parseInt(e.target.value))}
+              className="w-full h-1.5 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-blue-600" />
+          </div>
+
+          {/* Weight slider — only when weighted_sum is selected */}
+          {fusionMethod === "weighted_sum" && (
+            <div className="col-span-2">
+              <label className="text-xs text-gray-500 block mb-1">
+                稀疏权重: <span className="font-bold">{(sparseWeight * 100).toFixed(0)}%</span>
+                &nbsp;&nbsp;|&nbsp;&nbsp;
+                稠密权重: <span className="font-bold">{((1 - sparseWeight) * 100).toFixed(0)}%</span>
+              </label>
+              <div className="flex items-center gap-2 text-[10px] text-gray-400">
+                <span>纯稠密</span>
+                <input type="range" min={0} max={1} step={0.05} value={sparseWeight}
+                  onChange={(e) => setSparseWeight(parseFloat(e.target.value))}
+                  className="flex-1 h-1.5 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-purple-500" />
+                <span>纯稀疏</span>
+              </div>
+            </div>
+          )}
+
+          <div className="flex items-end">
+            <button onClick={() => setStrict(!strict)}
+              className={`px-2 py-1 rounded text-xs font-medium transition w-full ${
+                strict ? "bg-green-100 text-green-700 border border-green-300" : "bg-gray-100 text-gray-500 border border-gray-200"
+              }`}>
+              {strict ? "🟢 Strict 复核" : "⚪ Strict 关闭"}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Input Row */}
+      <div className="flex items-end gap-3 max-w-4xl mx-auto">
+        {/* Advanced Toggle */}
+        <button
+          onClick={() => setShowAdvanced(!showAdvanced)}
+          title="高级检索选项"
+          className={`px-2 py-2.5 rounded-xl text-sm font-medium transition shrink-0 ${
+            showAdvanced ? "bg-blue-100 text-blue-700 border border-blue-300" : "bg-gray-100 text-gray-500 border border-gray-200 hover:bg-gray-200"
+          }`}
+        >
+          ⚙️
+        </button>
+
+        <textarea
+          value={input}
+          onChange={(e) => onInputChange(e.target.value)}
+          onKeyDown={handleKeyDown}
+          placeholder={kbName && kbName !== "请选择知识库" ? `向 ${kbName} 提问... (Shift+Enter 换行)` : "请先选择知识库"}
+          disabled={disabled || kbName === "请选择知识库"}
+          rows={1}
+          className="flex-1 px-4 py-2.5 border border-gray-300 rounded-xl outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:bg-gray-100 text-sm transition resize-none"
+        />
+        <button
+          onClick={handleSend}
+          disabled={!canSend}
+          className="px-5 py-2.5 bg-blue-600 text-white rounded-xl font-medium hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed transition text-sm shrink-0"
+        >
+          {disabled ? "..." : "发送"}
+        </button>
+      </div>
+    </div>
+  );
+}

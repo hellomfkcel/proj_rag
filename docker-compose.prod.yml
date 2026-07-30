@@ -1,0 +1,194 @@
+# 生产部署拓扑参考（阶段四）
+
+# 注意：
+#   - 此文件为生产部署参考配置，不在开发期启动
+#   - 分布式集群需要多机环境或 K8s 编排
+#   - 开发期继续使用 docker-compose.infra.yml（单机 standalone）
+
+version: "3.9"
+
+networks:
+  rag-prod:
+    name: rag-prod
+    driver: bridge
+
+volumes:
+  postgres_master_data:
+  postgres_replica_data:
+  redis_master_data:
+  redis_sentinel_data:
+  etcd_data:
+  minio_data:
+  milvus_data:
+  seaweedfs_volume_data:
+  seaweedfs_filer_data:
+
+services:
+
+  # ════════════════════════════════════════════════════════════
+  # PostgreSQL 主从 + PGBouncer
+  # ════════════════════════════════════════════════════════════
+
+  postgres-master:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: rag
+      POSTGRES_USER: rag
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_master_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    networks:
+      - rag-prod
+    restart: unless-stopped
+
+  postgres-replica:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: rag
+      POSTGRES_USER: rag
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_replica_data:/var/lib/postgresql/data
+    networks:
+      - rag-prod
+    depends_on:
+      - postgres-master
+    restart: unless-stopped
+
+  pgbouncer:
+    image: edoburu/pgbouncer:latest
+    environment:
+      DB_HOST: postgres-master
+      DB_USER: rag
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      POOL_MODE: transaction
+      MAX_CLIENT_CONN: 100
+    ports:
+      - "6432:6432"
+    networks:
+      - rag-prod
+    depends_on:
+      - postgres-master
+    restart: unless-stopped
+
+  # ════════════════════════════════════════════════════════════
+  # Redis Sentinel（3 节点）
+  # ════════════════════════════════════════════════════════════
+
+  redis-master:
+    image: redis:7-alpine
+    command: redis-server --requirepass ${REDIS_PASSWORD} --appendonly yes
+    volumes:
+      - redis_master_data:/data
+    ports:
+      - "6379:6379"
+    networks:
+      - rag-prod
+    restart: unless-stopped
+
+  # ════════════════════════════════════════════════════════════
+  # Milvus 分布式集群
+  # ════════════════════════════════════════════════════════════
+
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.14
+    environment:
+      ETCD_AUTO_COMPACTION_MODE: revision
+      ETCD_AUTO_COMPACTION_RETENTION: "1000"
+    volumes:
+      - etcd_data:/etcd
+    command: etcd --advertise-client-urls=http://0.0.0.0:2379 --listen-client-urls=http://0.0.0.0:2379 --data-dir=/etcd
+    networks:
+      - rag-prod
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio:latest
+    environment:
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
+    volumes:
+      - minio_data:/data
+    command: minio server /data
+    networks:
+      - rag-prod
+    restart: unless-stopped
+
+  milvus-proxy:
+    image: milvusdb/milvus:v2.4.13
+    command: milvus run proxy
+    environment:
+      ETCD_ENDPOINTS: etcd:2379
+      MINIO_ADDRESS: minio:9000
+    ports:
+      - "19530:19530"
+    networks:
+      - rag-prod
+    depends_on: [etcd, minio]
+    restart: unless-stopped
+
+  # ════════════════════════════════════════════════════════════
+  # SeaweedFS 多节点（S3 纠删码）
+  # ════════════════════════════════════════════════════════════
+
+  seaweedfs-master:
+    image: chrislusf/seaweedfs:3.68
+    command: master
+    volumes:
+      - seaweedfs_volume_data:/data
+    ports:
+      - "9333:9333"
+    networks:
+      - rag-prod
+    restart: unless-stopped
+
+  seaweedfs-volume:
+    image: chrislusf/seaweedfs:3.68
+    command: volume -mserver seaweedfs-master:9333 -max=100
+    volumes:
+      - seaweedfs_volume_data:/data
+    networks:
+      - rag-prod
+    depends_on: [seaweedfs-master]
+    restart: unless-stopped
+
+  seaweedfs-filer:
+    image: chrislusf/seaweedfs:3.68
+    command: filer -master seaweedfs-master:9333
+    volumes:
+      - seaweedfs_filer_data:/data
+    ports:
+      - "8888:8888"
+    networks:
+      - rag-prod
+    depends_on: [seaweedfs-master]
+    restart: unless-stopped
+
+  seaweedfs-s3:
+    image: chrislusf/seaweedfs:3.68
+    command: s3 -filer seaweedfs-filer:8888 -port 8333
+    ports:
+      - "8333:8333"
+    networks:
+      - rag-prod
+    depends_on: [seaweedfs-filer]
+    restart: unless-stopped
+
+  # ════════════════════════════════════════════════════════════
+  # Cerbos PDP
+  # ════════════════════════════════════════════════════════════
+
+  cerbos:
+    image: ghcr.io/cerbos/cerbos:0.39.0
+    command: server --config=/config/.cerbos.yaml
+    volumes:
+      - ./cerbos/.cerbos.yaml:/config/.cerbos.yaml:ro
+      - ./cerbos/policies:/policies:ro
+      - ./cerbos/schemas:/schemas:ro
+    ports:
+      - "3592:3592"
+    networks:
+      - rag-prod
+    restart: unless-stopped

@@ -1,0 +1,293 @@
+"""REST API 路由。
+
+对外暴露的 HTTP 端点，职责仅限于：
+- 参数校验与解析
+- 分发 Celery 任务到 worker
+- 转发 SSE 流式结果给客户端
+"""
+
+import json
+import uuid
+from datetime import datetime, timezone
+from typing import List, Optional
+
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Request
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
+
+from src.permission.context import RequestContext
+from src.api.deps import get_request_context
+
+router = APIRouter(prefix="/api/v1")
+
+
+# ══════════════════════════════════════════════════════════════
+# Request / Response models
+# ══════════════════════════════════════════════════════════════
+
+class UploadResponse(BaseModel):
+    document_id: str
+    mount_id: str
+    parse_status: str
+    duplicate: bool
+
+
+class QueryRequest(BaseModel):
+    question: str
+    kb_ids: List[str]
+    conversation_id: Optional[str] = None
+    # Per-query retrieval overrides (写入 turn 级 retrieval_configs)
+    retrieval_mode: Optional[str] = None       # hybrid / vector_only / keyword_only
+    fusion_method: Optional[str] = None         # rrf / weighted_sum
+    strict: Optional[bool] = None               # 实时权限复核
+    top_k: Optional[int] = None                 # 返回文档数
+    dense_weight: float = 0.5                   # dense 路权重 (weighted_sum 模式)
+    sparse_weight: float = 0.5                  # sparse 路权重 (weighted_sum 模式)
+    synthesis_mode: Optional[str] = None         # compact / refine / tree_summarize / no_synthesis / auto
+
+
+class QueryResponse(BaseModel):
+    answer: str
+    chunk_ids: List[str]
+    conversation_id: str
+    turn_index: int
+    error_code: Optional[str] = None   # retrieve:insufficient_evidence | retrieve:vector_store_unavailable
+
+
+class DeleteResponse(BaseModel):
+    status: str
+    doc_id: str = ""
+    kb_id: str = ""
+
+
+# ══════════════════════════════════════════════════════════════
+# Upload
+# ══════════════════════════════════════════════════════════════
+
+@router.post("/documents/upload", response_model=UploadResponse)
+def upload_document(
+    req: Request,
+    file: UploadFile = File(...),
+    kb_id: str = Form(...),
+    tenant_id: str = Form(default="tenant-dev"),
+    user_id: str = Form(default="dev-user"),
+    auto_parse: bool = Form(default=True),
+):
+    """上传文档：登记 + 挂载 + 触发解析。"""
+    from src.doc.service import submit_ingest_task
+
+    # Extract context from middleware (if available)
+    ctx = getattr(req.state, "ctx", None)
+    request_id = ctx.request_id if ctx else ""
+    credential = ctx.credential if ctx else ""
+    user_id_from_ctx = ctx.user_id if ctx else user_id
+    tenant_id_from_ctx = ctx.tenant_id if ctx else tenant_id
+
+    content = file.file.read()
+
+    result = submit_ingest_task(
+        user_id=user_id_from_ctx,
+        tenant_id=tenant_id_from_ctx,
+        kb_id=kb_id,
+        filename=file.filename or "unknown.txt",
+        file_content=content,
+        auto_parse=auto_parse,
+        request_id=request_id,
+        credential=credential,
+    )
+    return UploadResponse(**result)
+
+
+# ══════════════════════════════════════════════════════════════
+# Query — dispatch-only（§9.1 / §17 红线：API 禁止调 pipeline.run()）
+# ══════════════════════════════════════════════════════════════
+
+@router.post("/conversations/query", response_model=QueryResponse)
+async def query(request: QueryRequest, ctx: RequestContext = Depends(get_request_context)):
+    """分发检索+生成任务到 Celery retrieval-worker。
+
+    API 进程只做：参数校验 → mint ctx_token → delay() 提交任务 → 立即返回。
+    实际检索/rerank/LLM 全在 retrieval-worker 内通过 retrieve_and_generate_task 执行。
+    结果通过 SSE (GET /conversations/{id}/stream) 流式推送到前端。
+
+    设计依据：§17 "API 进程禁止调 pipeline.run()——计算密集与 I/O 密集抢占同组进程"。
+    """
+    import uuid as _uuid
+    from src.config import Settings
+    from src.permission.authz import mint_ctx_token
+    from src.chat.service import retrieve_and_generate_task
+
+    s = Settings()
+    conv_id = request.conversation_id or str(_uuid.uuid4())
+
+    # 1. 确保 conversation 存在
+    await _ensure_conversation_async(conv_id, request.kb_ids, ctx.user_id, ctx.tenant_id)
+
+    # 2. 获取下一个 turn_index
+    turn_index = await _next_turn_index(conv_id)
+
+    # 3. 铸造 ctx_token（替代 JWT 原文传给 worker，TTL ≤600s）
+    ctx_token = mint_ctx_token(ctx, audience="retrieval-worker", ttl_s=600)
+
+    # 4. 分发到 retrieval_queue（API 进程不执行任何 Pipeline 计算）
+    retrieve_and_generate_task.delay(
+        conversation_id=conv_id,
+        turn_index=turn_index,
+        user_question=request.question,
+        kb_ids=request.kb_ids,
+        tenant_id=ctx.tenant_id,
+        ctx_token=ctx_token,
+        pipeline_name="query_v4",
+        yaml_version="v1",
+        retrieval_mode=request.retrieval_mode,
+        fusion_method=request.fusion_method,
+        strict=request.strict,
+        top_k=request.top_k,
+        dense_weight=request.dense_weight,
+        sparse_weight=request.sparse_weight,
+        synthesis_mode=request.synthesis_mode,
+    )
+
+    # 5. 立即返回 — answer 和 chunk_ids 由 worker 经 Redis Pub/Sub → SSE 推送
+    return QueryResponse(
+        answer="",          # dispatched to worker — results via SSE
+        chunk_ids=[],       # dispatched to worker — sources via SSE "retrieved" event
+        conversation_id=conv_id,
+        turn_index=turn_index,
+        error_code=None,
+    )
+
+
+@router.get("/conversations/{conversation_id}/stream")
+async def query_stream(conversation_id: str, turn_index: int = 1):
+    """SSE 流式订阅查询结果。
+
+    从 Redis Pub/Sub 转发流事件到客户端。
+    """
+    from src.config import Settings
+    import redis
+
+    s = Settings()
+
+    async def _stream():
+        r = redis.from_url(s.redis_url)
+        pubsub = r.pubsub()
+        channel = f"query-stream:{conversation_id}:{turn_index}"
+        pubsub.subscribe(channel)
+
+        try:
+            for message in pubsub.listen():
+                if message["type"] == "message":
+                    data = json.loads(message["data"])
+                    event_type = data.get("event", "unknown")
+
+                    if event_type == "retrieved":
+                        yield f"event: retrieved\ndata: {json.dumps(data, default=str)}\n\n"
+                    elif event_type == "token":
+                        yield f"event: token\ndata: {json.dumps(data, default=str)}\n\n"
+                    elif event_type == "done":
+                        yield f"event: done\ndata: {json.dumps(data, default=str)}\n\n"
+                        break
+                    elif event_type == "error":
+                        yield f"event: error\ndata: {json.dumps(data, default=str)}\n\n"
+                        break
+        finally:
+            pubsub.close()
+            r.close()
+
+    return StreamingResponse(
+        _stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+# ══════════════════════════════════════════════════════════════
+# Delete
+# ══════════════════════════════════════════════════════════════
+
+@router.delete("/documents/{doc_id}/kb/{kb_id}", response_model=DeleteResponse)
+def delete_document(doc_id: str, kb_id: str, purge: bool = False, req: Request = None):
+    """从 KB 移除文档。"""
+    from src.doc.service import delete_document_from_kb
+
+    # Extract context from middleware (if available)
+    if req:
+        ctx = getattr(req.state, "ctx", None)
+    else:
+        ctx = None
+    request_id = ctx.request_id if ctx else ""
+    credential = ctx.credential if ctx else ""
+    user_id = ctx.user_id if ctx else "unknown"
+    tenant_id = ctx.tenant_id if ctx else "unknown"
+
+    result = delete_document_from_kb(
+        user_id=user_id, doc_id=doc_id, kb_id=kb_id,
+        tenant_id=tenant_id, purge=purge,
+        request_id=request_id,
+        credential=credential,
+    )
+    return DeleteResponse(**result)
+
+
+# ══════════════════════════════════════════════════════════════
+# Health / Util
+# ══════════════════════════════════════════════════════════════
+
+@router.get("/ping")
+async def ping():
+    return {"ping": "pong"}
+
+
+@router.get("/readyz")
+async def readyz():
+    """就绪检查：依赖就绪（不含权限服务）。"""
+    return {"status": "ok"}
+
+
+# ══════════════════════════════════════════════════════════════
+# 内部 helpers（async — 端点已是 async def，无需 asyncio.run）
+# ══════════════════════════════════════════════════════════════
+
+import asyncpg as _asyncpg
+
+async def _ensure_conversation_async(
+    conv_id: str, kb_ids: List[str], user_id: str, tenant_id: str,
+) -> None:
+    """创建 conversation（如果不存在）。"""
+    from src.config import Settings
+    s = Settings()
+    conn = await _asyncpg.connect(
+        s.database_url.replace("postgresql+asyncpg://", "postgresql://")
+    )
+    try:
+        existing = await conn.fetchrow(
+            "SELECT id FROM conversations WHERE id=$1", conv_id,
+        )
+        if not existing:
+            await conn.execute(
+                "INSERT INTO conversations (id, tenant_id, user_id, bound_kb_ids) VALUES ($1,$2,$3,$4)",
+                conv_id, tenant_id, user_id, kb_ids,
+            )
+    finally:
+        await conn.close()
+
+
+async def _next_turn_index(conv_id: str) -> int:
+    """返回下一个 turn_index（当前最大 + 1）。"""
+    from src.config import Settings
+    s = Settings()
+    conn = await _asyncpg.connect(
+        s.database_url.replace("postgresql+asyncpg://", "postgresql://")
+    )
+    try:
+        max_idx = await conn.fetchval(
+            "SELECT coalesce(max(turn_index), 0) FROM conversation_turns WHERE conversation_id=$1",
+            conv_id,
+        )
+        return (max_idx or 0) + 1
+    finally:
+        await conn.close()

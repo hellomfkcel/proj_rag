@@ -1,0 +1,50 @@
+components:
+  text_embedder:
+    type: src.retrieve.components.ollama_text_embedder.OllamaTextEmbedder
+    init_parameters:
+      model: qwen3-embedding:0.6b
+  sparse_embedder:
+    type: src.retrieve.components.sparse_text_embedder.BGE_M3SparseTextEmbedder
+    init_parameters: {}
+  dense_retriever:
+    type: src.retrieve.components.dense_retriever.MilvusDenseRetriever
+    init_parameters:
+      collection_name: rag_documents
+      top_k: 20
+      milvus_host: ${MILVUS_HOST}
+      milvus_port: ${MILVUS_PORT}
+  sparse_retriever:
+    type: src.retrieve.components.sparse_retriever.MilvusSparseRetriever
+    init_parameters:
+      collection_name: rag_documents
+      top_k: 20
+      milvus_host: ${MILVUS_HOST}
+      milvus_port: ${MILVUS_PORT}
+  joiner:
+    type: src.retrieve.components.weighted_fusion.WeightedFusionJoiner
+    init_parameters:
+      fusion_mode: weighted_sum
+      top_k: 30
+      sort_by_score: true
+  ranker:
+    type: src.retrieve.components.reranker.BGEReranker
+    init_parameters:
+      top_k: 10
+  hierarchical_merger:
+    type: src.retrieve.components.hierarchical_merger.HierarchicalMerger
+    init_parameters:
+      window_size: 3
+      max_total_chunks: 10
+connections:
+- sender: text_embedder.embedding
+  receiver: dense_retriever.query_embedding
+- sender: sparse_embedder.sparse_embedding
+  receiver: sparse_retriever.query_sparse_embedding
+- sender: dense_retriever.documents
+  receiver: joiner.documents
+- sender: sparse_retriever.documents
+  receiver: joiner.documents
+- sender: joiner.documents
+  receiver: ranker.documents
+- sender: ranker.documents
+  receiver: hierarchical_merger.documents

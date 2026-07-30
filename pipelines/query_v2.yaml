@@ -1,0 +1,27 @@
+components:
+  sparse_embedder:
+    type: src.retrieve.components.sparse_text_embedder.BGE_M3SparseTextEmbedder
+    init_parameters: {}
+  sparse_retriever:
+    type: src.retrieve.components.sparse_retriever.MilvusSparseRetriever
+    init_parameters:
+      collection_name: rag_documents
+      top_k: 30
+      milvus_host: ${MILVUS_HOST}
+      milvus_port: ${MILVUS_PORT}
+  ranker:
+    type: src.retrieve.components.reranker.BGEReranker
+    init_parameters:
+      top_k: 10
+  hierarchical_merger:
+    type: src.retrieve.components.hierarchical_merger.HierarchicalMerger
+    init_parameters:
+      window_size: 3
+      max_total_chunks: 10
+connections:
+- sender: sparse_embedder.sparse_embedding
+  receiver: sparse_retriever.query_sparse_embedding
+- sender: sparse_retriever.documents
+  receiver: ranker.documents
+- sender: ranker.documents
+  receiver: hierarchical_merger.documents
