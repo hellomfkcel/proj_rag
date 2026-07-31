@@ -70,14 +70,48 @@ def build_context(
     except InvalidTokenError as e:
         raise PermissionError(f"JWT invalid: {e}")
 
+    return build_context_from_claims(claims, credential, client_ip)
+
+
+def _norm_list(val) -> List[str]:
+    if isinstance(val, list):
+        return val
+    if isinstance(val, str):
+        return [val]
+    return []
+
+
+def build_context_from_claims(
+    claims: dict,
+    credential: str,
+    client_ip: str = "",
+) -> RequestContext:
+    """从已验证的 JWT claims 构建 RequestContext。
+
+    这是 JWT claims → RequestContext 的共享逻辑，
+    供 middleware.py（jose 库验证）和 context.py:build_context()（PyJWT 库验证）共同使用。
+    确保 principals 展开逻辑在系统内只有一处权威实现。
+
+    设计依据：docs/RAG系统设计v14.md §1.2 — RequestContext 字段契约。
+    """
     user_id = claims.get("sub", "")
     tenant_id = claims.get("tenant", claims.get("tenant_id", ""))
-    roles = _norm_list(claims.get("realm_access", {}).get("roles", []))
+
+    # 角色 — 支持两种 JWT claims 格式:
+    #   1. Keycloak: realm_access.roles (嵌套对象)
+    #   2. 开发模式/Permission Service: roles (平铺数组)
+    roles = _norm_list(
+        claims.get("realm_access", {}).get("roles", [])
+        or claims.get("roles", [])
+    )
+    if not roles:
+        roles = ["user"]
+
+    # 组 — 从 JWT claims 提取，展开 group: 主体标识用于层1过滤
     groups = _norm_list(claims.get("groups", []))
 
-    # 展开 principals
-    principals = []
-    principals.append(f"user:{user_id}")
+    # 展开 principals — user:/group:/role: 前缀并集
+    principals = [f"user:{user_id}"]
     for g in groups:
         principals.append(f"group:{g}")
     for r in roles:
@@ -96,18 +130,12 @@ def build_context(
     )
 
 
-def _norm_list(val) -> List[str]:
-    if isinstance(val, list):
-        return val
-    if isinstance(val, str):
-        return [val]
-    return []
-
-
 def resolve_ctx_token(ctx_token: str) -> str:
     """从 ctx_token 提取原始 JWT credential。
 
-    ctx_token 格式：ctx.{base64-payload}.{hmac-signature}
+    ctx_token 支持两种格式（均以 "ctx." 为前缀）：
+      - 3 段（legacy）：ctx.{base64-payload}.{hmac-signature}
+      - 4 段（标准 JWT）：ctx.{base64-header}.{base64-payload}.{hmac-signature}
     payload 中包含 credential 字段（原始 JWT）。
 
     用于 worker 任务从 ctx_token 重建 RequestContext：
@@ -119,10 +147,18 @@ def resolve_ctx_token(ctx_token: str) -> str:
 
     try:
         parts = ctx_token.split(".")
-        if len(parts) != 3:
-            raise ValueError(f"Invalid ctx_token format: expected 3 parts, got {len(parts)}")
 
-        payload_b64 = parts[1]
+        # 兼容两种格式：3 段（legacy）或 4 段（标准 JWT，含 header）
+        if len(parts) == 4:
+            # 标准 JWT 格式：ctx.header.payload.sig
+            payload_b64 = parts[2]
+        elif len(parts) == 3:
+            # Legacy 格式：ctx.payload.sig
+            payload_b64 = parts[1]
+        else:
+            raise ValueError(
+                f"Invalid ctx_token format: expected 3 or 4 parts, got {len(parts)}"
+            )
         # 补齐 base64 padding
         padding = 4 - len(payload_b64) % 4
         if padding != 4:

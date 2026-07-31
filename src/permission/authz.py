@@ -82,6 +82,7 @@ def _circuit_open_fallback(func_name: str):
     """熔断打开时的 fallback：根据函数签名返回正确类型的 deny 值。
 
     设计依据 §25.3：熔断打开 → 拒答型降级，所有调用直接拒绝。
+    P0-3 修复：新增 get_visibility + 生命周期端口 (register/link/unlink/retire) 的熔断回退。
     """
     endpoint = _endpoint_for(func_name)
     logger.error("authz_circuit_open", endpoint=endpoint,
@@ -95,6 +96,15 @@ def _circuit_open_fallback(func_name: str):
         return {}  # check_batch → 空 dict（所有资源判否）
     if func_name == "mint_ctx_token":
         raise RuntimeError("authz_unavailable: circuit breaker open — cannot mint ctx_token")
+    # P0-3: 盖戳管道 — 熔断打开时抛异常，防止写入空戳记（§14.5.3 纪律1）
+    if func_name == "get_visibility":
+        raise RuntimeError("authz_unavailable: circuit breaker open — stamping cannot proceed")
+    # P0-3: 生命周期端口 — 熔断打开时抛异常，触发 B-DOC 本地事务回滚（§13.7）
+    if func_name in ("register_resource", "link_resource", "unlink_resource", "retire_resource"):
+        raise RuntimeError(
+            f"authz_unavailable: circuit breaker open — {func_name} cannot proceed. "
+            "B-DOC transaction must be rolled back."
+        )
 
     # check → 单条 deny
     return {"decision": "deny", "decision_id": "", "reasons": ["authz_unavailable"]}
@@ -107,6 +117,11 @@ def _endpoint_for(func_name: str) -> str:
         "filter_items": "filter",
         "get_prefilter": "prefilter",
         "mint_ctx_token": "context",
+        "get_visibility": "visibility",
+        "register_resource": "register",
+        "link_resource": "link",
+        "unlink_resource": "unlink",
+        "retire_resource": "retire",
     }.get(func_name, func_name)
 
 
@@ -232,26 +247,51 @@ def filter_items(
 # get_prefilter（检索前编译，带熔断）
 # ══════════════════════════════════════════════════════════════════
 
+# P1-2: 请求内缓存 — 使用 contextvars 实现同一次检索内复用 prefilter 结果。
+# 设计依据：docs/RAG系统设计v14.md §6.6 "请求内缓存（同一次检索复用），
+# 不跨请求缓存（非 strict 库无层 3 兜底，陈旧即越权窗口）"。
+import contextvars
+import time
+from dataclasses import dataclass, field
+
+_prefilter_cache: contextvars.ContextVar[dict] = contextvars.ContextVar(
+    "prefilter_cache", default={}
+)
+
+_PREFILTER_CACHE_TTL_S = 30  # 请求内最大缓存时长
+
+
+@_with_circuit_breaker
 def get_prefilter(ctx: RequestContext) -> Dict[str, Any]:
     """检索前编译过滤条件 → /v1/prefilter。
 
     返回 PreFilter 或 SUSPENDED 哨兵（suspended: true）。
-    请求内缓存，不跨请求缓存。
+    请求内缓存（同一次 HTTP 请求/检索任务内复用），不跨请求缓存。
     失败 → 不允许回退到无过滤查询，必须整体拒答。
 
-    所有模式（开发/生产）统一走 Cerbos PDP 判定，不再有 DB 绕过。
+    所有模式（开发/生产）统一走权限服务判定。
     """
+    # P1-2: 请求内缓存 — 以 credential hash 为键，TTL 30s
+    cache = _prefilter_cache.get()
+    cache_key = f"pf:{hash(ctx.credential) & 0xFFFFFFFF:x}"
+    cached = cache.get(cache_key)
+    if cached and (time.monotonic() - cached["_ts"] < _PREFILTER_CACHE_TTL_S):
+        logger.debug("prefilter_cache_hit", request_id=ctx.request_id)
+        return cached["result"]
 
     client = get_client()
     try:
-        return client.get_prefilter(
+        result = client.get_prefilter(
             request_id=ctx.request_id, credential=ctx.credential,
             ctx=ctx,
         )
+        # 缓存结果并标记时间戳
+        cache[cache_key] = {"result": result, "_ts": time.monotonic()}
+        _prefilter_cache.set(cache)
+        return result
     except Exception:
         logger.warning("authz_prefilter_failed", request_id=ctx.request_id)
-        record_authz_call_failed("prefilter", "connection")
-        return {"suspended": True}  # fail-closed
+        raise  # 让 circuitbreaker 计数，熔断打开时由 _circuit_open_fallback 处理
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -331,16 +371,26 @@ def _compile_filter_expr(filter_dict: Dict[str, Any]) -> str:
 # mint_ctx_token / lifecycle / require_permission
 # ══════════════════════════════════════════════════════════════════
 
+@_with_circuit_breaker
 def mint_ctx_token(ctx: RequestContext, audience: str = "retrieval-worker", ttl_s: int = 600) -> str:
     client = get_client()
-    return client.mint_ctx_token(
-        request_id=ctx.request_id, credential=ctx.credential,
-        audience=audience, ttl_s=min(ttl_s, 600),
+    try:
+        return client.mint_ctx_token(
+            request_id=ctx.request_id, credential=ctx.credential,
+            audience=audience, ttl_s=min(ttl_s, 600),
+        )
+    except Exception:
+        logger.warning("authz_mint_ctx_token_failed", request_id=ctx.request_id)
+        raise  # 让 circuitbreaker 计数
+
+
+@_with_circuit_breaker
+def register_resource(ctx: RequestContext, resource_type: str, resource_id: str, owner: str, name: str | None = None) -> str:
+    result = get_client().register_resource(
+        ctx.request_id, ctx.credential, resource_type, resource_id, owner,
+        tenant_id=ctx.tenant_id,
+        name=name,
     )
-
-
-def register_resource(ctx: RequestContext, resource_type: str, resource_id: str, owner: str) -> str:
-    result = get_client().register_resource(ctx.request_id, ctx.credential, resource_type, resource_id, owner)
     # KB 注册后触发该 KB 下全部文档的盖戳刷新（新 KB 授权可能影响已有文档可见性）
     if resource_type == "kb":
         try:
@@ -350,8 +400,12 @@ def register_resource(ctx: RequestContext, resource_type: str, resource_id: str,
             pass  # 不影响主流程
     return result
 
+@_with_circuit_breaker
 def link_resource(ctx: RequestContext, doc_id: str, kb_id: str) -> str:
-    result = get_client().link_resource(ctx.request_id, ctx.credential, doc_id, kb_id)
+    result = get_client().link_resource(
+        ctx.request_id, ctx.credential, doc_id, kb_id,
+        tenant_id=ctx.tenant_id,
+    )
     # 挂载建立后触发该文档的盖戳刷新（新挂载可能改变可见性）
     try:
         from src.permission.visibility_events import on_visibility_changed
@@ -360,8 +414,12 @@ def link_resource(ctx: RequestContext, doc_id: str, kb_id: str) -> str:
         pass  # 不影响主流程
     return result
 
+@_with_circuit_breaker
 def unlink_resource(ctx: RequestContext, doc_id: str, kb_id: str) -> str:
-    result = get_client().unlink_resource(ctx.request_id, ctx.credential, doc_id, kb_id)
+    result = get_client().unlink_resource(
+        ctx.request_id, ctx.credential, doc_id, kb_id,
+        tenant_id=ctx.tenant_id,
+    )
     # 挂载解除后触发盖戳清空（文档从 KB 移除）
     try:
         from src.permission.visibility_events import on_visibility_changed
@@ -370,8 +428,12 @@ def unlink_resource(ctx: RequestContext, doc_id: str, kb_id: str) -> str:
         pass  # 不影响主流程
     return result
 
+@_with_circuit_breaker
 def retire_resource(ctx: RequestContext, resource_type: str, resource_id: str) -> str:
-    result = get_client().retire_resource(ctx.request_id, ctx.credential, resource_type, resource_id)
+    result = get_client().retire_resource(
+        ctx.request_id, ctx.credential, resource_type, resource_id,
+        tenant_id=ctx.tenant_id,
+    )
     # 资源退役后触发相关文档的盖戳清空
     try:
         from src.permission.visibility_events import on_visibility_changed
@@ -384,6 +446,7 @@ def retire_resource(ctx: RequestContext, resource_type: str, resource_id: str) -
     return result
 
 
+@_with_circuit_breaker
 def get_visibility(tenant: str, doc_id: str, kb_id: str) -> Dict[str, Any]:
     """取戳记 → /v1/visibility（经 P-AUTHC 门面，唯一出口）。
 
@@ -396,7 +459,24 @@ def get_visibility(tenant: str, doc_id: str, kb_id: str) -> Dict[str, Any]:
     return get_client().get_visibility(tenant=tenant, doc_id=doc_id, kb_id=kb_id)
 
 
-def require_permission(action: str, resource_type: str):
+def require_permission(action: str, resource_type: str, resource_id: str = ""):
+    """路由级权限门禁 — FastAPI Depends 工厂。
+
+    设计依据：docs/RAG系统设计v14.md §6.4。
+
+    Args:
+        action: 动词（如 kb:write）
+        resource_type: 资源类型（如 kb, document）
+        resource_id: 资源 ID（可选）。
+            不提供时使用 resource_type 做类型级权限检查（向后兼容），
+            提供时做资源级精确检查。
+
+    使用示例:
+        @router.post("/kb/{kb_id}/docs")
+        async def upload(kb_id: str,
+                         ctx: RequestContext = Depends(require_permission("kb:write", "kb", kb_id))):
+            ...
+    """
     from src.permission.context import RequestContext
 
     def _guard(ctx: RequestContext = None):
@@ -407,7 +487,9 @@ def require_permission(action: str, resource_type: str):
                 detail="auth:context_missing — RequestContext not injected by middleware. "
                        "Ensure AuthMiddleware is registered before this route."
             )
-        decision = check(ctx, action, resource_type, resource_type)
+        # 使用 resource_id（若提供），否则回退到 resource_type 做类型级检查
+        effective_resource_id = resource_id if resource_id else resource_type
+        decision = check(ctx, action, resource_type, effective_resource_id)
         if decision["decision"] == "indeterminate":
             from fastapi import HTTPException
             raise HTTPException(

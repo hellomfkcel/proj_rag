@@ -54,14 +54,14 @@ class MilvusDenseRetriever:
         Str filters  → direct PyMilvus search (json_contains/not_json_contains).
         """
         # String expression → MilvusClient (json_contains operators)
-        # MilvusClient handles connection management internally — no explicit
-        # connect/load needed. Replaces deprecated ORM-style API
-        # (connections.connect / Collection / Collection.load / Collection.search).
+        # MilvusClient API 不会自动 load collection → 必须显式调用 load_collection。
+        # load_collection 已加载时是快速空操作（幂等）。
         if isinstance(filters, str):
             from dataclasses import replace
             from pymilvus import MilvusClient
 
             client = MilvusClient(uri=f"http://{self.milvus_host}:{self.milvus_port}")
+            client.load_collection(self.collection_name)
             hits = client.search(
                 collection_name=self.collection_name,
                 data=[query_embedding],

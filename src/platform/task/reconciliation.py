@@ -27,15 +27,67 @@ def _dsn() -> str:
 # 结构镜像对账（v14.md §13.7b）
 # ══════════════════════════════════════════════════════════════════
 
+
+def _get_system_credential() -> str:
+    """获取对账任务用的系统级 credential。
+
+    对账任务使用专用的系统身份（设计依据 §6.8：对账任务无主体入参），
+    通过权限服务的 dev-login 端点获取短期 JWT。
+    开发模式下使用 dev-login，生产模式切换为 Keycloak client credentials。
+
+    Returns:
+        有效的 JWT access_token 字符串。
+
+    Raises:
+        RuntimeError: 无法获取系统凭证时抛出。
+    """
+    import httpx
+
+    authz_url = Settings().authz_service_url
+    if not authz_url:
+        raise RuntimeError("AUTHZ_SERVICE_URL is not configured for reconciliation")
+
+    try:
+        resp = httpx.post(
+            f"{authz_url}/api/v1/auth/dev-login",
+            json={
+                "username": "system-reconciler",
+                "tenant": "system",
+                "role": "system_admin",
+            },
+            timeout=10.0,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return data["access_token"]
+    except Exception as exc:
+        raise RuntimeError(
+            f"Failed to obtain system credential for reconciliation: {exc}"
+        ) from exc
+
+
 async def reconcile_mount_mirror() -> dict:
     """对比本地 document_kb_mount 与权限服务镜像。
 
     方向一（我有它无）→ 补调 link，递增 mirror_gap，告警
     方向二（它有我无）→ 补调 unlink 回收孤儿，记录但不告警
+
+    设计依据：docs/RAG系统设计v14.md §13.7b（结构镜像对账）
+              + §6.8（系统主体与内部调用身份——对账任务不需要用户主体身份）
     """
     conn = await asyncpg.connect(_dsn())
     try:
-        # 抽样 mount 表（每小时全量扫描太贵，抽样 10%）
+        # 获取系统凭证（对账任务专用）
+        try:
+            sys_credential = _get_system_credential()
+        except Exception as exc:
+            log.warning("reconcile_mirror_no_credential",
+                        error=str(exc)[:200],
+                        hint="Permission Service dev-login may be unavailable")
+            return {"mirror_gap": 0, "orphans": 0, "sampled": 0,
+                    "warning": "no_system_credential"}
+
+        # 抽样 mount 表（对账扫描全量代价太高，抽样 10%）
         rows = await conn.fetch(
             "SELECT document_id, kb_id FROM document_kb_mounts "
             "ORDER BY random() LIMIT 50"
@@ -43,16 +95,15 @@ async def reconcile_mount_mirror() -> dict:
         if not rows:
             return {"mirror_gap": 0, "orphans": 0, "sampled": 0}
 
-        # 方向一：对每条 mount 调 /v1/check 验证资源是否存在
         from src.permission.authz import check, link_resource
         from src.permission.context import RequestContext
 
-        # 对账任务使用系统身份（无用户主体，仅验证资源镜像是否存在）
+        # 对账任务使用系统身份（设计依据 §6.8：对账任务不需要用户主体身份）
         sys_ctx = RequestContext(
             request_id="reconcile-mirror",
-            user_id="system",
-            tenant_id="",
-            credential="system",
+            user_id="system-reconciler",
+            tenant_id="system",
+            credential=sys_credential,
         )
         gaps = 0
 

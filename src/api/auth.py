@@ -20,7 +20,7 @@ import os
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Header
 from pydantic import BaseModel
 
 from src.config import Settings
@@ -563,6 +563,71 @@ async def tenant_stats(tenant_id: str):
         }
     finally:
         await conn.close()
+
+# ── POST /api/v1/auth/check-permission ────────────────────────────
+# P3-14: 前端细粒度按钮权限控制 — 调后端 P-AUTHC check()
+# 设计依据：docs/权限管理系统架构设计.md §6.4 阶段三
+#          + docs/RAG系统设计v14.md §6.3 check
+
+class CheckPermissionRequest(BaseModel):
+    action: str
+    resource_type: str
+    resource_id: str
+    channel_kb: str | None = None  # 通道类动词必带（doc:unmount 等）
+
+
+class CheckPermissionResponse(BaseModel):
+    decision: str  # "allow" | "deny" | "indeterminate"
+    decision_id: str
+    reasons: list[str] = []
+
+
+@router.post("/check-permission", response_model=CheckPermissionResponse)
+async def check_permission_endpoint(
+    body: CheckPermissionRequest,
+    authorization: str | None = Header(None, alias="Authorization"),
+):
+    """前端按钮权限检查 — 调用 P-AUTHC check()。
+
+    前端在渲染操作按钮（删除/下载/解析等）之前调用此端点，
+    获取当前用户对该资源的权限判定结果，实现细粒度按钮条件渲染。
+
+    设计依据：docs/权限管理系统架构设计.md §6.4 阶段三
+    本端点不执行任何本地判定 — 所有授权决策经 P-AUTHC → 权限服务。
+
+    Raises:
+        401: 未提供 Authorization header 或 JWT 无效。
+    """
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Authorization header required")
+
+    scheme, _, token = authorization.partition(" ")
+    if scheme.lower() != "bearer" or not token:
+        raise HTTPException(status_code=401, detail="Bearer token required")
+
+    from src.permission.authz import check as authz_check
+    from src.permission.context import build_context
+
+    try:
+        ctx = build_context(credential=token)
+        result = authz_check(
+            ctx=ctx,
+            action=body.action,
+            resource_type=body.resource_type,
+            resource_id=body.resource_id,
+            channel_kb=body.channel_kb,
+        )
+        return CheckPermissionResponse(
+            decision=result.get("decision", "deny"),
+            decision_id=result.get("decision_id", ""),
+            reasons=result.get("reasons", []),
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Permission check failed: {str(exc)}",
+        ) from exc
+
 
 @tenant_router.get("/tenants", response_model=list[TenantInfo])
 async def list_tenants():

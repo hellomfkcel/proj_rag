@@ -33,9 +33,26 @@ class Settings:
     s3_secret_key: str = os.getenv("S3_SECRET_KEY", "minioadmin")
     s3_bucket: str = os.getenv("S3_BUCKET", "rag-files")
 
-    # ── 权限服务 (Cerbos) ──
+    # ── 权限服务 (Cerbos / 外部权限服务) ──
     authz_base_url: str = os.getenv("AUTHZ_BASE_URL", "http://localhost:13592")
     authz_timeout_ms: int = int(os.getenv("AUTHZ_TIMEOUT_MS", "2000"))
+
+    # 权限服务模式：local（直接调 Cerbos PDP）| remote（调外部权限服务后端）
+    authz_service_mode: str = os.getenv("AUTHZ_SERVICE_MODE", "local")
+    # 外部权限服务后端地址（remote 模式使用）
+    authz_service_url: str = os.getenv("AUTHZ_SERVICE_URL", "http://192.168.1.127:18080")
+    # VisibilityChanged 事件流 Redis URL（remote 模式使用）
+    authz_event_stream_redis_url: str = os.getenv(
+        "AUTHZ_EVENT_STREAM_REDIS_URL",
+        "redis://:REDACTED@localhost:16379/0",
+    )
+    # 服务间认证凭据 — 调用权限服务后端时作为 X-Api-Key 头发送
+    # 生产环境必须配置，与权限服务侧 shared key 一致
+    authz_client_credential: str = os.getenv("AUTHZ_CLIENT_CREDENTIAL", "")
+
+    # ctx_token 签名密钥（HMAC-SHA256）
+    # 生产环境必须显式配置。未配置时回退到 Redis URL hash（仅开发兼容）。
+    ctx_token_secret: str = os.getenv("CTX_TOKEN_SECRET", "")
 
     # ── LLM / Embedding 模型服务（provider 自动判定） ──
     # LLM_BASE_URL 同时用于 LLM chat 和 embedding 调用。

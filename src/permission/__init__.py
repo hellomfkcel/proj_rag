@@ -15,7 +15,7 @@
 不做：不存任何权益数据、不写任何策略、不做任何判定。
 """
 
-from .context import build_context, resolve_ctx_token
+from .context import build_context, resolve_ctx_token, build_context_from_claims
 from .authz import (
     check,
     check_batch,

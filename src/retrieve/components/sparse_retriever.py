@@ -43,10 +43,10 @@ class MilvusSparseRetriever:
         from pymilvus import MilvusClient
         from milvus_haystack.filters import parse_filters
 
-        # MilvusClient handles connection management internally — no explicit
-        # connect/load needed. Replaces deprecated ORM-style API
-        # (connections.connect / Collection / Collection.load / Collection.search).
+        # MilvusClient API 不会自动 load collection → 必须显式调用 load_collection。
+        # load_collection 已加载时是快速空操作（幂等）。
         client = MilvusClient(uri=f"http://{self.milvus_host}:{self.milvus_port}")
+        client.load_collection(self.collection_name)
 
         # Build sparse vector for search.
         # BGE_M3SparseTextEmbedder outputs {token_id: weight} directly —
@@ -73,15 +73,29 @@ class MilvusSparseRetriever:
         else:
             expr = None
 
-        hits = client.search(
-            collection_name=self.collection_name,
-            data=[sparse_vec],
-            anns_field="sparse_vector",
-            filter=expr,
-            limit=self.top_k,
-            output_fields=["content", "document_id", "kb_id", "vis_version"],
-            search_params={"metric_type": "IP", "params": {"nprobe": 16}},
-        )
+        try:
+            hits = client.search(
+                collection_name=self.collection_name,
+                data=[sparse_vec],
+                anns_field="sparse_vector",
+                filter=expr,
+                limit=self.top_k,
+                output_fields=["content", "document_id", "kb_id", "vis_version"],
+                search_params={"metric_type": "IP", "params": {"nprobe": 16}},
+            )
+        except Exception as exc:
+            # sparse_vector 字段可能尚未创建（首次摄入前 collection 为空 schema）。
+            # 降级返回空结果——Hybrid 检索的 dense 路仍然工作，DocumentJoiner RRF 会将
+            # 两路结果融合（dense 结果不受影响）。
+            # 设计依据：docs/RAG系统设计v14.md §15.7 混合检索与融合。
+            import logging
+            _log = logging.getLogger(__name__)
+            _log.warning(
+                "sparse_search_failed_fallback_empty",
+                collection=self.collection_name,
+                error=str(exc)[:200],
+            )
+            return {"documents": []}
 
         docs = []
         if hits and hits[0]:
