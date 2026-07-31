@@ -99,7 +99,7 @@ async def create_kb(body: KBCreateRequest, ctx: RequestContext = Depends(get_req
     # 失败即中止：不写 knowledge_bases 表
     from src.permission.authz import register_resource
     try:
-        register_resource(ctx, "kb", kb_id, f"user:{ctx.user_id}")
+        register_resource(ctx, "kb", kb_id, f"user:{ctx.user_id}", name=body.name)
     except RuntimeError:
         raise HTTPException(502, "doc:authz_write_failed — failed to register KB in permission service")
 

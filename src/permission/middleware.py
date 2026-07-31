@@ -151,23 +151,7 @@ def _verify_and_build_ctx(token: str, client_ip: str = "") -> RequestContext:
         except JWTError as e:
             raise _AuthError(401, "auth:unauthenticated", str(e))
 
-    user_id = claims.get("sub", "unknown")
-    tenant_id = claims.get("tenant", "tenant-dev")
-    roles = claims.get("roles", ["user"])
-    if isinstance(roles, str):
-        roles = [roles]
-
-    principals = [f"user:{user_id}"]
-    for r in roles:
-        principals.append(f"role:{r}")
-
-    return RequestContext(
-        request_id=claims.get("jti", "unknown"),
-        user_id=user_id,
-        tenant_id=tenant_id,
-        credential=token,
-        roles=roles,
-        groups=[],
-        principals=principals,
-        client_ip=client_ip,
-    )
+    # 委托给 context.py 的共享函数构建 RequestContext
+    # 确保 principals 展开逻辑（user:/group:/role:）在系统内只有一处权威实现
+    from src.permission.context import build_context_from_claims
+    return build_context_from_claims(claims, token, client_ip)

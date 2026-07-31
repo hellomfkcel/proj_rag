@@ -338,7 +338,8 @@ def stamp_channel_task(
         # 2. 若 unmounted → 清空戳记（纪律 2）
         if result.get("unmounted"):
             _upsert_stamps(tenant_id, doc_id, kb_id,
-                          allow_stamps=[], deny_stamps=[], vis_version=0)
+                          allow_stamps=[], deny_stamps=[], vis_version=0,
+                          allow_empty=True)
             log.info("stamp_cleared", doc_id=doc_id, kb_id=kb_id,
                       reason="unmounted")
             return {"status": "cleared", "reason": "unmounted"}
@@ -392,7 +393,24 @@ def stamp_channel_task(
 
         retries = self.request.retries
         if retries < self.max_retries:
-            delay = min(5 * (2 ** retries), 60)
+            is_no_chunks = "No chunks found" in str(exc)
+            if is_no_chunks:
+                # 根据 ingest 状态选择退避策略，避免竞态窗口内过度等待。
+                # ingest 通常耗时 30s~180s，但 ingest 已完成而 chunks
+                # 暂时不可见（Milvus 传播延迟）仅需 3~5s。
+                parse_status = _check_ingest_status(doc_id, kb_id)
+                if parse_status == "completed":
+                    # ingest 已完成，chunks 应该存在 → 短暂重试
+                    delay = min(5 * (2 ** retries), 30)   # 5s, 10s, 20s, 30s...
+                elif parse_status in ("processing", "queued"):
+                    # ingest 进行中 → 长退避，给 ingest 充足时间
+                    delay = min(30 * (2 ** retries), 180)  # 30s, 60s, 120s, 180s...
+                else:
+                    # 无 ingest 记录或状态未知 → 中等退避
+                    delay = min(15 * (2 ** retries), 120)  # 15s, 30s, 60s, 120s...
+            else:
+                # 非 no_chunks 错误（网络/权限服务故障）→ 标准退避
+                delay = min(5 * (2 ** retries), 60)        # 5s, 10s, 20s, 40s, 60s
             raise self.retry(exc=exc, countdown=delay)
 
         # 重试用尽：不标 failed（纪律 6），交给对账兜底
@@ -406,79 +424,152 @@ def _upsert_stamps(
     tenant_id: str, doc_id: str, kb_id: str,
     allow_stamps: List[str], deny_stamps: List[str],
     vis_version: int,
+    allow_empty: bool = False,
 ) -> None:
     """向 Milvus 批量 upsert 戳记字段（纪律 4：分批让渡）。
 
     只更新三个戳记字段：allow_stamps, deny_stamps, vis_version。
     不加工、不推导、不补全。
+
+    allow_empty=True: 当没有 chunk 可更新时视为成功（用于 unmounted 清空）。
+    allow_empty=False: 没有 chunk 时抛异常触发 Celery 重试（§14.5.3 纪律 1）。
     """
-    from pymilvus import Collection, connections
+    from pymilvus import MilvusClient
     s = Settings()
-    connections.connect("default", host=s.milvus_host, port=str(s.milvus_port))
+    client = MilvusClient(uri=f"http://{s.milvus_host}:{s.milvus_port}")
 
-    try:
-        col = Collection("rag_documents")
-        # 用 kb_id + document_id 定位即可（tenant_id 可能在旧数据中为空）
-        expr = f'kb_id == "{kb_id}" && document_id == "{doc_id}"'
+    # 确保 collection 已加载到内存再进行 query/upsert。
+    # MilvusClient API 不会自动 load collection，且 Milvus 重启后
+    # collection 会回到 NotLoad 状态。load_collection 已加载时是快速空操作（幂等）。
+    client.load_collection("rag_documents")
 
-        # 查询该通道下所有 chunk（需要完整字段用于 upsert）
-        results = col.query(
-            expr=expr,
-            output_fields=["id", "content", "vector", "sparse_vector",
-                          "document_id", "mount_id", "kb_id", "tenant_id",
-                          "allow_stamps", "deny_stamps", "vis_version", "retrievable"],
-            limit=10000,
+    # 用 kb_id + document_id 定位即可（tenant_id 可能在旧数据中为空）
+    # MilvusClient.query() 的 filter 语法与 ORM 略有差异：字段名需直接使用
+    expr = f'kb_id == "{kb_id}" && document_id == "{doc_id}"'
+
+    # 查询该通道下所有 chunk（需要完整字段用于 upsert）
+    results: List[Dict[str, Any]] = client.query(
+        collection_name="rag_documents",
+        filter=expr,
+        output_fields=["id", "content", "vector", "sparse_vector",
+                      "document_id", "mount_id", "kb_id", "tenant_id",
+                      "allow_stamps", "deny_stamps", "vis_version", "retrievable"],
+        limit=10000,
+    )
+
+    batch_size = 500
+    if not results:
+        if allow_empty:
+            # 清空操作（unmounted）且没有 chunk：no-op 成功
+            log.info("stamp_clear_no_chunks",
+                    doc_id=doc_id, kb_id=kb_id,
+                    msg="No chunks to clear — already empty or never ingested.")
+            return
+        # 纪律 1（§14.5.3）：失败不落盘、不 ack。
+        # 没有 chunk 可盖戳 → 抛异常触发 Celery 重试，不做静默跳过。
+        #
+        # 常见于三种情况：
+        # (a) ingest 尚未开始 → 等待 ingest 完成（中退避）
+        # (b) ingest 已完成但 chunks 暂时不可见 → Milvus 传播延迟（短退避）
+        # (c) 文档从未被解析 → 重试有限次后进死信，由对账兜底
+        #
+        # 具体退避策略由 stamp_channel_task 的 except 块根据
+        # _check_ingest_status(parse_status) 动态决定。
+        raise RuntimeError(
+            f"No chunks found for doc={doc_id} kb={kb_id} — "
+            f"stamp cannot be applied. Chunks may not have been ingested yet. "
+            f"Retrying with backoff."
         )
 
-        batch_size = 500
-        if not results:
-            log.warning("stamp_upsert_no_chunks_found",
-                       tenant_id=tenant_id, doc_id=doc_id, kb_id=kb_id,
-                       msg="No chunks matched the query — stamps NOT written. "
-                           "Chunks will remain invisible (vis_version=0) until this is resolved.")
-        for i in range(0, len(results), batch_size):
-            batch = results[i:i + batch_size]
-            upsert_rows = []
-            for row in batch:
-                # 若存量 chunk 的 tenant_id 为空（Milvus schema 演进前写入的数据），
-                # 用本任务参数覆盖；否则保留已有值
-                row_tenant = row.get("tenant_id", "")
-                effective_tenant = row_tenant if row_tenant else tenant_id
-                upsert_rows.append({
-                    "id": row["id"],
-                    "content": row["content"],
-                    "vector": row["vector"],
-                    "sparse_vector": row.get("sparse_vector", {}),
-                    "document_id": row.get("document_id", ""),
-                    "mount_id": row.get("mount_id", ""),
-                    "kb_id": row.get("kb_id", kb_id),
-                    "tenant_id": effective_tenant,
-                    "allow_stamps": allow_stamps,  # Python list → Milvus JSON array
-                    "deny_stamps": deny_stamps,    # Python list → Milvus JSON array
-                    "vis_version": vis_version,
-                    "retrievable": row.get("retrievable", True),
-                })
-            col.upsert(upsert_rows)
-            col.flush()
-    finally:
-        connections.disconnect("default")
+    for i in range(0, len(results), batch_size):
+        batch = results[i:i + batch_size]
+        upsert_rows: List[Dict[str, Any]] = []
+        for row in batch:
+            # 若存量 chunk 的 tenant_id 为空（Milvus schema 演进前写入的数据），
+            # 用本任务参数覆盖；否则保留已有值
+            row_tenant = row.get("tenant_id", "")
+            effective_tenant = row_tenant if row_tenant else tenant_id
+            upsert_rows.append({
+                "id": row["id"],
+                "content": row["content"],
+                "vector": row["vector"],
+                "sparse_vector": row.get("sparse_vector", {}),
+                "document_id": row.get("document_id", ""),
+                "mount_id": row.get("mount_id", ""),
+                "kb_id": row.get("kb_id", kb_id),
+                "tenant_id": effective_tenant,
+                "allow_stamps": allow_stamps,  # Python list → Milvus JSON array
+                "deny_stamps": deny_stamps,    # Python list → Milvus JSON array
+                "vis_version": vis_version,
+                "retrievable": row.get("retrievable", True),
+            })
+        client.upsert(collection_name="rag_documents", data=upsert_rows)
+
+
+def _check_ingest_status(doc_id: str, kb_id: str) -> str | None:
+    """检查文档的 ingest 状态，返回 parse_status 或 None。
+
+    当 stamp_channel_task 发现没有 chunk 可盖戳时调用。
+    返回值用于决定重试策略：
+    - "completed":  ingest 已完成，chunks 应存在 → 短暂重试（传播延迟）
+    - "processing" / "queued": ingest 执行中 → 长退避重试
+    - None / 其他: 尚未开始或异常 → 中等退避重试
+    """
+    import asyncpg as _asyncpg
+    import asyncio as _asyncio
+
+    async def _query():
+        conn = await _asyncpg.connect(_dsn())
+        try:
+            row = await conn.fetchrow(
+                "SELECT ie.parse_status, ie.mount_id "
+                "FROM ingest_executions ie "
+                "JOIN document_kb_mounts dkm ON ie.mount_id = dkm.id "
+                "WHERE dkm.document_id = $1 AND dkm.kb_id = $2 "
+                "ORDER BY ie.updated_at DESC LIMIT 1",
+                doc_id, kb_id,
+            )
+            if row:
+                log.warning("stamp_no_chunks_ingest_status",
+                           doc_id=doc_id, kb_id=kb_id,
+                           parse_status=row["parse_status"],
+                           mount_id=str(row["mount_id"]))
+                return row["parse_status"]
+            else:
+                log.warning("stamp_no_chunks_no_ingest_record",
+                           doc_id=doc_id, kb_id=kb_id,
+                           msg="No ingest_execution found — document may not have been parsed yet")
+                return None
+        finally:
+            await conn.close()
+
+    try:
+        return _asyncio.run(_query())
+    except Exception:
+        return None
 
 
 def _get_current_vis_version(tenant_id: str, doc_id: str, kb_id: str) -> Optional[int]:
-    """获取当前 chunk 的 vis_version（用于版本单调性检查）。"""
-    from pymilvus import Collection, connections
+    """获取当前 chunk 的 vis_version（用于版本单调性检查）。
+
+    使用 MilvusClient API（与 milvus_writer.py 和检索组件一致）。
+    """
+    from pymilvus import MilvusClient
     s = Settings()
     try:
-        connections.connect("default", host=s.milvus_host, port=str(s.milvus_port))
-        col = Collection("rag_documents")
+        client = MilvusClient(uri=f"http://{s.milvus_host}:{s.milvus_port}")
+        client.load_collection("rag_documents")
         expr = f'kb_id == "{kb_id}" && document_id == "{doc_id}" && vis_version > 0'
-        results = col.query(expr=expr, output_fields=["vis_version"], limit=1)
+        results = client.query(
+            collection_name="rag_documents",
+            filter=expr,
+            output_fields=["vis_version"],
+            limit=1,
+        )
         if results:
             return results[0].get("vis_version")
     except Exception:
         pass
-    finally:
-        connections.disconnect("default")
     return None
 
 
@@ -567,7 +658,7 @@ def cleanup_mount_chunks(mount_id: str, doc_id: str, kb_id: str) -> int:
     3. 确认退出后 → 清理该挂载的 chunk
     4. 置 parse_status = 'removed'
     """
-    from pymilvus import Collection, connections
+    from pymilvus import MilvusClient
 
     # 1. 置 cancelling
     _update_execution_status(mount_id, "cancelling")
@@ -576,21 +667,22 @@ def cleanup_mount_chunks(mount_id: str, doc_id: str, kb_id: str) -> int:
     import time
     time.sleep(5)
 
-    # 3. 清理 Milvus chunk
+    # 3. 清理 Milvus chunk（使用 MilvusClient API，与摄入管线一致）
     s = Settings()
     deleted = 0
     try:
-        connections.connect("default", host=s.milvus_host, port=str(s.milvus_port))
-        col = Collection("rag_documents")
+        client = MilvusClient(uri=f"http://{s.milvus_host}:{s.milvus_port}")
         expr = f'document_id == "{doc_id}" && kb_id == "{kb_id}"'
-        col.delete(expr)
-        col.flush()
-        deleted = col.num_entities
-        log.info("mount_chunks_cleaned", mount_id=mount_id, doc_id=doc_id, kb_id=kb_id)
+        # MilvusClient.delete() 返回 delete_count
+        delete_result = client.delete(
+            collection_name="rag_documents",
+            filter=expr,
+        )
+        deleted = delete_result.get("delete_count", 0) if isinstance(delete_result, dict) else 0
+        log.info("mount_chunks_cleaned", mount_id=mount_id, doc_id=doc_id, kb_id=kb_id,
+                 deleted=deleted)
     except Exception as exc:
         log.error("mount_chunks_cleanup_failed", mount_id=mount_id, error=str(exc))
-    finally:
-        connections.disconnect("default")
 
     # 4. 置 removed
     _update_execution_status(mount_id, "removed")

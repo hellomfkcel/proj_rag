@@ -4,6 +4,7 @@ Delegates to P-MODEL invoke_embedding (Ollama qwen3-embedding:0.6b).
 Replaces FastembedDocumentEmbedder which doesn't support our model.
 """
 
+from dataclasses import replace
 from typing import Any, Dict, List
 from haystack import component, Document
 
@@ -24,7 +25,10 @@ class OllamaDocumentEmbedder:
         texts = [doc.content for doc in documents]
         embeddings = invoke_embedding(texts, mode="document")
 
-        for doc, emb in zip(documents, embeddings):
-            doc.embedding = emb
+        # 使用 dataclasses.replace() 替代直接属性赋值（doc.embedding = emb）。
+        # 直接 mutation 可能导致共享 Document 实例的并行管道分支出现未预期行为。
+        # 见: https://docs.haystack.deepset.ai/docs/custom-components#requirements
+        for i, (doc, emb) in enumerate(zip(documents, embeddings)):
+            documents[i] = replace(doc, embedding=emb)
 
         return {"documents": documents}

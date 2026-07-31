@@ -6,6 +6,7 @@
 """
 
 import os
+from dataclasses import replace
 from typing import Any, Dict, List
 
 from haystack import component, Document
@@ -65,9 +66,13 @@ class BGE_M3SparseEmbedder:
     @component.output_types(documents=List[Document])
     def run(self, documents: List[Document]) -> Dict[str, Any]:
         model = self._get_model()
-        for doc in documents:
+        for i, doc in enumerate(documents):
             # 使用 BGE-M3 生成稀疏向量（lexical weights）
             output = model.encode([doc.content], return_dense=False, return_sparse=True)
             sparse_vec = output.get("lexical_weights", [{}])[0]
-            doc.sparse_embedding = sparse_vec
+            # 使用 dataclasses.replace() 替代直接属性赋值
+            # （doc.sparse_embedding = sparse_vec）。
+            # 直接 mutation 可能导致共享 Document 实例的并行管道分支出现未预期行为。
+            # 见: https://docs.haystack.deepset.ai/docs/custom-components#requirements
+            documents[i] = replace(doc, sparse_embedding=sparse_vec)
         return {"documents": documents}

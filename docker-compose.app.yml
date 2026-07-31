@@ -71,6 +71,16 @@ services:
     networks:
       - rag-network
     restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "celery -A src.platform.task.celery_app inspect ping -d ingestion-worker@$$(hostname) --timeout=5 2>/dev/null | grep -q 'ingestion-worker.*ok' || exit 1",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 
   # 用途：检索任务 worker，消费 retrieval_queue
   #        执行 Haystack 查询 Pipeline：嵌入 → Milvus 混合检索（六条件过滤）
@@ -96,6 +106,16 @@ services:
     networks:
       - rag-network
     restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "celery -A src.platform.task.celery_app inspect ping -d retrieval-worker@$$(hostname) --timeout=5 2>/dev/null | grep -q 'retrieval-worker.*ok' || exit 1",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 
   # 用途：盖戳任务 worker，消费 stamping_queue（独立队列，不与摄入混用）
   #        从 Cerbos /v1/visibility 取戳记，批量 upsert 到 Milvus chunk payload
@@ -119,6 +139,18 @@ services:
     networks:
       - rag-network
     restart: unless-stopped
+    # P1-2: 健康检查 — 通过 celery inspect ping 验证 worker 存活
+    # worker 无响应或 ping 失败 → 标记 unhealthy，由 Docker/编排系统自动重启
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "celery -A src.platform.task.celery_app inspect ping -d stamping-worker@$$(hostname) --timeout=5 2>/dev/null | grep -q 'stamping-worker.*ok' || exit 1",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
 
   # 用途：B-DOC outbox relay
   #        轮询 outbox 表，将领域事件可靠投递到 Redis 消息总线
@@ -135,6 +167,45 @@ services:
     networks:
       - rag-network
     restart: unless-stopped
+
+  # ════════════════════════════════════════════════════════════
+  # 事件订阅器
+  # ════════════════════════════════════════════════════════════
+
+  # 用途：VisibilityChanged 事件订阅器，常驻进程
+  #        订阅权限服务 Redis Pub/Sub "visibility_changed" 频道
+  #        收到事件后按 KB 粒度展开为逐文档盖戳任务
+  #        附带轮询兜底：定期扫描 mount_registry/ resource_registry 补齐遗漏
+  # 设计依据：docs/RAG系统设计v14.md §6A.8 + §14.5.2
+  #           + docs/外部系统设计.md §5.1 事件系统
+  # 依赖：postgres / redis（由 infra 提供）
+  visibility-events:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: python -m src.permission.visibility_events
+    environment:
+      <<: *app_env
+      OTEL_SERVICE_NAME: visibility-events
+      AUTHZ_SERVICE_MODE: ${AUTHZ_SERVICE_MODE:-remote}
+      AUTHZ_SERVICE_URL: ${AUTHZ_SERVICE_URL:-http://permission-service:8080}
+      AUTHZ_EVENT_STREAM_REDIS_URL: ${AUTHZ_EVENT_STREAM_REDIS_URL}
+      AUTHZ_CLIENT_CREDENTIAL: ${AUTHZ_CLIENT_CREDENTIAL:-}
+    networks:
+      - rag-network
+    restart: unless-stopped
+    # P1-2: 健康检查 — 验证 Redis 连接和 Stream 消费是否正常
+    # 进程存活即标记 healthy（内部错误会通过 OTel 指标暴露）
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python3 -c \"import redis; r=redis.from_url('$$AUTHZ_EVENT_STREAM_REDIS_URL'); r.ping()\" 2>/dev/null || exit 1",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
 
   # ════════════════════════════════════════════════════════════
   # 前端（Next.js 14 standalone 模式）

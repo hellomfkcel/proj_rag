@@ -117,7 +117,7 @@ def submit_ingest_task(
                 # ★ 先调权限服务 register_resource（§13.7）
                 # 失败即中止：不写 documents 表，S3 孤儿可接受
                 ctx = _build_ctx(user_id, tenant_id, request_id, credential)
-                register_resource(ctx, "document", doc_id, f"user:{user_id}")
+                register_resource(ctx, "document", doc_id, f"user:{user_id}", name=filename)
 
                 # register 成功后写 documents 表
                 # 若此步失败：resource_registry 中有记录而 documents 表无记录

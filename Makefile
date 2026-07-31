@@ -56,6 +56,10 @@ dev-stamp:
 dev-relay:
 	python -m src.platform.task.outbox_relay
 
+# VisibilityChanged 事件订阅器（Redis Pub/Sub + 轮询兜底）
+dev-visibility-events:
+	python -m src.permission.visibility_events
+
 # Celery beat（定时任务调度：对账等）
 dev-beat:
 	celery -A src.platform.task.celery_app beat --loglevel=info

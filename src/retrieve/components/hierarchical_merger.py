@@ -65,6 +65,7 @@ class HierarchicalMerger:
             from src.config import Settings
             s = Settings()
             client = MilvusClient(uri=f"http://{s.milvus_host}:{s.milvus_port}")
+            client.load_collection("rag_documents")
 
             merged: List[Document] = []
             seen_content: set = set()

@@ -9,6 +9,8 @@
 管理面（register/link/unlink/retire）直接维护 resource_registry / mount_registry 表。
 """
 
+from __future__ import annotations
+
 import asyncio
 import asyncpg
 import hashlib
@@ -16,12 +18,15 @@ import hmac
 import json
 import time
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple, Union, TYPE_CHECKING
 
 import httpx
 
 from src.config import Settings
 from src.platform.obs.logger import get_logger
+
+if TYPE_CHECKING:
+    from src.permission.permission_service_client import PermissionServiceClient
 
 log = get_logger(__name__)
 
@@ -60,9 +65,34 @@ def _run_async(coro):
 
 
 class CerbosClient:
-    """Cerbos PDP HTTP 客户端 + 资源镜像维护。"""
+    """Cerbos PDP HTTP 客户端 + 资源镜像维护。
+
+    .. deprecated:: v14.1
+        此客户端在 AUTHZ_SERVICE_MODE=local 时使用，直接调用 Cerbos PDP。
+        自 v14.1 起推荐使用 PermissionServiceClient（remote 模式），
+        通过外部权限服务后端统一管理 ACL/角色绑定/限制。
+        
+        **移除计划**：v14.3 将移除 local 模式支持。
+        当前状态：deprecated（v14.1），保留向后兼容但默认使用 remote 模式。
+        
+        迁移步骤：
+        1. 部署权限服务后端（permission-service）
+        2. 设置 .env: AUTHZ_SERVICE_MODE=remote
+        3. 设置 .env: AUTHZ_SERVICE_URL=http://<host>:18080
+        4. 重启 RAG 服务
+        5. 验证 prefilter/check/filter 端点正常工作
+    """
 
     def __init__(self, base_url: str = "", timeout_ms: int = 15000):
+        import warnings
+        warnings.warn(
+            "CerbosClient (local mode) is deprecated since v14.1. "
+            "Use PermissionServiceClient (remote mode) instead. "
+            "Set AUTHZ_SERVICE_MODE=remote in your .env file. "
+            "See docs/外部系统设计.md §7 迁移路径 for details.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         self.base_url = base_url or Settings().authz_base_url
         self.timeout_ms = timeout_ms
         self._client = httpx.Client(timeout=timeout_ms / 1000.0)
@@ -452,7 +482,9 @@ class CerbosClient:
         ttl_s 上限 600 秒。过期即任务失败，不续期、不降级。
         """
         ttl_s = min(ttl_s, 600)
-        secret = Settings().redis_url.encode()  # 用 Redis URL 作为共享密钥
+        # ctx_token 签名密钥：优先使用独立 secret，否则回退 Redis URL hash（开发兼容）
+        _cfg = Settings()
+        secret = _cfg.ctx_token_secret.encode() if _cfg.ctx_token_secret else _cfg.redis_url.encode()
 
         payload = {
             "credential": credential,
@@ -473,12 +505,15 @@ class CerbosClient:
     def register_resource(
         self, request_id: str, credential: str,
         resource_type: str, resource_id: str, owner: str,
+        tenant_id: str = "",
+        name: str | None = None,
     ) -> str:
         """注册资源到权限服务镜像 → INSERT resource_registry。
 
         Raises:
             RuntimeError: 注册失败时抛出，调用方必须回滚本地事务。
             设计依据 §13.7："调用失败即回滚本地业务事务"。
+        name: 资源名称（KB 名称 / 文档文件名），供管理台展示。
         """
 
         async def _do():
@@ -506,6 +541,7 @@ class CerbosClient:
 
     def link_resource(
         self, request_id: str, credential: str, doc_id: str, kb_id: str,
+        tenant_id: str = "",
     ) -> str:
         """建立文档到 KB 的挂载镜像 → INSERT mount_registry。
 
@@ -552,6 +588,7 @@ class CerbosClient:
 
     def unlink_resource(
         self, request_id: str, credential: str, doc_id: str, kb_id: str,
+        tenant_id: str = "",
     ) -> str:
         """解除文档到 KB 的挂载镜像 → UPDATE mount_registry SET unlinked=true。
 
@@ -583,6 +620,7 @@ class CerbosClient:
     def retire_resource(
         self, request_id: str, credential: str,
         resource_type: str, resource_id: str,
+        tenant_id: str = "",
     ) -> str:
         """退役资源 → UPDATE resource_registry SET retired=true + 级联删除所有挂载。
 
@@ -635,10 +673,47 @@ def _b64(s: str) -> str:
 
 
 _client: Optional[CerbosClient] = None
+_remote_client: Optional[PermissionServiceClient] = None  # type: ignore[name-defined]  # forward ref from TYPE_CHECKING
 
 
-def get_client() -> CerbosClient:
+def get_client() -> Union[CerbosClient, "PermissionServiceClient"]:
+    """获取权限服务客户端。
+
+    根据 AUTHZ_SERVICE_MODE 返回对应的客户端：
+    - local: CerbosClient（直接调 Cerbos PDP + 本地 DB 镜像）
+    - remote: PermissionServiceClient（调外部权限服务后端 REST API）
+
+    设计依据：docs/外部系统设计.md §7.3 cerbos_client.py 改造示意。
+    """
+    from src.config import Settings
+
+    mode = Settings().authz_service_mode
+
+    if mode == "remote":
+        global _remote_client
+        if _remote_client is None:
+            from src.permission.permission_service_client import (
+                PermissionServiceClient,
+            )
+            _remote_client = PermissionServiceClient(
+                base_url=Settings().authz_service_url,
+                timeout_ms=Settings().authz_timeout_ms,
+            )
+        return _remote_client
+
+    # local mode: use CerbosClient (deprecated since v14.1)
     global _client
     if _client is None:
-        _client = CerbosClient()
+        import logging
+        _log = logging.getLogger(__name__)
+        _log.warning(
+            "AUTHZ_SERVICE_MODE=local is DEPRECATED since v14.1. "
+            "Switch to remote mode by setting AUTHZ_SERVICE_MODE=remote "
+            "and AUTHZ_SERVICE_URL=<permission-service-url>. "
+            "See docs/外部系统设计.md §7 for migration guide."
+        )
+        _client = CerbosClient(
+            base_url=Settings().authz_base_url,
+            timeout_ms=Settings().authz_timeout_ms,
+        )
     return _client
