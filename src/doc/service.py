@@ -264,11 +264,30 @@ def delete_document_from_kb(
             ctx = _build_ctx(user_id, tenant_id, request_id, credential)
             unlink_resource(ctx, doc_id, kb_id)
 
-            # 删挂载
+            # 查询 mount_id 用于级联删除
+            mount_row = await conn.fetchrow(
+                "SELECT id FROM document_kb_mounts WHERE document_id=$1 AND kb_id=$2",
+                doc_id, kb_id,
+            )
+            mount_id = str(mount_row["id"]) if mount_row else None
+
+            # 按外键依赖顺序：先删子表，后删主表
+            if mount_id:
+                await conn.execute(
+                    "DELETE FROM ingest_executions WHERE mount_id=$1", mount_id,
+                )
             await conn.execute(
                 "DELETE FROM document_kb_mounts WHERE document_id=$1 AND kb_id=$2",
                 doc_id, kb_id,
             )
+
+            # 检查是否还有剩余挂载——无剩余则自动退役文档
+            remaining = await conn.fetchval(
+                "SELECT count(*) FROM document_kb_mounts WHERE document_id=$1", doc_id,
+            )
+            if remaining == 0:
+                retire_resource(ctx, "document", doc_id)
+                await conn.execute("DELETE FROM documents WHERE id=$1", doc_id)
 
             # 发 DocumentUnmounted 事件
             from src.doc.events import document_unmounted_event

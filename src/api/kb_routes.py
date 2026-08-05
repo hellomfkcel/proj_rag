@@ -92,12 +92,19 @@ async def list_kbs(ctx: RequestContext = Depends(get_request_context)):
 
 @router.post("/knowledge-bases", response_model=KBResponse, status_code=201)
 async def create_kb(body: KBCreateRequest, ctx: RequestContext = Depends(get_request_context)):
+    """创建知识库。需要 kb:manage 权限（system_admin 或租户管理员）。"""
+    from src.permission.authz import check, register_resource
+
     kb_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc)
 
+    # ★ 权限检查：创建 KB 需要 kb:manage（§2.3 准入矩阵，§6.3 check）
+    decision = check(ctx, "kb:manage", "kb", kb_id)
+    if decision.get("decision") != "allow":
+        raise HTTPException(403, "auth:forbidden — kb:manage required to create a knowledge base")
+
     # ★ 先调权限服务 register_resource（§13.7）
     # 失败即中止：不写 knowledge_bases 表
-    from src.permission.authz import register_resource
     try:
         register_resource(ctx, "kb", kb_id, f"user:{ctx.user_id}", name=body.name)
     except RuntimeError:
@@ -139,11 +146,19 @@ async def create_kb(body: KBCreateRequest, ctx: RequestContext = Depends(get_req
 
 @router.patch("/knowledge-bases/{kb_id}", response_model=KBResponse)
 async def update_kb(kb_id: str, body: KBUpdateRequest, ctx: RequestContext = Depends(get_request_context)):
+    """重命名知识库。需要 kb:manage 权限（§2.3 准入矩阵）。"""
+    from src.permission.authz import check
+
+    # ★ 权限检查
+    decision = check(ctx, "kb:manage", "kb", kb_id)
+    if decision.get("decision") != "allow":
+        raise HTTPException(403, detail="auth:forbidden — 您没有管理此知识库的权限（需要 kb:manage）")
+
     conn = await asyncpg.connect(_dsn())
     try:
         row = await conn.fetchrow("SELECT * FROM knowledge_bases WHERE id=$1 AND tenant_id=$2", kb_id, ctx.tenant_id)
         if not row:
-            raise HTTPException(404, "doc:not_found")
+            raise HTTPException(404, detail="doc:not_found — 知识库不存在或不属于当前租户")
 
         new_name = body.name or row["name"]
         new_desc = body.description or row["description"]
@@ -162,33 +177,40 @@ async def update_kb(kb_id: str, body: KBUpdateRequest, ctx: RequestContext = Dep
 
 
 @router.delete("/knowledge-bases/{kb_id}")
-def delete_kb(kb_id: str, ctx: RequestContext = Depends(get_request_context)):
-    import asyncio as _a
-    async def _do():
-        conn = await asyncpg.connect(_dsn())
+async def delete_kb(kb_id: str, ctx: RequestContext = Depends(get_request_context)):
+    """删除知识库。需要 kb:manage 权限（§2.3 准入矩阵 + §13.4.3）。"""
+    from src.permission.authz import check, retire_resource
+
+    # ★ 权限检查
+    decision = check(ctx, "kb:manage", "kb", kb_id)
+    if decision.get("decision") != "allow":
+        raise HTTPException(403, detail="auth:forbidden — 您没有删除此知识库的权限（需要 kb:manage）")
+
+    conn = await asyncpg.connect(_dsn())
+    try:
+        row = await conn.fetchrow("SELECT * FROM knowledge_bases WHERE id=$1 AND tenant_id=$2", kb_id, ctx.tenant_id)
+        if not row:
+            raise HTTPException(404, detail="doc:not_found — 知识库不存在或不属于当前租户")
+
+        mounts = await conn.fetchval("SELECT count(*) FROM document_kb_mounts WHERE kb_id=$1", kb_id)
+        if mounts > 0:
+            raise HTTPException(409, detail=f"知识库中还有 {mounts} 个文档挂载，请先移除所有文档后再删除")
+
+        # ★ 先调权限服务 retire_resource（§13.7）
         try:
-            row = await conn.fetchrow("SELECT * FROM knowledge_bases WHERE id=$1 AND tenant_id=$2", kb_id, ctx.tenant_id)
-            if not row: raise HTTPException(404, "doc:not_found")
-            mounts = await conn.fetchval("SELECT count(*) FROM document_kb_mounts WHERE kb_id=$1", kb_id)
-            if mounts > 0: raise HTTPException(409, f"KB has {mounts} active document mounts — remove them first")
+            retire_resource(ctx, "kb", kb_id)
+        except RuntimeError:
+            raise HTTPException(502, detail="权限服务同步失败 — 知识库删除已回滚，请稍后重试")
 
-            # ★ 先调权限服务 retire_resource（§13.7）
-            # 失败即中止：不删本地数据
-            from src.permission.authz import retire_resource
-            try:
-                retire_resource(ctx, "kb", kb_id)
-            except RuntimeError:
-                raise HTTPException(502, "doc:authz_write_failed — failed to retire KB in permission service")
-
-            # retire 成功后清理本地数据
-            await conn.execute("DELETE FROM knowledge_bases WHERE id=$1", kb_id)
-            await conn.execute("DELETE FROM directories WHERE bound_kb_id=$1", kb_id)
-            await conn.execute("DELETE FROM chunking_configs WHERE kb_id=$1", kb_id)
-            await conn.execute("DELETE FROM retrieval_configs WHERE scope_type='kb' AND scope_id=$1", kb_id)
-            return {"status": "deleted", "kb_id": kb_id}
-        finally:
-            await conn.close()
-    return _a.run(_do())
+        # retire 成功后清理本地数据（按外键依赖顺序：先删子表，后删主表）
+        await conn.execute("DELETE FROM directories WHERE bound_kb_id=$1", kb_id)
+        await conn.execute("DELETE FROM chunking_configs WHERE kb_id=$1", kb_id)
+        await conn.execute("DELETE FROM retrieval_configs WHERE scope_type='kb' AND scope_id=$1", kb_id)
+        await conn.execute("DELETE FROM document_kb_mounts WHERE kb_id=$1", kb_id)
+        await conn.execute("DELETE FROM knowledge_bases WHERE id=$1", kb_id)
+        return {"status": "deleted", "kb_id": kb_id}
+    finally:
+        await conn.close()
 
 
 # ── Chunking Config ──
@@ -302,6 +324,13 @@ async def list_documents(
 ):
     conn = await asyncpg.connect(_dsn())
     try:
+        # 验证 KB 属于当前租户，防止跨租户数据泄露
+        kb_row = await conn.fetchrow(
+            "SELECT tenant_id FROM knowledge_bases WHERE id = $1", kb_id
+        )
+        if not kb_row or kb_row["tenant_id"] != ctx.tenant_id:
+            return []
+
         where = "m.kb_id = $1"
         args = [kb_id]
         idx = 2
@@ -341,7 +370,10 @@ async def list_documents(
 async def get_document(doc_id: str, ctx: RequestContext = Depends(get_request_context)):
     conn = await asyncpg.connect(_dsn())
     try:
-        row = await conn.fetchrow("SELECT * FROM documents WHERE id=$1", doc_id)
+        row = await conn.fetchrow(
+            "SELECT * FROM documents WHERE id=$1 AND tenant_id=$2",
+            doc_id, ctx.tenant_id,
+        )
         if not row:
             raise HTTPException(404, "doc:not_found")
         return {
@@ -389,7 +421,8 @@ async def get_document_content(doc_id: str, ctx: RequestContext = Depends(get_re
     conn = await asyncpg.connect(_dsn())
     try:
         row = await conn.fetchrow(
-            "SELECT filename, storage_path FROM documents WHERE id=$1", doc_id)
+            "SELECT filename, storage_path FROM documents WHERE id=$1 AND tenant_id=$2",
+            doc_id, ctx.tenant_id)
         if not row:
             raise HTTPException(404, "doc:not_found")
 
@@ -422,7 +455,8 @@ async def download_document(doc_id: str, ctx: RequestContext = Depends(get_reque
     conn = await asyncpg.connect(_dsn())
     try:
         row = await conn.fetchrow(
-            "SELECT filename, storage_path FROM documents WHERE id=$1", doc_id)
+            "SELECT filename, storage_path FROM documents WHERE id=$1 AND tenant_id=$2",
+            doc_id, ctx.tenant_id)
         if not row:
             raise HTTPException(404, "doc:not_found")
 
@@ -463,6 +497,14 @@ async def update_document_mount(
     body: DocUpdateRequest,
     ctx: RequestContext = Depends(get_request_context),
 ):
+    """启用/停用文档。需要 kb:write 权限。"""
+    from src.permission.authz import check
+
+    # ★ 权限检查：启用/停用文档需要 kb:write
+    decision = check(ctx, "kb:write", "kb", kb_id)
+    if decision.get("decision") != "allow":
+        raise HTTPException(status_code=403, detail="auth:forbidden — 您没有管理此文档的权限（需要 kb:write）")
+
     conn = await asyncpg.connect(_dsn())
     try:
         if body.is_enabled is not None:
@@ -504,15 +546,23 @@ async def update_document_mount(
 
 @router.post("/documents/{doc_id}/trigger-parse", response_model=TriggerParseResponse)
 async def trigger_parse(doc_id: str, ctx: RequestContext = Depends(get_request_context)):
+    """触发文档解析。需要 kb:write 权限。"""
+    from src.permission.authz import check
+
     conn = await asyncpg.connect(_dsn())
     try:
         mount_rows = await conn.fetch(
             "SELECT id, kb_id FROM document_kb_mounts WHERE document_id=$1", doc_id)
         if not mount_rows:
-            raise HTTPException(404, "doc:not_found")
+            raise HTTPException(404, detail="doc:not_found — 文档不存在")
 
         mount_id = str(mount_rows[0]["id"])
         kb_id = str(mount_rows[0]["kb_id"])
+
+        # ★ 权限检查：触发解析需要 kb:write
+        decision = check(ctx, "kb:write", "kb", kb_id)
+        if decision.get("decision") != "allow":
+            raise HTTPException(status_code=403, detail="auth:forbidden — 您没有触发解析的权限（需要 kb:write）")
 
         # 检查 KB 状态
         kb_status = await conn.fetchval(
@@ -520,9 +570,10 @@ async def trigger_parse(doc_id: str, ctx: RequestContext = Depends(get_request_c
         if kb_status == "reindexing":
             raise HTTPException(409, "doc:kb_reindexing")
 
-        # 查文档的 storage_path 和 filename
+        # 查文档的 storage_path 和 filename（含租户校验）
         doc_row = await conn.fetchrow(
-            "SELECT filename, storage_path FROM documents WHERE id=$1", doc_id)
+            "SELECT filename, storage_path FROM documents WHERE id=$1 AND tenant_id=$2",
+            doc_id, ctx.tenant_id)
         if not doc_row:
             raise HTTPException(404, "doc:not_found")
 
@@ -569,25 +620,47 @@ class DocRenameRequest(BaseModel):
 @router.patch("/documents/{doc_id}")
 async def rename_document(doc_id: str, body: DocRenameRequest,
                           ctx: RequestContext = Depends(get_request_context)):
-    """重命名文档（仅改显示名，不改存储路径）。"""
+    """重命名文档（仅改显示名，不改存储路径）。需要 kb:write 权限。"""
+    from src.permission.authz import check
+
+    # 查文档所属 KB 以进行权限校验
     conn = await asyncpg.connect(_dsn())
     try:
-        row = await conn.fetchrow(
+        mount_row = await conn.fetchrow(
+            "SELECT kb_id FROM document_kb_mounts WHERE document_id=$1 LIMIT 1",
+            doc_id,
+        )
+        kb_id = str(mount_row["kb_id"]) if mount_row else ""
+    finally:
+        await conn.close()
+
+    # ★ 权限检查：重命名文档需要 kb:write
+    if kb_id:
+        decision = check(ctx, "kb:write", "kb", kb_id)
+        if decision.get("decision") != "allow":
+            raise HTTPException(
+                status_code=403,
+                detail="auth:forbidden — 您没有重命名此文档的权限（需要操作该 KB 的 kb:write 权限）",
+            )
+
+    conn2 = await asyncpg.connect(_dsn())
+    try:
+        row = await conn2.fetchrow(
             "SELECT id, filename FROM documents WHERE id=$1 AND tenant_id=$2",
             doc_id, ctx.tenant_id)
         if not row:
-            raise HTTPException(404, "doc:not_found")
+            raise HTTPException(404, detail="doc:not_found — 文档不存在或不属于当前租户")
 
         new_name = body.filename.strip()
         if not new_name:
-            raise HTTPException(422, "common:validation_error — filename must not be empty")
+            raise HTTPException(422, detail="文件名不能为空")
 
-        await conn.execute(
+        await conn2.execute(
             "UPDATE documents SET filename=$1 WHERE id=$2", new_name, doc_id)
         return {"id": str(row["id"]), "filename": new_name,
                 "old_filename": row["filename"]}
     finally:
-        await conn.close()
+        await conn2.close()
 
 
 # ── POST /documents/batch/delete — 批量删除（P1 #27） ─────────────

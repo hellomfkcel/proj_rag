@@ -86,6 +86,10 @@ class Settings:
     jwt_public_key_path: str = os.getenv("JWT_PUBLIC_KEY_PATH", "./config/jwt_public.pem")
     jwt_algorithm: str = os.getenv("JWT_ALGORITHM", "RS256")
     jwt_expire_seconds: int = int(os.getenv("JWT_EXPIRE_SECONDS", "3600"))
+    # Keycloak IdP 配置（所有登录均通过 Keycloak 验证用户名密码）
+    keycloak_server_url: str = os.getenv("KEYCLOAK_SERVER_URL", "http://192.168.1.127:8080")
+    keycloak_realm: str = os.getenv("KEYCLOAK_REALM", "rag-v14")
+    keycloak_client_id: str = os.getenv("KEYCLOAK_CLIENT_ID", "rag-frontend")
 
     # ── Pipeline ──
     pipeline_yaml_dir: str = os.getenv("PIPELINE_YAML_DIR", "./pipelines")

@@ -76,8 +76,12 @@ def upload_document(
     user_id: str = Form(default="dev-user"),
     auto_parse: bool = Form(default=True),
 ):
-    """上传文档：登记 + 挂载 + 触发解析。"""
+    """上传文档：登记 + 挂载 + 触发解析。
+
+    前置校验：kb:write 权限 + kb_id 有效性。
+    """
     from src.doc.service import submit_ingest_task
+    from src.permission.authz import check
 
     # Extract context from middleware (if available)
     ctx = getattr(req.state, "ctx", None)
@@ -85,6 +89,32 @@ def upload_document(
     credential = ctx.credential if ctx else ""
     user_id_from_ctx = ctx.user_id if ctx else user_id
     tenant_id_from_ctx = ctx.tenant_id if ctx else tenant_id
+
+    # ★ 权限检查：上传文档需要 kb:write
+    if ctx:
+        decision = check(ctx, "kb:write", "kb", kb_id)
+        if decision.get("decision") != "allow":
+            raise HTTPException(status_code=403, detail="auth:forbidden — 您没有上传文档的权限（需要 kb:write）")
+
+    # Validate kb_id: must not be empty/null and must exist in tenant
+    if not kb_id or kb_id in ("null", "undefined"):
+        raise HTTPException(status_code=422, detail="Please select a knowledge base before uploading")
+    import asyncpg as _apg
+    from src.config import Settings as _Settings
+    _dsn = _Settings().database_url.replace("postgresql+asyncpg://", "postgresql://")
+
+    async def _check_kb():
+        conn = await _apg.connect(_dsn)
+        try:
+            kb = await conn.fetchrow(
+                "SELECT id FROM knowledge_bases WHERE id=$1 AND tenant_id=$2",
+                kb_id, tenant_id_from_ctx)
+            if not kb:
+                raise HTTPException(status_code=404, detail="Knowledge base not found or not in current tenant")
+        finally:
+            await conn.close()
+    import asyncio as _asyncio
+    _asyncio.run(_check_kb())
 
     content = file.file.read()
 
@@ -247,26 +277,35 @@ async def query_stream(conversation_id: str, turn_index: int = 1):
 
 @router.delete("/documents/{doc_id}/kb/{kb_id}", response_model=DeleteResponse)
 def delete_document(doc_id: str, kb_id: str, purge: bool = False, req: Request = None):
-    """从 KB 移除文档。"""
+    """从 KB 移除文档。需要 doc:unmount 权限。"""
     from src.doc.service import delete_document_from_kb
+    from src.permission.authz import check
 
-    # Extract context from middleware (if available)
     if req:
         ctx = getattr(req.state, "ctx", None)
     else:
         ctx = None
+
+    # ★ 权限检查：移除文档需要 doc:unmount（通道类动词，必须带 channel.kb）
+    if ctx:
+        decision = check(ctx, "doc:unmount", "document", doc_id, channel_kb=kb_id)
+        if decision.get("decision") != "allow":
+            raise HTTPException(status_code=403, detail="auth:forbidden — 您没有移除此文档的权限（需要 doc:unmount）")
+
     request_id = ctx.request_id if ctx else ""
     credential = ctx.credential if ctx else ""
     user_id = ctx.user_id if ctx else "unknown"
     tenant_id = ctx.tenant_id if ctx else "unknown"
 
-    result = delete_document_from_kb(
-        user_id=user_id, doc_id=doc_id, kb_id=kb_id,
-        tenant_id=tenant_id, purge=purge,
-        request_id=request_id,
-        credential=credential,
-    )
-    return DeleteResponse(**result)
+    try:
+        result = delete_document_from_kb(
+            user_id=user_id, doc_id=doc_id, kb_id=kb_id,
+            tenant_id=tenant_id, purge=purge,
+            request_id=request_id, credential=credential,
+        )
+        return DeleteResponse(**result)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"移除文档失败: {str(e)[:200]}")
 
 
 # ══════════════════════════════════════════════════════════════

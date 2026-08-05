@@ -112,17 +112,16 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     const state = get();
     if (!state.user) return;
 
-    // Dev mode: re-issue dev-login with new tenant
-    const role = state.user.roles[0] || "user";
-    const username = state.user.id;
+    // 不允许切换到当前已登录的租户
+    if (state.user.tenant_id === tenantId) return;
 
     try {
       const axios = (await import("axios")).default;
-      const resp = await axios.post("/api/v1/auth/dev-login", {
-        username,
-        tenant: tenantId,
-        role,
-      });
+      const resp = await axios.post(
+        "/api/v1/auth/switch-tenant",
+        { target_tenant: tenantId },
+        { headers: { Authorization: `Bearer ${state.token}` } },
+      );
       const { access_token, expires_at, user } = resp.data;
       const userObj: User = {
         id: user.id,
@@ -131,9 +130,17 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         name: user.name || user.id,
       };
       get().login(access_token, userObj, new Date(expires_at).getTime());
-      window.location.reload(); // Full reload to refresh all data under new tenant
+
+      // 清除所有租户相关的 localStorage 缓存，防止跨租户数据泄露
+      localStorage.removeItem("rag_selected_kbs");
+      try { localStorage.removeItem("rag-chat-active-conv"); } catch (_) {}
+
+      // 跳转到 /kb 确保页面状态完全重置
+      window.location.href = "/kb";
     } catch (e) {
       console.error("Tenant switch failed", e);
+      const msg = e instanceof Error ? e.message : "";
+      alert(`切换租户失败: ${msg}`);
     }
   },
 

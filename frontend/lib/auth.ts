@@ -24,7 +24,7 @@ export function decodeToken(token: string): { sub: string; tenant: string; roles
     const decoded = JSON.parse(atob(payload));
     return {
       sub: decoded.sub || "unknown",
-      tenant: decoded.tenant || "tenant-dev",
+      tenant: decoded.tenant || "",  // 不再硬编码 tenant-dev；生产环境由 IdP 注入
       roles: decoded.roles || ["user"],
       exp: decoded.exp || 0,
     };
