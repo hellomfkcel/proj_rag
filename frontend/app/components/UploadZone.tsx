@@ -24,8 +24,18 @@ export default function UploadZone({ kbId, onUploaded }: Props) {
   const [uploading, setUploading] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  const tenantId = user?.tenant_id || "tenant-dev";
-  const userId = user?.id || "dev-user";
+  // 未选定 KB 时禁止上传
+  if (!kbId) {
+    return (
+      <div className="bg-yellow-50 border border-yellow-200 rounded-xl p-8 text-center">
+        <p className="text-yellow-700 text-sm font-medium">请先在顶部选择一个知识库</p>
+        <p className="text-yellow-500 text-xs mt-1">选择知识库后才能上传文档</p>
+      </div>
+    );
+  }
+
+  const tenantId = user?.tenant_id || "";
+  const userId = user?.id || "";
 
   const uploadOne = useCallback(async (item: FileStatus, idx: number, statuses: FileStatus[]) => {
     statuses[idx] = { ...item, status: "uploading", msg: "上传中...", progress: 0 };

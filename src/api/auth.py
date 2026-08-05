@@ -33,8 +33,8 @@ tenant_router = APIRouter(prefix="/api/v1", tags=["tenants"])
 
 class DevLoginRequest(BaseModel):
     username: str = "admin"
+    password: str = ""             # Keycloak 用户密码
     tenant: str = "tenant-dev"
-    role: str = "system_admin"    # system_admin / user
 
 class DevLoginResponse(BaseModel):
     access_token: str
@@ -78,24 +78,99 @@ def _sign_jwt(sub: str, tenant: str, roles: list[str]) -> tuple[str, datetime]:
 
 @router.post("/dev-login", response_model=DevLoginResponse)
 async def dev_login(body: DevLoginRequest):
-    """开发模式登录：自签 JWT，不依赖外部 IdP。
+    """用户登录：Keycloak 验证用户名密码 + 后端验证租户成员资格。
 
-    仅开发期使用。生产模式走 /api/v1/auth/token (OAuth2)。
+    流程：
+    1. 调用 Keycloak token endpoint (password grant) 验证用户名密码
+    2. 从 Keycloak 响应提取用户身份（sub, preferred_username, roles）
+    3. 验证用户属于请求的租户（tenant_memberships）
+    4. 签发本系统 JWT（含 Keycloak 身份 + 租户 claim）
     """
-    token, expires_at = _sign_jwt(
-        sub=body.username,
-        tenant=body.tenant,
-        roles=[body.role] if body.role else ["user"],
-    )
+    import httpx
+    from jose import jwt as jose_jwt
+
+    s = Settings()
+
+    # ── Step 1: Keycloak 密码验证 ──
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as http:
+            kc_resp = await http.post(
+                f"{s.keycloak_server_url}/realms/{s.keycloak_realm}/protocol/openid-connect/token",
+                data={
+                    "client_id": s.keycloak_client_id,
+                    "grant_type": "password",
+                    "username": body.username,
+                    "password": body.password,
+                    "scope": "openid",
+                },
+            )
+            if kc_resp.status_code != 200:
+                detail = "用户名或密码错误"
+                try:
+                    err = kc_resp.json()
+                    detail = err.get("error_description", detail)
+                except Exception:
+                    pass
+                raise HTTPException(status_code=401, detail=detail)
+            kc_data = kc_resp.json()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Keycloak 认证服务不可达: {str(e)[:100]}",
+        )
+
+    # ── Step 2: 从 Keycloak access_token 提取用户身份 ──
+    # Keycloak JWT 无需验签（我们刚从 Keycloak 拿到，TLS 保证完整性）
+    try:
+        # 直接解码 payload（不验证签名 — 我们信任刚获取的 token）
+        import base64, json as _json
+        payload_b64 = kc_data["access_token"].split(".")[1]
+        payload_b64 += "=" * (4 - len(payload_b64) % 4)
+        kc_claims = _json.loads(base64.urlsafe_b64decode(payload_b64))
+    except Exception:
+        raise HTTPException(status_code=500, detail="无法解析 Keycloak token")
+
+    user_id = kc_claims.get("preferred_username", kc_claims.get("sub", body.username))
+    roles = (kc_claims.get("realm_access", {}) or {}).get("roles", [])
+    # 转换 Keycloak 默认角色为系统角色
+    if "system_admin" not in roles and "admin" not in roles:
+        if "user" not in roles:
+            roles.append("user")
+
+    # ── Step 3: 租户成员校验 ──
+    if s.authz_service_mode == "remote":
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as http:
+                resp = await http.get(
+                    f"{s.authz_service_url}/api/v1/tenants/by-user/user:{user_id}",
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    user_tenant_ids = {t["id"] for t in data.get("tenants", [])}
+                    if body.tenant not in user_tenant_ids:
+                        raise HTTPException(
+                            status_code=403,
+                            detail=f"用户 '{user_id}' 不属于租户 '{body.tenant}'。"
+                                   f"可访问的租户: {', '.join(sorted(user_tenant_ids)) if user_tenant_ids else '无'}",
+                        )
+        except HTTPException:
+            raise
+        except Exception:
+            pass  # 权限服务不可达时容错
+
+    # ── Step 4: 签发本系统 JWT ──
+    token, expires_at = _sign_jwt(sub=user_id, tenant=body.tenant, roles=roles)
 
     return DevLoginResponse(
         access_token=token,
         expires_at=expires_at.isoformat(),
         user={
-            "id": body.username,
+            "id": user_id,
             "tenant_id": body.tenant,
-            "roles": [body.role] if body.role else ["user"],
-            "name": body.username,
+            "roles": roles,
+            "name": kc_claims.get("name", user_id),
         },
     )
 
@@ -629,14 +704,161 @@ async def check_permission_endpoint(
         ) from exc
 
 
-@tenant_router.get("/tenants", response_model=list[TenantInfo])
-async def list_tenants():
-    """返回用户所属的租户列表（开发模式：从 knowledge_bases 表 DISTINCT tenant_id）。"""
-    import asyncpg
+# ── POST /api/v1/auth/switch-tenant ─────────────────────────────
+# 无需密码：用当前有效 JWT 验证身份后重新签发（目标租户需通过成员校验）
+
+class SwitchTenantRequest(BaseModel):
+    target_tenant: str
+
+
+@router.post("/switch-tenant", response_model=DevLoginResponse)
+async def switch_tenant(
+    body: SwitchTenantRequest,
+    authorization: str | None = Header(None, alias="Authorization"),
+):
+    """切换租户：用当前 JWT 验证身份后重签新租户 JWT。
+
+    无需重新输入密码——当前有效 JWT 已证明用户身份。
+    后端验证用户属于目标租户后才签发新 JWT。
+    """
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Authorization header required")
+    scheme, _, token = authorization.partition(" ")
+    if scheme.lower() != "bearer" or not token:
+        raise HTTPException(status_code=401, detail="Bearer token required")
 
     s = Settings()
-    dsn = s.database_url.replace("postgresql+asyncpg://", "postgresql://")
+    from jose import jwt as jose_jwt, JWTError
 
+    # ── 验证当前 JWT ──
+    try:
+        with open(s.jwt_public_key_path) as f:
+            public_key = f.read()
+        claims = jose_jwt.decode(
+            token, public_key, algorithms=[s.jwt_algorithm],
+            options={"verify_exp": True},
+        )
+    except JWTError as e:
+        raise HTTPException(status_code=401, detail=f"Invalid token: {e}")
+
+    username = claims.get("sub", "")
+    current_tenant = claims.get("tenant", "")
+    roles = claims.get("roles", [])
+
+    if body.target_tenant == current_tenant:
+        raise HTTPException(status_code=400, detail="Already in target tenant")
+
+    # ── 验证用户属于目标租户 ──
+    if s.authz_service_mode == "remote":
+        import httpx
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as http:
+                resp = await http.get(
+                    f"{s.authz_service_url}/api/v1/tenants/by-user/user:{username}",
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    user_tenant_ids = {t["id"] for t in data.get("tenants", [])}
+                    if body.target_tenant not in user_tenant_ids:
+                        raise HTTPException(
+                            status_code=403,
+                            detail=f"用户 '{username}' 不属于租户 '{body.target_tenant}'",
+                        )
+        except HTTPException:
+            raise
+        except Exception:
+            pass  # 权限服务不可达时容错
+
+    # ── 签发新 JWT ──
+    token, expires_at = _sign_jwt(sub=username, tenant=body.target_tenant, roles=roles)
+    return DevLoginResponse(
+        access_token=token,
+        expires_at=expires_at.isoformat(),
+        user={
+            "id": username,
+            "tenant_id": body.target_tenant,
+            "roles": roles,
+            "name": username,
+        },
+    )
+
+
+@tenant_router.get("/tenants", response_model=list[TenantInfo])
+async def list_tenants(
+    authorization: str | None = Header(None, alias="Authorization"),
+):
+    """返回租户列表。
+
+    行为区分：
+    - 已认证用户 → 仅返回当前用户所属的租户（Header 中展示）
+    - 未认证 → 返回所有可用租户（登录页租户下拉选择）
+
+    数据来源：
+    1. 权限服务 /api/v1/tenants/by-user/{user_id}（已认证时优先）
+    2. 权限服务 /api/v1/tenants（未认证时获取全量）
+    3. 本地 knowledge_bases 表 DISTINCT tenant_id（fallback）
+    """
+    import asyncpg
+    import httpx
+    from jose import jwt as jose_jwt
+
+    s = Settings()
+    tenants: dict[str, TenantInfo] = {}
+    current_user_id: str | None = None
+
+    # ── 解析用户身份（若已认证）──
+    if authorization:
+        scheme, _, token = authorization.partition(" ")
+        if scheme.lower() == "bearer" and token:
+            try:
+                with open(s.jwt_public_key_path) as f:
+                    public_key = f.read()
+                claims = jose_jwt.decode(
+                    token, public_key, algorithms=[s.jwt_algorithm],
+                    options={"verify_exp": True},
+                )
+                current_user_id = claims.get("sub", "")
+            except Exception:
+                pass  # token 无效 → 按未认证处理
+
+    # ── 来源 1：权限服务 ──
+    if s.authz_service_mode == "remote":
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as http:
+                if current_user_id:
+                    # 已认证：只获取用户所属的租户
+                    resp = await http.get(
+                        f"{s.authz_service_url}/api/v1/tenants/by-user/user:{current_user_id}",
+                    )
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        for t in data.get("tenants", []):
+                            tenants[t["id"]] = TenantInfo(
+                                id=t["id"],
+                                name=t.get("name", t["id"]),
+                                kb_count=t.get("member_count", 0),
+                                doc_count=0,
+                            )
+                else:
+                    # 未认证：获取全量租户（登录页使用）
+                    resp = await http.get(
+                        f"{s.authz_service_url}/api/v1/tenants",
+                        params={"status": "active", "limit": 200},
+                    )
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        for t in data.get("tenants", []):
+                            tenants[t["id"]] = TenantInfo(
+                                id=t["id"],
+                                name=t.get("name", t["id"]),
+                                kb_count=t.get("member_count", 0),
+                                doc_count=0,
+                            )
+        except Exception:
+            pass  # fall through to local DB
+
+    # ── 来源 2：本地 knowledge_bases 表 ──
+    dsn = s.database_url.replace("postgresql+asyncpg://", "postgresql://")
     conn = await asyncpg.connect(dsn)
     try:
         rows = await conn.fetch("""
@@ -647,13 +869,41 @@ async def list_tenants():
             FROM knowledge_bases k
             GROUP BY tenant_id
         """)
-        return [
-            TenantInfo(
-                id=r["tenant_id"],
-                name=r["tenant_id"],
-                kb_count=r["kb_count"],
-                doc_count=r["doc_count"],
-            ) for r in rows
-        ]
+        for r in rows:
+            tid = r["tenant_id"]
+            if tid not in tenants:
+                tenants[tid] = TenantInfo(
+                    id=tid,
+                    name=tid,
+                    kb_count=r["kb_count"],
+                    doc_count=r["doc_count"],
+                )
+            else:
+                t = tenants[tid]
+                t.kb_count = max(t.kb_count, r["kb_count"])
+                t.doc_count = max(t.doc_count, r["doc_count"])
     finally:
         await conn.close()
+
+    # ── 已认证用户：确保当前 JWT 中的租户也出现在列表中 ──
+    if current_user_id and authorization:
+        try:
+            scheme, _, token = authorization.partition(" ")
+            with open(s.jwt_public_key_path) as f:
+                public_key = f.read()
+            claims = jose_jwt.decode(
+                token, public_key, algorithms=[s.jwt_algorithm],
+                options={"verify_exp": False},
+            )
+            jwt_tenant = claims.get("tenant", "")
+            if jwt_tenant and jwt_tenant not in tenants:
+                tenants[jwt_tenant] = TenantInfo(
+                    id=jwt_tenant,
+                    name=jwt_tenant,
+                    kb_count=0,
+                    doc_count=0,
+                )
+        except Exception:
+            pass
+
+    return list(tenants.values())

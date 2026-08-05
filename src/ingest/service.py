@@ -402,6 +402,13 @@ def stamp_channel_task(
                 if parse_status == "completed":
                     # ingest 已完成，chunks 应该存在 → 短暂重试
                     delay = min(5 * (2 ** retries), 30)   # 5s, 10s, 20s, 30s...
+                elif parse_status == "failed":
+                    # ingest 已彻底失败 → 放弃盖戳（不会有 chunks），交对账兜底
+                    log.warning("stamp_aborted_ingest_failed",
+                                doc_id=doc_id, kb_id=kb_id,
+                                event="stamp_aborted_ingest_failed")
+                    return {"status": "aborted", "reason": "ingest_failed",
+                            "doc_id": doc_id, "kb_id": kb_id}
                 elif parse_status in ("processing", "queued"):
                     # ingest 进行中 → 长退避，给 ingest 充足时间
                     delay = min(30 * (2 ** retries), 180)  # 30s, 60s, 120s, 180s...

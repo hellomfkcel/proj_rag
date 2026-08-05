@@ -22,23 +22,23 @@ log = get_logger(__name__)
 
 # ── 事件 → 任务 dispatch 表 ────────────────────────────────────────
 
-def _dispatch_event(event_type: str, payload: dict, envelope_tenant_id: str = ""):
+async def _dispatch_event(event_type: str, payload: dict, envelope_tenant_id: str = ""):
     """根据事件类型分发到对应的 Celery 任务。
 
     tenant_id 按设计文档 §3.1 定义在事件信封层（outbox.tenant_id 列），
     不在 payload 字典中。此处显式传入，避免 handler 从 payload 中误读。
     """
     if event_type == "DocumentMounted":
-        return _handle_document_mounted(payload, envelope_tenant_id)
+        await _handle_document_mounted(payload, envelope_tenant_id)
     elif event_type == "DocumentUnmounted":
-        return _handle_document_unmounted(payload)
+        await _handle_document_unmounted(payload)
     elif event_type == "MountEnabledChanged":
-        return _handle_mount_enabled_changed(payload)
+        _handle_mount_enabled_changed(payload)
     else:
         log.debug("outbox_event_ignored", event_type=event_type)
 
 
-def _handle_document_mounted(payload: dict, envelope_tenant_id: str = ""):
+async def _handle_document_mounted(payload: dict, envelope_tenant_id: str = ""):
     """DocumentMounted → 提交 ingest_document_task 到 ingestion_queue。
 
     这是从注册→解析的唯一触发路径（v14.md §13.3.2）：
@@ -60,20 +60,16 @@ def _handle_document_mounted(payload: dict, envelope_tenant_id: str = ""):
 
     # 查询当前 execution_epoch（trigger_parse 已写入 ingest_execution）
     import asyncpg as _apg
-
-    async def _get_epoch():
+    try:
         s = Settings()
         dsn = s.database_url.replace("postgresql+asyncpg://", "postgresql://")
         conn = await _apg.connect(dsn)
         try:
             epoch = await conn.fetchval(
                 "SELECT execution_epoch FROM ingest_executions WHERE mount_id=$1", mount_id)
-            return epoch or 1
+            epoch = epoch or 1
         finally:
             await conn.close()
-
-    try:
-        epoch = asyncio.run(_get_epoch())
     except Exception:
         epoch = 1
 
@@ -89,7 +85,7 @@ def _handle_document_mounted(payload: dict, envelope_tenant_id: str = ""):
     log.info("outbox_dispatched_ingest", mount_id=mount_id, document_id=document_id)
 
 
-def _handle_document_unmounted(payload: dict):
+async def _handle_document_unmounted(payload: dict):
     """DocumentUnmounted → 触发 chunk 清理。"""
     from src.ingest.service import cleanup_mount_chunks
 
@@ -98,20 +94,16 @@ def _handle_document_unmounted(payload: dict):
 
     if mount_id:
         try:
-            # 从 mount_registry 反查 doc_id
             import asyncpg as _apg
+            s = Settings()
+            dsn = s.database_url.replace("postgresql+asyncpg://", "postgresql://")
+            conn = await _apg.connect(dsn)
+            try:
+                doc_id = await conn.fetchval(
+                    "SELECT document_id FROM document_kb_mounts WHERE id=$1", mount_id)
+            finally:
+                await conn.close()
 
-            async def _get_doc_id():
-                s = Settings()
-                dsn = s.database_url.replace("postgresql+asyncpg://", "postgresql://")
-                conn = await _apg.connect(dsn)
-                try:
-                    return await conn.fetchval(
-                        "SELECT document_id FROM document_kb_mounts WHERE id=$1", mount_id)
-                finally:
-                    await conn.close()
-
-            doc_id = asyncio.run(_get_doc_id())
             if doc_id:
                 cleanup_mount_chunks(mount_id, str(doc_id), kb_id)
         except Exception as exc:
@@ -173,7 +165,7 @@ async def _poll_and_dispatch():
                     payload = json.loads(payload)
 
                 try:
-                    _dispatch_event(event_type, payload, envelope_tenant_id)
+                    await _dispatch_event(event_type, payload, envelope_tenant_id)
                     await conn.execute(
                         "UPDATE outbox SET status = 'sent' WHERE id = $1", row["id"])
                 except Exception as exc:

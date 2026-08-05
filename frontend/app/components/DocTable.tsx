@@ -6,6 +6,18 @@ import { deleteDocument, toggleDocument, triggerParse, getDownloadUrl } from "@/
 import { renameDocument, batchDelete, batchParse, moveDocToDir } from "@/lib/dirs";
 import type { DirItem } from "@/lib/dirs";
 
+/** 统一错误处理：根据 HTTP 状态码返回用户可读的消息 */
+function getErrorMessage(e: any, defaultMsg: string): string {
+  const status = e?.response?.status;
+  const detail = e?.response?.data?.detail || "";
+  if (status === 403) return `权限不足 — ${detail || "您没有执行此操作的权限"}`;
+  if (status === 404) return "资源不存在或已被删除";
+  if (status === 409) return detail || "操作冲突，请刷新后重试";
+  if (status === 502) return "权限服务同步失败，请稍后重试";
+  if (detail) return detail;
+  return `${defaultMsg}: ${e?.message || "未知错误"}`;
+}
+
 interface Doc {
   document_id: string; mount_id: string; filename: string;
   file_size: number; mime_type?: string; parse_status: string; is_enabled: boolean;
@@ -250,11 +262,11 @@ export default function DocTable({
                     <button onClick={() => onPreviewDoc(d.document_id)} className="px-2 py-0.5 text-xs text-gray-500 hover:bg-gray-100 rounded" title="预览">👁</button>
                     <a href={getDownloadUrl(d.document_id)} className="px-2 py-0.5 text-xs text-gray-500 hover:bg-gray-100 rounded" title="下载" target="_blank" rel="noreferrer">📥</a>
                     <button onClick={() => { setRenId(d.document_id); setRenVal(d.filename); }} className="px-2 py-0.5 text-xs text-gray-500 hover:bg-gray-100 rounded" title="重命名">✏️</button>
-                    <button onClick={async () => { await toggleDocument(d.document_id, kbId, !d.is_enabled); onRefresh(); }} className="px-2 py-0.5 text-xs text-gray-500 hover:bg-gray-100 rounded" title={d.is_enabled ? "停用" : "启用"}>{d.is_enabled ? "⏸" : "▶️"}</button>
+                    <button onClick={async () => { try { await toggleDocument(d.document_id, kbId, !d.is_enabled); onRefresh(); } catch(e) { alert(getErrorMessage(e, "启用/停用失败")); } }} className="px-2 py-0.5 text-xs text-gray-500 hover:bg-gray-100 rounded" title={d.is_enabled ? "停用" : "启用"}>{d.is_enabled ? "⏸" : "▶️"}</button>
                     {(d.parse_status === "not_parsed" || d.parse_status === "failed") && (
-                      <button onClick={async () => { await triggerParse(d.document_id); onRefresh(); }} className="px-2 py-0.5 text-xs text-blue-600 hover:bg-blue-50 rounded font-medium">🔄 解析</button>
+                      <button onClick={async () => { try { await triggerParse(d.document_id); onRefresh(); } catch(e) { alert(getErrorMessage(e, "解析触发失败")); } }} className="px-2 py-0.5 text-xs text-blue-600 hover:bg-blue-50 rounded font-medium">🔄 解析</button>
                     )}
-                    <button onClick={async () => { if (confirm("确认移除？")) { await deleteDocument(d.document_id, kbId); onRefresh(); } }} className="px-2 py-0.5 text-xs text-red-500 hover:bg-red-50 rounded">🗑</button>
+                    <button onClick={async () => { if (confirm("确认移除？")) { try { await deleteDocument(d.document_id, kbId); onRefresh(); } catch(e) { alert(getErrorMessage(e, "删除失败")); } } }} className="px-2 py-0.5 text-xs text-red-500 hover:bg-red-50 rounded">🗑</button>
                   </div>
                 </td>
               </tr>

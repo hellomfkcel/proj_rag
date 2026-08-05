@@ -19,7 +19,7 @@ from src.permission.context import RequestContext
 
 
 PUBLIC_PREFIXES = (
-    "/api/v1/auth", "/healthz", "/readyz", "/ping",
+    "/api/v1/auth", "/api/v1/tenants", "/healthz", "/readyz", "/ping",
     "/docs", "/openapi.json", "/favicon.ico",
 )
 
@@ -63,11 +63,51 @@ class AuthMiddleware(BaseHTTPMiddleware):
         client_ip = request.client.host if request.client else ""
         try:
             ctx = _verify_and_build_ctx(token, client_ip)
-            request.state.ctx = ctx
         except _AuthError as e:
             return JSONResponse(status_code=e.status, content={"error_code": e.error_code, "message": e.message})
 
+        # 检查用户是否被型一封禁（subject_ban）
+        if _is_user_suspended(token):
+            return JSONResponse(
+                status_code=403,
+                content={
+                    "error_code": "auth:suspended",
+                    "message": "您的账号已被封禁，无法访问系统",
+                },
+            )
+
+        request.state.ctx = ctx
         return await call_next(request)
+
+
+def _is_user_suspended(token: str) -> bool:
+    """检查用户是否被型一封禁（subject_ban）。
+
+    通过权限服务 prefilter 端点查询——被封禁用户返回 suspended=true。
+    失败时 fail-open（不阻止正常用户）。
+    """
+    from src.config import Settings
+    s = Settings()
+    if s.authz_service_mode != "remote":
+        return False
+    try:
+        import httpx
+        resp = httpx.get(
+            f"{s.authz_service_url}/v1/prefilter",
+            params={"credential": token},
+            headers={
+                "X-Request-Id": "middleware-suspension-check",
+                "X-Client-Id": "retrieval",
+                "X-Api-Key": s.authz_client_credential,
+            },
+            timeout=5.0,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            return data.get("suspended", False)
+    except Exception:
+        pass  # fail-open: 权限服务不可达时不阻止用户
+    return False
 
 
 class _AuthError(Exception):
