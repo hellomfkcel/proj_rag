@@ -40,7 +40,8 @@ def main():
     t0 = time.time()
     try:
         from FlagEmbedding import FlagReranker
-        ranker = FlagReranker("BAAI/bge-reranker-v2-m3", use_fp16=True)
+        from src.platform.model.registry import _get_device
+        ranker = FlagReranker("BAAI/bge-reranker-v2-m3", use_fp16=True, devices=_get_device())
         # Quick smoke test
         _ = ranker.compute_score([["预热", "测试"]], normalize=True)
         elapsed = time.time() - t0

@@ -43,7 +43,6 @@ class SemanticDocumentSplitter:
 
     @component.output_types(documents=List[Document])
     def run(self, documents: List[Document]) -> Dict[str, Any]:
-        from src.platform.model.registry import invoke_embedding
         from src.platform.obs.logger import get_logger
         log = get_logger(__name__)
 
@@ -61,9 +60,15 @@ class SemanticDocumentSplitter:
                 result_docs.append(doc)
                 continue
 
-            # ── Step 2: Embed sentences ──
+            # ── Step 2: Embed sentences via embedding client ──
+            # 自动路由到 HTTP 服务（EMBEDDING_SERVICE_URL 设置时）
+            # 或本地 BGE-M3 全局单例（默认）。dense_vecs 与 _cosine_similarity 兼容。
             try:
-                embeddings = invoke_embedding(sentences, mode="document")
+                from src.services.embedding_client import embed_documents
+                embeddings_raw, _, _ = embed_documents(
+                    sentences, batch_size=512, normalize=False
+                )
+                embeddings = embeddings_raw
             except Exception as exc:
                 log.warning("semantic_split_embed_failed", error=str(exc))
                 # Fallback: return document as-is

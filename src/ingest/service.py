@@ -395,26 +395,30 @@ def stamp_channel_task(
         if retries < self.max_retries:
             is_no_chunks = "No chunks found" in str(exc)
             if is_no_chunks:
-                # 根据 ingest 状态选择退避策略，避免竞态窗口内过度等待。
-                # ingest 通常耗时 30s~180s，但 ingest 已完成而 chunks
-                # 暂时不可见（Milvus 传播延迟）仅需 3~5s。
+                # 根据 ingest 状态选择退避策略
                 parse_status = _check_ingest_status(doc_id, kb_id)
                 if parse_status == "completed":
                     # ingest 已完成，chunks 应该存在 → 短暂重试
-                    delay = min(5 * (2 ** retries), 30)   # 5s, 10s, 20s, 30s...
+                    delay = min(5 * (2 ** retries), 30)
                 elif parse_status == "failed":
-                    # ingest 已彻底失败 → 放弃盖戳（不会有 chunks），交对账兜底
+                    # ingest 已彻底失败 → 放弃盖戳
                     log.warning("stamp_aborted_ingest_failed",
-                                doc_id=doc_id, kb_id=kb_id,
-                                event="stamp_aborted_ingest_failed")
+                                doc_id=doc_id, kb_id=kb_id)
                     return {"status": "aborted", "reason": "ingest_failed",
                             "doc_id": doc_id, "kb_id": kb_id}
                 elif parse_status in ("processing", "queued"):
-                    # ingest 进行中 → 长退避，给 ingest 充足时间
-                    delay = min(30 * (2 ** retries), 180)  # 30s, 60s, 120s, 180s...
+                    # ingest 进行中 → 长退避
+                    delay = min(30 * (2 ** retries), 180)
+                elif parse_status == "not_parsed" or parse_status is None:
+                    # 从未触发过摄入 → 不会有 chunks，直接放弃不重试
+                    log.info("stamp_skipped_not_ingested",
+                             doc_id=doc_id, kb_id=kb_id,
+                             parse_status=parse_status or "no_execution_record")
+                    return {"status": "skipped", "reason": "not_ingested",
+                            "doc_id": doc_id, "kb_id": kb_id}
                 else:
-                    # 无 ingest 记录或状态未知 → 中等退避
-                    delay = min(15 * (2 ** retries), 120)  # 15s, 30s, 60s, 120s...
+                    # 未知状态 → 中等退避
+                    delay = min(15 * (2 ** retries), 120)
             else:
                 # 非 no_chunks 错误（网络/权限服务故障）→ 标准退避
                 delay = min(5 * (2 ** retries), 60)        # 5s, 10s, 20s, 40s, 60s

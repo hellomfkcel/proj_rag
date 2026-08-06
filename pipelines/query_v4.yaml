@@ -1,10 +1,6 @@
 components:
-  text_embedder:
-    type: src.retrieve.components.ollama_text_embedder.OllamaTextEmbedder
-    init_parameters:
-      model: ${EMBEDDING_MODEL}
-  sparse_embedder:
-    type: src.retrieve.components.sparse_text_embedder.BGE_M3SparseTextEmbedder
+  query_embedder:
+    type: src.retrieve.components.bge_m3_text_embedder.BGE_M3TextEmbedder
     init_parameters: {}
   dense_retriever:
     type: src.retrieve.components.dense_retriever.MilvusDenseRetriever
@@ -36,9 +32,9 @@ components:
       window_size: 3
       max_total_chunks: 10
 connections:
-- sender: text_embedder.embedding
+- sender: query_embedder.embedding
   receiver: dense_retriever.query_embedding
-- sender: sparse_embedder.sparse_embedding
+- sender: query_embedder.sparse_embedding
   receiver: sparse_retriever.query_sparse_embedding
 - sender: dense_retriever.documents
   receiver: joiner.documents

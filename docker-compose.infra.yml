@@ -42,6 +42,12 @@ services:
       timeout: 3s
       retries: 5
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 512M
 
   # 用途：① Celery broker（ingestion / retrieval / stamping 三类任务队列）
   #        ② Celery result backend
@@ -63,6 +69,12 @@ services:
       timeout: 3s
       retries: 5
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+        reservations:
+          memory: 256M
 
   # 用途：Milvus 的元数据存储（仅 milvus 内部依赖，业务代码不直接访问）
   etcd:
@@ -86,6 +98,12 @@ services:
       timeout: 5s
       retries: 5
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 128M
 
   # 用途：Milvus 的原始向量数据持久化（仅 milvus 内部依赖，业务代码不直接访问）
   minio:
@@ -135,6 +153,12 @@ services:
       timeout: 5s
       retries: 10
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 6G
+        reservations:
+          memory: 3G
 
   # 用途：文档原文件对象存储（S3 兼容网关）
   #        B-DOC 上传时写入 / B-INGEST 读取原文解析 / B-DOC 删除时清理

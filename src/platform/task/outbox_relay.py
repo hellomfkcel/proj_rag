@@ -58,6 +58,27 @@ async def _handle_document_mounted(payload: dict, envelope_tenant_id: str = ""):
         log.warning("document_mounted_invalid_payload", payload_keys=list(payload.keys()))
         return
 
+    # ★ 去重：检查是否已有该 mount 的执行记录处于处理中（processing）
+    # 防止历史残留的重复 DocumentMounted 事件生成多余的并发摄入任务。
+    # 注意："queued" 状态不跳过——此时执行记录已由 trigger_parse 创建，
+    # 但 ingest_document_task 尚未提交，本函数正是首次提交的入口。
+    import asyncpg as _apg
+    try:
+        s = Settings()
+        dsn = s.database_url.replace("postgresql+asyncpg://", "postgresql://")
+        _conn = await _apg.connect(dsn)
+        try:
+            active = await _conn.fetchval(
+                "SELECT parse_status FROM ingest_executions WHERE mount_id=$1", mount_id)
+            if active == "processing":
+                log.info("outbox_skip_duplicate_ingest",
+                         mount_id=mount_id, parse_status=active)
+                return
+        finally:
+            await _conn.close()
+    except Exception:
+        pass  # fail-open：DB 查询失败不阻塞事件分发
+
     # 查询当前 execution_epoch（trigger_parse 已写入 ingest_execution）
     import asyncpg as _apg
     try:
@@ -154,24 +175,27 @@ async def _poll_and_dispatch():
     try:
         while True:
             rows = await conn.fetch(
-                "SELECT id, event_type, payload, tenant_id FROM outbox "
+                "SELECT id, event_type, payload, tenant_id, trace_id FROM outbox "
                 "WHERE status = 'pending' ORDER BY created_at LIMIT 50"
             )
             for row in rows:
                 event_type = row["event_type"]
                 payload = row["payload"]
                 envelope_tenant_id = row["tenant_id"] or ""
+                outbox_trace_id = row["trace_id"] or ""
                 if isinstance(payload, str):
                     payload = json.loads(payload)
 
                 try:
-                    await _dispatch_event(event_type, payload, envelope_tenant_id)
+                    # ── 还原 trace context ──
+                    await _dispatch_with_trace(
+                        event_type, payload, envelope_tenant_id, outbox_trace_id
+                    )
                     await conn.execute(
                         "UPDATE outbox SET status = 'sent' WHERE id = $1", row["id"])
                 except Exception as exc:
                     log.error("outbox_dispatch_failed",
                               event_type=event_type, error=str(exc))
-                    # Mark as failed so it doesn't block the queue forever
                     await conn.execute(
                         "UPDATE outbox SET status = 'failed' WHERE id = $1", row["id"])
 
@@ -180,8 +204,45 @@ async def _poll_and_dispatch():
         await conn.close()
 
 
+async def _dispatch_with_trace(event_type: str, payload: dict, tenant_id: str,
+                               outbox_trace: str):
+    """创建 parent span 后分发事件，使 Celery 任务携带正确的 trace context。
+
+    outbox_trace 格式: {trace_id}|{span_id}（由 trigger_parse 写入）
+    """
+    try:
+        from opentelemetry import trace
+        from opentelemetry.trace import SpanContext, TraceFlags, NonRecordingSpan
+
+        if "|" in outbox_trace:
+            trace_id_hex, span_id_hex = outbox_trace.split("|", 1)
+            parent_sc = SpanContext(
+                trace_id=int(trace_id_hex, 16),
+                span_id=int(span_id_hex, 16),
+                is_remote=True,
+                trace_flags=TraceFlags(1),
+            )
+            tracer = trace.get_tracer("rag-v14")
+            parent_ctx = trace.set_span_in_context(NonRecordingSpan(parent_sc))
+            with tracer.start_as_current_span(
+                f"outbox:{event_type}",
+                context=parent_ctx,
+                kind=trace.SpanKind.CONSUMER,
+            ):
+                await _dispatch_event(event_type, payload, tenant_id)
+            return
+    except Exception:
+        pass
+
+    await _dispatch_event(event_type, payload, tenant_id)
+
+
 def main():
     """Outbox relay 入口（常驻进程）。"""
+    # 初始化 OTel Tracing — 确保 before_task_publish 信号能注入 traceparent
+    import os
+    from src.platform.obs.tracing import init_tracing
+    init_tracing(os.getenv("OTEL_SERVICE_NAME", "outbox-relay"))
     asyncio.run(_poll_and_dispatch())
 
 

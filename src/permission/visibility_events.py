@@ -126,41 +126,49 @@ def on_kb_visibility_changed(kb_id: str, tenant_id: str,
 async def poll_visibility_changes(last_check_time: float = 0.0) -> Dict:
     """轮询 mount_registry 检测近期变更。
 
-    检测两类变更：
-    1. 新 unlinked 的挂载 → 清空戳记（文档从 KB 移除）
-    2. 新 retired 的资源 → 清空戳记（文档彻底删除）
-
-    返回检测到的变更数，调用方据此决定是否缩短下次轮询间隔。
+    仅处理自上次检查以来新增的 unlink/retire（增量扫描），避免重复派发。
+    首次启动时跳过存量，交给 reconciliation 定时对账处理。
     """
+    from datetime import datetime, timezone
+
     conn = await asyncpg.connect(_dsn())
     changes_found = 0
 
     try:
-        # 检测最近 unlinked 的挂载（通过扫描当前 unlinked=true 但 stamp 可能未清空的记录）
-        unlinked_rows = await conn.fetch(
-            "SELECT doc_id, kb_id FROM mount_registry "
-            "WHERE unlinked = true "
-            "LIMIT 100"
-        )
+        if last_check_time > 0:
+            since = datetime.fromtimestamp(last_check_time, tz=timezone.utc)
+            unlinked_rows = await conn.fetch(
+                "SELECT doc_id, kb_id FROM mount_registry "
+                "WHERE unlinked = true AND updated_at > $1 "
+                "LIMIT 100", since,
+            )
+        else:
+            # 首次启动：不回溯历史
+            unlinked_rows = []
+
         for row in unlinked_rows:
             doc_id = str(row["doc_id"])
             kb_id = str(row["kb_id"])
             try:
                 on_visibility_changed(
                     doc_id=doc_id, kb_id=kb_id,
-                    tenant_id="",  # tenant 从 stamp_channel_task 内部查询
+                    tenant_id="",
                     change_type="poll_unlinked",
                 )
                 changes_found += 1
             except Exception:
                 pass
 
-        # 检测最近 retired 的资源
-        retired_rows = await conn.fetch(
-            "SELECT resource_type, resource_id FROM resource_registry "
-            "WHERE retired = true AND resource_type = 'kb' "
-            "LIMIT 20"
-        )
+        if last_check_time > 0:
+            since = datetime.fromtimestamp(last_check_time, tz=timezone.utc)
+            retired_rows = await conn.fetch(
+                "SELECT resource_type, resource_id FROM resource_registry "
+                "WHERE retired = true AND resource_type = 'kb' AND updated_at > $1 "
+                "LIMIT 20", since,
+            )
+        else:
+            retired_rows = []
+
         for row in retired_rows:
             kb_id = str(row["resource_id"])
             try:
@@ -601,9 +609,15 @@ def run_visibility_event_subscriber(poll_fallback_interval_s: int = 60) -> None:
         )
 
     # 轮询兜底（两种模式共用），检查 shutdown 信号
+    from opentelemetry import trace as _otel_trace
+    _tracer = _otel_trace.get_tracer("rag-v14")
     while not _shutdown_event.is_set():
         try:
-            result = asyncio.run(poll_visibility_changes())
+            with _tracer.start_as_current_span(
+                "visibility-poll-cycle",
+                kind=_otel_trace.SpanKind.INTERNAL,
+            ):
+                result = asyncio.run(poll_visibility_changes())
             changes = result.get("changes_found", 0)
             sleep_s = (
                 min(poll_fallback_interval_s, 10)
@@ -623,4 +637,8 @@ def run_visibility_event_subscriber(poll_fallback_interval_s: int = 60) -> None:
 
 
 if __name__ == "__main__":
+    import os
+    from src.platform.obs.tracing import init_tracing
+    # 初始化 OTel — 确保 before_task_publish 信号注入 traceparent 到盖戳任务
+    init_tracing(os.getenv("OTEL_SERVICE_NAME", "visibility-events"))
     run_visibility_event_subscriber()

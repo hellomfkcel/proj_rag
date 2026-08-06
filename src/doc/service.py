@@ -67,6 +67,8 @@ def submit_ingest_task(
     auto_parse: bool = True,
     request_id: str = "",
     credential: str = "",
+    otel_trace_id: str = "",
+    otel_span_id: str = "",
 ) -> dict:
     """文档上传入口：只登记不解析。
 
@@ -79,14 +81,11 @@ def submit_ingest_task(
        → link 失败即中止，不写挂载表
     4. 如果 auto_parse=true：登记后立即内部调 trigger_parse
 
-    异常安全：唯一可能的不一致是"权限服务有、本地无"（孤儿镜像），
-    安全且可被 §13.7b 结构镜像对账回收。绝不会出现"本地有、权限服务无"。
+    ★ async def — 在 asyncio 事件循环中运行，OTel context 正确传播。
     """
     store = _get_store()
     fingerprint = _compute_fingerprint(file_content)
 
-    # 使用原始 asyncpg 连接（阶段一简单走同步 psycopg2 或直接 dict 操作）
-    # 开发期：直接在 PostgreSQL 上用简单的方式操作
     import asyncpg
     import asyncio
 
@@ -95,9 +94,7 @@ def submit_ingest_task(
         conn = await asyncpg.connect(
             s.database_url.replace("postgresql+asyncpg://", "postgresql://")
         )
-
         try:
-            # 1. 物理去重
             doc_row = await conn.fetchrow(
                 "SELECT id, storage_path FROM documents WHERE tenant_id=$1 AND content_fingerprint=$2",
                 tenant_id, fingerprint,
@@ -106,22 +103,11 @@ def submit_ingest_task(
             is_duplicate = doc_id is not None
 
             if not doc_id:
-                # 生成 doc_id（在写 S3 和 register 之前）
                 doc_id = str(uuid.uuid4())
-
-                # 写入 SeaweedFS（物理存储先于 DB——S3 不可回滚，
-                # 若后续 register 失败则留下孤儿 S3 对象，可被定期清理脚本回收）
                 s3_key = f"docs/{tenant_id}/{doc_id}/{filename}"
                 storage_path = store.put(s3_key, file_content, "application/octet-stream")
-
-                # ★ 先调权限服务 register_resource（§13.7）
-                # 失败即中止：不写 documents 表，S3 孤儿可接受
                 ctx = _build_ctx(user_id, tenant_id, request_id, credential)
                 register_resource(ctx, "document", doc_id, f"user:{user_id}", name=filename)
-
-                # register 成功后写 documents 表
-                # 若此步失败：resource_registry 中有记录而 documents 表无记录
-                # → 孤儿镜像，安全方向，可被 §13.7b 对账回收
                 await conn.execute(
                     """INSERT INTO documents (id, tenant_id, filename, content_fingerprint,
                        storage_path, file_size, mime_type, uploaded_by)
@@ -130,34 +116,28 @@ def submit_ingest_task(
                     storage_path, len(file_content), "", user_id,
                 )
 
-            # 2. 挂载关系
             mount_row = await conn.fetchrow(
                 "SELECT id FROM document_kb_mounts WHERE document_id=$1 AND kb_id=$2",
                 doc_id, kb_id,
             )
             mount_id = str(mount_row["id"]) if mount_row else None
-
             if not mount_id:
                 mount_id = str(uuid.uuid4())
-
-                # ★ 先调权限服务 link_resource（§13.7）
-                # 失败即中止：不写 document_kb_mounts 表
                 ctx = _build_ctx(user_id, tenant_id, request_id, credential)
                 link_resource(ctx, doc_id, kb_id)
-
-                # link 成功后写 document_kb_mounts 表
-                # 若此步失败：mount_registry 中有记录而 document_kb_mounts 表无记录
-                # → 孤儿镜像，安全方向
                 await conn.execute(
                     """INSERT INTO document_kb_mounts (id, document_id, kb_id, mounted_by)
                        VALUES ($1,$2,$3,$4)""",
                     mount_id, doc_id, kb_id, user_id,
                 )
 
-            # 3. 如果 auto_parse，触发解析
             parse_status = "not_parsed"
             if auto_parse:
-                await _trigger_parse_internal(conn, mount_id, kb_id, tenant_id)
+                await _trigger_parse_internal(
+                    conn, mount_id, kb_id, tenant_id,
+                    otel_trace_id=otel_trace_id,
+                    otel_span_id=otel_span_id,
+                )
                 parse_status = "queued"
 
             return {
@@ -197,7 +177,8 @@ def trigger_parse(mount_id: str, kb_id: str, tenant_id: str) -> dict:
     return asyncio.run(_do())
 
 
-async def _trigger_parse_internal(conn, mount_id: str, kb_id: str, tenant_id: str) -> dict:
+async def _trigger_parse_internal(conn, mount_id: str, kb_id: str, tenant_id: str,
+                                  otel_trace_id: str = "", otel_span_id: str = "") -> dict:
     """内部：在已有事务连接中触发解析。"""
     from src.platform.config.service import resolve_chunking_config
 
@@ -208,6 +189,45 @@ async def _trigger_parse_internal(conn, mount_id: str, kb_id: str, tenant_id: st
         "SELECT document_id FROM document_kb_mounts WHERE id=$1", mount_id)
     document_id = str(doc_row["document_id"]) if doc_row else ""
 
+    # 显式传入的 trace context 优先，否则从当前 span 获取（兼容 trigger_parse 等入口）
+    if not otel_trace_id:
+        try:
+            from opentelemetry import trace
+            span = trace.get_current_span()
+            ctx = span.get_span_context()
+            if ctx.is_valid:
+                otel_trace_id = format(ctx.trace_id, "032x")
+                otel_span_id = format(ctx.span_id, "016x")
+        except Exception:
+            pass
+
+    # ★ 去重：检查是否已有该 mount 的 DocumentMounted 事件（pending 或 sent）
+    # 防止 auto_parse + 手动 trigger_parse 等路径产生重复事件，
+    # 导致 outbox_relay 提交多个并发 ingest_document_task 重复摄入。
+    existing = await conn.fetchval(
+        "SELECT id FROM outbox WHERE event_type = 'DocumentMounted' "
+        "AND payload->>'mount_id' = $1 "
+        "AND status IN ('pending', 'sent') LIMIT 1",
+        mount_id,
+    )
+    if existing:
+        return {"mount_id": mount_id, "parse_status": "already_queued"}
+
+    # ★ 创建 ingest_execution 记录（状态=queued），供 Celery worker 的 epoch 检查使用。
+    # 之前此记录由 outbox_relay 间接创建导致 epoch 竞态——现在与 DocumentMounted 事件
+    # 在同一事务中原子写入，消除 epoch 不匹配窗口。
+    await conn.execute(
+        """INSERT INTO ingest_executions (mount_id, document_id, kb_id, parse_status,
+           execution_epoch, chunking_config_version, pipeline_yaml_version, retry_count, updated_at)
+           VALUES ($1,$2,$3,'queued',1,$4,'v1',0,NOW())
+           ON CONFLICT (mount_id) DO UPDATE SET
+               parse_status = 'queued',
+               execution_epoch = ingest_executions.execution_epoch + 1,
+               chunking_config_version = $4,
+               updated_at = NOW()""",
+        mount_id, document_id, kb_id, cc.version,
+    )
+
     # 写 outbox 发布 DocumentMounted
     event = document_mounted_event(
         document_id=document_id,
@@ -215,15 +235,18 @@ async def _trigger_parse_internal(conn, mount_id: str, kb_id: str, tenant_id: st
         kb_id=kb_id,
         tenant_id=tenant_id,
         chunking_config_version=cc.version,
+        trace_id=otel_trace_id,
     )
     import json
     payload = event.to_outbox_dict()
+    # 将 span_id 附到 outbox trace_id 字段（用 | 分隔，供 outbox_relay 重建 parent context）
+    _stored_trace = f"{otel_trace_id}|{otel_span_id}" if otel_trace_id else ""
     await conn.execute(
         """INSERT INTO outbox (id, event_type, payload, tenant_id, trace_id, status, created_at)
            VALUES ($1,$2,$3,$4,$5,$6,$7)""",
         str(uuid.uuid4()), payload["event_type"],
         json.dumps(event.payload, default=str),
-        payload["tenant_id"], payload["trace_id"],
+        payload["tenant_id"], _stored_trace,
         payload["status"], datetime.now(timezone.utc),
     )
 

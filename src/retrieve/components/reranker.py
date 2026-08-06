@@ -24,25 +24,24 @@ class BGEReranker:
         """Re-rank documents by relevance to query.
 
         If fewer than 2 documents, returns them as-is.
-        Otherwise invokes the BGE reranker via P-MODEL.
+        Otherwise invokes the reranker via embedding_client (HTTP or local).
         """
         if len(documents) <= 1:
             return {"documents": documents}
 
-        from src.platform.model.registry import invoke_rerank
+        from src.services.embedding_client import rerank
 
         contents = [d.content for d in documents]
-        reranked = invoke_rerank(query, contents)
+        reranked_contents, _, _ = rerank(query, contents, top_k=self.top_k)
 
         # Map reranked contents back to Document objects, preserving order
         content_to_doc = {d.content: d for d in documents}
         result = []
         seen = set()
-        for c in reranked:
+        for c in reranked_contents:
             if c not in seen:
                 result.append(content_to_doc.get(c, documents[len(result)]))
                 seen.add(c)
 
-        # Truncate to top_k
         result = result[:self.top_k]
         return {"documents": result}

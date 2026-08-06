@@ -57,9 +57,10 @@ class BGE_M3SparseTextEmbedder:
     def _get_model(self):
         if self._model is None:
             from FlagEmbedding import BGEM3FlagModel
+            from src.platform.model.registry import _get_device
             model_path = _resolve_bge_m3_path()
             self._model = BGEM3FlagModel(
-                model_path, use_fp16=True, devices="cpu", local_files_only=True)
+                model_path, use_fp16=True, devices=_get_device(), local_files_only=True)
         return self._model
 
     @component.output_types(sparse_embedding=Dict[str, float])

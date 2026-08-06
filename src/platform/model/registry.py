@@ -15,6 +15,7 @@
 
 import asyncio
 import asyncpg
+import os
 import time as _time
 from typing import Any, Dict, List, Optional
 from dataclasses import dataclass
@@ -23,6 +24,57 @@ from src.config import Settings
 from src.platform.obs.logger import get_logger
 
 log = get_logger(__name__)
+
+
+def _get_device(required_mb: int = 0) -> str:
+    """检测最佳可用推理设备：CUDA GPU → CPU 回退，含显存检查。
+
+    返回值可直接用于 BGEM3FlagModel、FlagReranker 等 FlagEmbedding 模型的
+    ``devices`` 参数。调用方无需自行检测 CUDA 可用性。
+
+    required_mb=0 (默认):
+        仅检查 CUDA 是否可用，不检查显存余量（向后兼容）。
+    required_mb>0:
+        额外检查 GPU 空闲显存是否 ≥ required_mb。
+        不足时自动降级 CPU，并记录 WARNING 日志。
+    """
+    try:
+        import torch
+        if not torch.cuda.is_available():
+            return "cpu"
+
+        if required_mb > 0:
+            free_bytes, total_bytes = torch.cuda.mem_get_info()
+            free_mb = free_bytes / (1024 * 1024)
+            total_mb = total_bytes / (1024 * 1024)
+            if free_mb < required_mb:
+                log.warning(
+                    "gpu_memory_insufficient_fallback_cpu",
+                    free_mb=int(free_mb),
+                    required_mb=required_mb,
+                    total_mb=int(total_mb),
+                )
+                return "cpu"
+
+        return "cuda"
+    except ImportError:
+        return "cpu"
+
+
+def _get_device_string() -> str:
+    """返回人类可读的设备描述字符串，供日志/span attribute 使用。"""
+    device = _get_device()
+    if device == "cuda":
+        try:
+            import torch
+            name = torch.cuda.get_device_name(0)
+            free_bytes, total_bytes = torch.cuda.mem_get_info()
+            free_gb = free_bytes / (1024**3)
+            total_gb = total_bytes / (1024**3)
+            return f"cuda ({name}, {free_gb:.1f}/{total_gb:.1f} GiB free)"
+        except Exception:
+            return "cuda"
+    return "cpu"
 
 
 @dataclass
@@ -129,7 +181,7 @@ def _resolve_default_reranker() -> Optional[ModelConfig]:
 def invoke_embedding(texts: List[str], mode: str = "document") -> List[List[float]]:
     """文本向量化（自动判定 Ollama /api/embed 或 OpenAI兼容 /v1/embeddings）。
 
-    自动产生 OTel span 上报到 Tempo + Langfuse trace 上报。
+    自动产生 OTel span 上报到 Tempo + Langfuse observation（包围实际计算，非后置记录）。
     """
     import requests, time as _time
 
@@ -150,56 +202,58 @@ def invoke_embedding(texts: List[str], mode: str = "document") -> List[List[floa
     except Exception:
         pass
 
+    # Langfuse observation — 在计算开始前创建，使 duration 反映实际耗时
+    langfuse_obs = _start_langfuse_observation(
+        trace_name=f"embedding-{cfg.model_name}",
+        model=cfg.model_name,
+        input_data=f"batch:{len(texts)} texts",
+        metadata={"batch_size": len(texts), "mode": mode,
+                  "provider": "ollama" if not is_openai_compat else cfg.provider},
+    )
+
     _start = _time.time()
     embeddings = []
 
-    # Ollama /api/embed supports batch input — send all texts at once
-    if not is_openai_compat and len(texts) > 1:
-        # Batch all texts into one request (Ollama supports list input)
-        resp = requests.post(
-            f"{base}/api/embed",
-            json={"model": cfg.model_name, "input": texts},
-            timeout=120,
+    try:
+        # Ollama /api/embed supports batch input — send all texts at once
+        if not is_openai_compat and len(texts) > 1:
+            resp = requests.post(
+                f"{base}/api/embed",
+                json={"model": cfg.model_name, "input": texts},
+                timeout=120,
+            )
+            resp.raise_for_status()
+            embeddings = resp.json()["embeddings"]
+        else:
+            for text in texts:
+                if is_openai_compat:
+                    resp = requests.post(
+                        f"{base}/embeddings",
+                        json={"model": cfg.model_name, "input": text},
+                        headers={"Authorization": f"Bearer {cfg.api_key or s.llm_api_key}"},
+                        timeout=60,
+                    )
+                    resp.raise_for_status()
+                    embeddings.append(resp.json()["data"][0]["embedding"])
+                else:
+                    resp = requests.post(
+                        f"{base}/api/embed",
+                        json={"model": cfg.model_name, "input": text},
+                        timeout=60,
+                    )
+                    resp.raise_for_status()
+                    embeddings.append(resp.json()["embeddings"][0])
+    finally:
+        # 结束 Langfuse observation（无论成功或失败）
+        _end_langfuse_observation(
+            langfuse_obs,
+            output_data=f"{len(embeddings)} vectors x {len(embeddings[0]) if embeddings else 0}d",
         )
-        resp.raise_for_status()
-        embeddings = resp.json()["embeddings"]
-    else:
-        for text in texts:
-            if is_openai_compat:
-                resp = requests.post(
-                    f"{base}/embeddings",
-                    json={"model": cfg.model_name, "input": text},
-                    headers={"Authorization": f"Bearer {cfg.api_key or s.llm_api_key}"},
-                    timeout=60,
-                )
-                resp.raise_for_status()
-                embeddings.append(resp.json()["data"][0]["embedding"])
-            else:
-                resp = requests.post(
-                    f"{base}/api/embed",
-                    json={"model": cfg.model_name, "input": text},
-                    timeout=60,
-                )
-                resp.raise_for_status()
-                embeddings.append(resp.json()["embeddings"][0])
 
     if span:
         span.set_attribute("elapsed_ms", int((_time.time() - _start) * 1000))
         span.set_attribute("dim", len(embeddings[0]) if embeddings else 0)
         span.end()
-
-    # Langfuse trace
-    try:
-        trace_generation(
-            trace_name=f"embedding-{cfg.model_name}",
-            prompt=f"batch:{len(texts)} texts",
-            completion=f"{len(embeddings)} vectors x {len(embeddings[0]) if embeddings else 0}d",
-            model=cfg.model_name,
-            metadata={"batch_size": len(texts), "mode": mode,
-                     "provider": "ollama" if not is_openai_compat else cfg.provider},
-        )
-    except Exception:
-        pass
 
     return embeddings
 
@@ -209,7 +263,7 @@ def invoke_embedding(texts: List[str], mode: str = "document") -> List[List[floa
 def invoke_llm(prompt: str, model_id: Optional[str] = None) -> str:
     """调用 LLM 生成（OpenAI 兼容 API → Ollama / vLLM / DeepSeek / OpenAI）。
 
-    自动产生 OTel span 上报到 Tempo + Langfuse trace。
+    自动产生 OTel span 上报到 Tempo + Langfuse observation（包围实际计算，非后置记录）。
     """
     from openai import OpenAI
     import time as _wall
@@ -231,31 +285,38 @@ def invoke_llm(prompt: str, model_id: Optional[str] = None) -> str:
     except Exception:
         pass
 
+    # Langfuse observation — 在计算开始前创建，使 duration 反映实际耗时
+    langfuse_obs = _start_langfuse_observation(
+        trace_name=f"llm-{model_id}",
+        model=cfg.model_name,
+        input_data=prompt[:10000],
+        metadata={},
+    )
+
     client = OpenAI(base_url=base, api_key=cfg.api_key or Settings().llm_api_key, timeout=120.0)
 
     _start = _wall.time()
-    resp = client.chat.completions.create(
-        model=cfg.model_name,
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=4096,
-        temperature=0.1,
-    )
-    answer = (resp.choices[0].message.content or "").strip()
-    _elapsed = _wall.time() - _start
+    answer = ""
+    try:
+        resp = client.chat.completions.create(
+            model=cfg.model_name,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=4096,
+            temperature=0.1,
+        )
+        answer = (resp.choices[0].message.content or "").strip()
+    finally:
+        _elapsed = _wall.time() - _start
+        _end_langfuse_observation(
+            langfuse_obs,
+            output_data=answer[:10000] if answer else "",
+            metadata={"elapsed_ms": int(_elapsed * 1000)},
+        )
 
     if span:
         span.set_attribute("elapsed_ms", int(_elapsed * 1000))
         span.set_attribute("answer_len", len(answer))
         span.end()
-
-    try:
-        trace_generation(
-            trace_name=f"llm-{model_id}",
-            prompt=prompt, completion=answer, model=cfg.model_name,
-            metadata={"elapsed_ms": int(_elapsed * 1000)},
-        )
-    except Exception:
-        pass
 
     return answer
 
@@ -263,14 +324,81 @@ def invoke_llm(prompt: str, model_id: Optional[str] = None) -> str:
 # ── invoke_rerank ───────────────────────────────────────────────
 
 _reranker_cache: Dict[str, Any] = {}
+_reranker_last_used: Dict[str, float] = {}
 _DEFAULT_RERANK_MODEL_NAME = "BAAI/bge-reranker-v2-m3"
+# 空闲超时（秒），与 BGE-M3 共享同一环境变量控制
+_RERANKER_IDLE_TIMEOUT = int(os.getenv("GPU_MODEL_IDLE_TIMEOUT", "300"))
+
+
+def _resolve_local_model_path(model_id: str) -> str:
+    """在本地缓存中查找模型路径，优先 HF cache → ModelScope cache。
+
+    找到本地路径后可直接传给 FlagEmbedding 模型构造函数，
+    配合 local_files_only=True 避免联网校验。
+    未找到时返回原始 model_id（回退到在线下载）。
+    """
+    import os as _os
+
+    # HF cache: ~/.cache/huggingface/hub/models--{org}--{name}/snapshots/{hash}
+    org, name = model_id.split("/", 1) if "/" in model_id else ("BAAI", model_id)
+    hf_snapshots = _os.path.expanduser(
+        f"~/.cache/huggingface/hub/models--{org}--{name}/snapshots"
+    )
+    if _os.path.isdir(hf_snapshots):
+        try:
+            versions = sorted(_os.listdir(hf_snapshots), reverse=True)
+            for v in versions:
+                p = _os.path.join(hf_snapshots, v)
+                cfg = _os.path.join(p, "config.json")
+                if _os.path.isfile(cfg):
+                    return p
+        except Exception:
+            pass
+
+    # ModelScope cache: ~/.cache/modelscope/hub/{org}/{name}
+    ms_path = _os.path.expanduser(f"~/.cache/modelscope/hub/{org}/{name}")
+    if _os.path.isdir(ms_path):
+        return ms_path
+
+    return model_id
 
 
 def _get_reranker(model_name: str = _DEFAULT_RERANK_MODEL_NAME):
-    """Get or create a reranker instance by model name (cached)."""
+    """Get or create a reranker instance by model name (cached).
+
+    GPU 显存需求约 1500 MiB（fp16 权重 ~1.1 GB + 推理临时空间）。
+    空闲显存不足时自动降级 CPU。
+
+    空闲超时：距离上次使用超过 _RERANKER_IDLE_TIMEOUT 秒后自动卸载。
+
+    模型加载：优先从本地 HF/ModelScope 缓存加载（local_files_only=True），
+    避免首次调用时联网校验超时。
+    """
+    global _reranker_cache, _reranker_last_used
+    now = _time.time()
+
+    # ── 空闲超时检查 ──
+    if model_name in _reranker_cache and model_name in _reranker_last_used:
+        if now - _reranker_last_used[model_name] > _RERANKER_IDLE_TIMEOUT:
+            try:
+                del _reranker_cache[model_name]
+                import torch
+                torch.cuda.empty_cache()
+            except Exception:
+                _reranker_cache.pop(model_name, None)
+
     if model_name not in _reranker_cache:
         from FlagEmbedding import FlagReranker
-        _reranker_cache[model_name] = FlagReranker(model_name, use_fp16=True)
+
+        model_path = _resolve_local_model_path(model_name)
+        _reranker_cache[model_name] = FlagReranker(
+            model_path,
+            use_fp16=True,
+            devices=_get_device(required_mb=1500),
+            local_files_only=(model_path != model_name),
+        )
+
+    _reranker_last_used[model_name] = _time.time()
     return _reranker_cache[model_name]
 
 
@@ -305,6 +433,7 @@ def invoke_rerank(query: str, documents: List[str], model_name: str = "") -> Lis
         span = trace.get_tracer("rag-v14").start_span("invoke_rerank")
         span.set_attribute("doc_count", len(documents))
         span.set_attribute("model", effective_model)
+        span.set_attribute("device", _get_device_string())
     except Exception:
         pass
 
@@ -454,10 +583,79 @@ def init_langfuse():
         _langfuse_initialized = True
 
 
+def _start_langfuse_observation(
+    trace_name: str,
+    model: str = "",
+    input_data: str = "",
+    metadata: Optional[Dict[str, Any]] = None,
+) -> Any:
+    """创建 Langfuse generation observation 并返回（用于包围实际计算）。
+
+    返回 Langfuse observation 对象，调用方负责在计算完成后调用
+    observation.update(output=...) 然后 observation.__exit__()。
+
+    若 Langfuse 未配置或初始化失败，返回 None（调用方须检查）。
+    """
+    s = Settings()
+    if not s.langfuse_public_key:
+        return None
+
+    try:
+        import langfuse
+        client = langfuse.Langfuse(
+            public_key=s.langfuse_public_key,
+            secret_key=s.langfuse_secret_key,
+            host=s.langfuse_host or None,
+            flush_interval=1,
+        )
+        otel_trace_id = _get_otel_trace_id()
+        enriched_meta = dict(metadata or {})
+        enriched_meta.setdefault("otel_trace_id", otel_trace_id)
+        enriched_meta.setdefault("service_name", os.getenv("OTEL_SERVICE_NAME", "rag-v14"))
+
+        obs_ctx = client.start_as_current_observation(
+            as_type="generation",
+            name=trace_name,
+            trace_context={"trace_id": otel_trace_id},
+            model=model,
+            input=input_data if input_data else None,
+            metadata=enriched_meta,
+        )
+        observation = obs_ctx.__enter__()
+        # 返回 (client, observation, otel_trace_id) 供 _end_langfuse_observation 使用
+        return (client, observation, otel_trace_id)
+    except Exception:
+        return None
+
+
+def _end_langfuse_observation(
+    obs_tuple: Any,
+    output_data: str = "",
+    metadata: Optional[Dict[str, Any]] = None,
+) -> None:
+    """结束 Langfuse observation，设置 output 并 flush（fail-open）。"""
+    if obs_tuple is None:
+        return
+
+    try:
+        client, observation, _ = obs_tuple
+        if output_data:
+            observation.update(output=output_data)
+        if metadata:
+            observation.update(metadata=metadata)
+        observation.__exit__(None, None, None)
+        client.flush()
+    except Exception:
+        pass
+
+
 def trace_generation(trace_name: str, prompt: str, completion: str, model: str,
                      metadata: Optional[Dict[str, Any]] = None) -> Optional[str]:
-    """记录一次生成调用到 Langfuse v4（fail-open，flush 后立即返回）。"""
-    import uuid
+    """记录一次生成调用到 Langfuse v4（fail-open，flush 后立即返回）。
+
+    ★ 使用当前 OTel span 的 trace_id 作为 Langfuse trace_id，
+    确保 Langfuse 中的模型观测与 Tempo/Grafana 中的调用链可互跳。
+    """
     import time as _time
 
     s = Settings()
@@ -472,20 +670,46 @@ def trace_generation(trace_name: str, prompt: str, completion: str, model: str,
             host=s.langfuse_host or None,
             flush_interval=1,
         )
-        trace_id = uuid.uuid4().hex
+
+        # ★ 使用 OTel trace_id，而非随机 UUID，确保跨系统追踪可关联
+        otel_trace_id = _get_otel_trace_id()
+
+        # 合并业务上下文到 metadata
+        enriched_meta = dict(metadata or {})
+        enriched_meta.setdefault("otel_trace_id", otel_trace_id)
+        enriched_meta.setdefault("service_name", os.getenv("OTEL_SERVICE_NAME", "rag-v14"))
+
         with client.start_as_current_observation(
             as_type="generation",
             name=trace_name,
-            trace_context={"trace_id": trace_id},
+            trace_context={"trace_id": otel_trace_id},
             model=model,
             input=prompt[:10000] if prompt else "",
             output=completion[:10000] if completion else "",
-            metadata=metadata or {},
+            metadata=enriched_meta,
         ):
             pass
         client.flush()
         # 短等待确保异步发送（不阻塞太久）
         _time.sleep(0.3)
-        return trace_id
+        return otel_trace_id
     except Exception:
         return None
+
+
+def _get_otel_trace_id() -> str:
+    """从当前 OTel span context 获取 trace_id，格式化为 32 位十六进制字符串。
+
+    若当前无活跃 span（如非请求上下文中调用），回退到随机 UUID。
+    """
+    import uuid
+
+    try:
+        from opentelemetry import trace as _otel_trace
+        span_context = _otel_trace.get_current_span().get_span_context()
+        if span_context.is_valid:
+            return format(span_context.trace_id, "032x")
+    except Exception:
+        pass
+
+    return uuid.uuid4().hex
