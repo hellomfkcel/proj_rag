@@ -1,8 +1,7 @@
 components:
-  text_embedder:
-    type: src.retrieve.components.ollama_text_embedder.OllamaTextEmbedder
-    init_parameters:
-      model: ${EMBEDDING_MODEL}
+  query_embedder:
+    type: src.retrieve.components.bge_m3_text_embedder.BGE_M3TextEmbedder
+    init_parameters: {}
   retriever:
     type: src.retrieve.components.dense_retriever.MilvusDenseRetriever
     init_parameters:
@@ -11,5 +10,5 @@ components:
       milvus_host: ${MILVUS_HOST}
       milvus_port: ${MILVUS_PORT}
 connections:
-- sender: text_embedder.embedding
+- sender: query_embedder.embedding
   receiver: retriever.query_embedding

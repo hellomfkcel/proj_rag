@@ -76,27 +76,21 @@ def upload_document(
     user_id: str = Form(default="dev-user"),
     auto_parse: bool = Form(default=True),
 ):
-    """上传文档：登记 + 挂载 + 触发解析。
-
-    前置校验：kb:write 权限 + kb_id 有效性。
-    """
+    """上传文档：登记 + 挂载 + 触发解析。"""
     from src.doc.service import submit_ingest_task
     from src.permission.authz import check
 
-    # Extract context from middleware (if available)
     ctx = getattr(req.state, "ctx", None)
     request_id = ctx.request_id if ctx else ""
     credential = ctx.credential if ctx else ""
     user_id_from_ctx = ctx.user_id if ctx else user_id
     tenant_id_from_ctx = ctx.tenant_id if ctx else tenant_id
 
-    # ★ 权限检查：上传文档需要 kb:write
     if ctx:
         decision = check(ctx, "kb:write", "kb", kb_id)
         if decision.get("decision") != "allow":
             raise HTTPException(status_code=403, detail="auth:forbidden — 您没有上传文档的权限（需要 kb:write）")
 
-    # Validate kb_id: must not be empty/null and must exist in tenant
     if not kb_id or kb_id in ("null", "undefined"):
         raise HTTPException(status_code=422, detail="Please select a knowledge base before uploading")
     import asyncpg as _apg
@@ -118,6 +112,10 @@ def upload_document(
 
     content = file.file.read()
 
+    # 从 OtelTraceCaptureMiddleware（原始 ASGI）获取预捕获的 trace context
+    _otel_trace_id = req.scope.get("otel_trace_id", "")
+    _otel_span_id = req.scope.get("otel_span_id", "")
+
     result = submit_ingest_task(
         user_id=user_id_from_ctx,
         tenant_id=tenant_id_from_ctx,
@@ -127,6 +125,8 @@ def upload_document(
         auto_parse=auto_parse,
         request_id=request_id,
         credential=credential,
+        otel_trace_id=_otel_trace_id,
+        otel_span_id=_otel_span_id,
     )
     return UploadResponse(**result)
 

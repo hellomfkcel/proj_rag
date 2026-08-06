@@ -670,6 +670,14 @@ conda activate rag_dev_v14 && make dev-stamp
 cd /home/mfkcel/proj_rag_dev
 conda activate rag_dev_v14 && make dev-retrieve
 
+启动嵌入服务
+cd /home/mfkcel/proj_rag_dev
+conda activate rag_dev_v14 && make dev-embedding
+ 或
+uvicorn src.services.embedding_service:app --host 0.0.0.0 --port 19500
+
+
+
 ### retrieve pipeline问题
 
 依据日志，系统性梳理 retrieve pipeline相关代码，找到问题的本质原因进行解决。不要为了通过而通过，你的代码还是要按照docs/RAG系统设计v14.md这个项目架构来
@@ -3277,3 +3285,1663 @@ rag项目的基础服务是docker-compose.infra.yml，已在正常运行中。�
   权限过滤表达式正确参与了 Milvus 的 chunk 过滤。六条件完整，两路检索使用同一个表达式。唯一的冗余是 PrefilterInjector 组件——它定义了但从未被 Pipeline YAML 引用或代码调用。
 
 
+### 20260805
+#### 出了问题只能翻后台日志
+目前的系统出了问题只能翻后台日志，一点不知道什么情况发生了。如在rag核心系统中的ingest pipeline, stamp pipeline, retrieve pipeline, ray pipeline
+这些管线在运行过程中效果不佳或出错要排查问题时只能翻后台日志，极不方便。所有管线的每次运行的每个任务是否能在rag前台直接看到。同时这个日志存放到哪里比较方便呢？
+系统性分析后找到实质原因，然后进行优化修复
+涉及到需要联调运行测试时，要进行真实联调测试，不要skip或者mock、绕过，联调测试就要根据生产实际情况来
+在代码优化修复过程中，不能出现这样的操作：为了让项目跑通的妥协、绕过逻辑的代码；为了让代码路通引入硬编码、mock代码；为了让代码跑通不按照系统架构设计来
+在代码优化修复过程中，非必要不动已有代码
+现有代码系统架构设计 docs/RAG系统设计v14.md，前端架构设计 docs/frontend-design.md，docs/外部系统设计.md，docs/权限管理系统架构设计.md
+rag python开发环境 conda activate rag_dev_v14 ,外部系统python开发环境 conda activate perm_service
+rag项目的基础服务是docker-compose.infra.yml，已在正常运行中。外部系统的使用 见 readme.md
+统一观测平台、langfuse这些都是docker compose部署，已在正常运行中
+可以通过 docker ps查看
+
+
+目前的系统出了问题只能翻后台日志，一点不知道什么情况发生了。如在rag核心系统中的ingest pipeline, stamp pipeline, retrieve pipeline, ray pipeline
+这些管线在运行过程中效果不佳或出错要排查问题时只能翻后台日志，极不方便。所有管线的每次运行的每个任务是否能在rag前台直接看到。同时这个日志存放到哪里比较方便呢？
+统一可观测otlp 上报能监控这些日志吗
+先进行系统性代码分析，给出实际可行建议，不动代码
+现有代码系统架构设计 docs/RAG系统设计v14.md，前端架构设计 docs/frontend-design.md，docs/外部系统设计.md，docs/权限管理系统架构设计.md
+rag python开发环境 conda activate rag_dev_v14 ,外部系统python开发环境 conda activate perm_service
+rag项目的基础服务是docker-compose.infra.yml，已在正常运行中。外部系统的使用 见 readme.md
+统一观测平台、langfuse这些都是docker compose部署，已在正常运行中
+可以通过 docker ps查看
+
+
+  管线可观测性全景分析
+
+  一、现有可观测基础设施（全部已运行）
+
+  ┌──────────────────────────────────────────────────────────────────────┐
+  │                     已部署的可观测栈 (Docker)                          │
+  ├──────────────────────────────────────────────────────────────────────┤
+  │                                                                      │
+  │   ┌─────────────────────┐     ┌─────────────────────┐                │
+  │   │ OTel Collector      │     │ Grafana :3000        │                │
+  │   │ :4317 (gRPC)        │     │ 统一查询入口          │                │
+  │   │ :4318 (HTTP)        │     │ ← 3 数据源已配        │                │
+  │   └──┬──────┬──────┬────┘     └──────────────────────┘                │
+  │      │      │      │                                                │
+  │      ▼      ▼      ▼                                                │
+  │   ┌─────┐┌──────┐┌─────────┐                                        │
+  │   │Tempo││ Loki ││Prometheus│     ┌──────────────────────┐           │
+  │   │Trace││ Logs ││ Metrics  │     │ Langfuse :13000      │           │
+  │   │存储  ││ 存储  ││ 存储     │     │ LLM可观测(Prompt/    │           │
+  │   └─────┘└──────┘└─────────┘     │ Token/Cost/质量)     │           │
+  │                                  └──────────────────────┘           │
+  └──────────────────────────────────────────────────────────────────────┘
+
+  Grafana 三数据源联动已配置: Trace → Log 跳转 / Log → Trace 跳转 / Trace → Metric 跳转，均已就绪。
+
+  ---
+  二、当前管线日志/状态的实际去向（逐管线分析）
+
+  2.1 Ingest Pipeline（摄入管线）
+
+  触发: 前端"解析"按钮 → B-DOC trigger_parse → DocumentMounted 事件
+        → Celery ingestion_queue → ingest_document_task
+
+  数据已记录:
+    ✅ ingest_executions 表（PG）:
+         parse_status 状态机: not_parsed→queued→processing→completed/failed
+         execution_epoch / failure_reason / retry_count / pipeline_yaml_version
+    ✅ structlog JSON 日志 → stdout:
+         "ingest_pipeline_selected" / "ingest_completed" / "ingest_failed"
+    ✅ OTel Trace span:
+         Haystack Pipeline 自动为每个 Component 产生 span
+         (DocumentSplitter → Embedder → PermEnricher → MilvusWriter)
+
+  前端可见:
+    ✅ DocTable 中 parse_status Badge 轮询（每3秒）
+    ✅ Dashboard /api/v1/stats/documents 按状态聚合
+
+  前端不可见:
+    ❌ 具体哪一步失败（切分? 嵌入? 写入向量库?）
+    ❌ 每个步骤耗时
+    ❌ 失败原因的详细内容（只有 Badge 颜色）
+    ❌ 历史任务的执行记录
+    ❌ 当前队列中有多少待处理任务
+
+  2.2 Stamp Pipeline（盖戳管道）
+
+  触发: 摄入完成后 / VisibilityChanged 事件 / 对账补偿
+        → Celery stamping_queue → stamp_channel_task
+
+  数据已记录:
+    ✅ structlog JSON 日志 → stdout:
+         "stamp_applied" / "stamp_cleared" / "stamp_skipped_stale"
+         / "stamp_failed_retrying" / "stamp_dead_letter"
+    ✅ OTel Trace span: VisibilityStampComponent 产生 span
+    ✅ 内存 Metric（metrics.py）: stamp_drift / orphan_stamp
+
+  前端可见:
+    ❌ 完全不可见——没有任何前端页面显示盖戳状态
+
+  前端不可见:
+    ❌ 当前盖戳任务数
+    ❌ 盖戳版本号
+    ❌ 发生漂移的 chunk 数
+    ❌ 死信队列积压数
+    ❌ 盖戳延迟 (VisibilityChanged 发出到落盘的时间)
+
+  2.3 Retrieve Pipeline（检索管线）
+
+  触发: 用户发送消息 → POST /conversations/query
+        → Celery retrieval_queue → retrieve_and_generate_task
+
+  数据已记录:
+    ✅ conversation_turns 表:
+         retrieved_chunk_ids / authz_decision_ref / retrieval_params_snapshot
+    ✅ OTel Trace span:
+         Haystack 查询 Pipeline: Embedder → DenseRetriever → SparseRetriever →
+         DocumentJoiner → Reranker → PromptBuilder → Generator
+    ✅ 内存 Metric: filtered_rate{layer1, layer3}
+    ✅ structlog JSON 日志 → stdout
+
+  前端可见:
+    ✅ 流式输出回答文本（SSE）
+    ✅ 引用 chunk_ids（但不显示原文内容）
+    ⚠️  无检索质量反馈
+
+  前端不可见:
+    ❌ 检索耗时
+    ❌ 命中了多少 chunk / 过滤了多少
+    ❌ 层 3 复核丢弃了多少
+    ❌ 是否触发了补检索
+    ❌ 每轮 token 消耗
+    ❌ 权限拒绝的 chunk（deny 静默丢弃）
+
+  2.4 Chat Pipeline（对话编排/LLM 合成）
+
+  数据已记录:
+    ✅ Langfuse: Prompt 原文 / Token 用量 / 成本 / 延迟 / 模型
+    ✅ structlog JSON 日志 → stdout
+    ✅ OTel Trace span: PromptBuilder / Generator
+
+  前端可见:
+    ✅ 流式回答
+    ⚠️  无 token 消耗提示
+
+  前端不可见:
+    ❌ 每次对话的 token 消耗及成本
+    ❌ LLM 调用延迟
+    ❌ 合成模式 (compact/refine/tree_summarize)
+
+  ---
+  三、核心问题诊断：为什么只能翻后台日志？
+
+  日志产生                             日志传输                        日志查询
+  ───────                             ──────                         ──────
+  structlog JSON                      OTel Collector                 Grafana Loki
+      │                               logs pipeline:                     │
+      │  输出到 stdout（终端）           otlp → batch → loki              │
+      │                                    ↑                             │
+      │  ❌ 没有 OTLP                       │                      ┌──────┴──────┐
+      │     log exporter                   │                      │ Grafana :3000│
+      │                                    │                      │ Loki 数据源  │
+      │  应用代码未安装                     │                      │ 已配好 ✅    │
+      │  OTLP Log Exporter                 │                      │ 但没有日志   │
+      │                                    │                      │ 数据进入 ❌  │
+      │  structlog.configure()             │                      └─────────────┘
+      │  只有 JSONRenderer                 │
+      │  没有 OTLP exporter      ┌─────────┴──────────┐
+      │                          │ OTel Collector      │
+      │                          │ 已就绪，等待        │
+      │                          │ OTLP log 数据 ⏳    │
+      └──────────────────────────┘                    │
+                                ┌─────────────────────┤
+                                │ Traces: 应用 → OTLP │
+                                │ HTTP 4318 ✅ 正常   │
+                                │                     │
+                                │ Metrics: 部分 →     │
+                                │ OTLP ✅ 正常        │
+                                │                     │
+                                │ Logs: ❌ 无数据进入 │
+                                └─────────────────────┘
+
+  根因：structlog 输出到 stdout（终端），OTel Collector 的 logs pipeline 虽然在等待数据，但 RAG 应用没有安装 OTLP Log Exporter，导致日志数据断路。
+
+  - Traces（链路追踪）：✅ 正常工作，应用通过 OTLPSpanExporter 发送到 Collector HTTP 4318 → Tempo
+  - Metrics（指标）：✅ 部分工作，metrics.py 通过 OTLPMetricExporter 发送到 Collector → Prometheus
+  - Logs（日志）：❌ 断路。logger.py 的 setup_logging() 只配置了 JSONRenderer() 输出到 stdout，没有 OTLP log exporter
+
+  ---
+  四、不动代码的可行方案
+
+  方案 A（立即可用·零改动）：Promtail + Docker logs
+
+  ▎ 原理：在可观测栈中增加 Promtail 容器，抓取所有 Docker 容器的 stdout 日志，推送到 Loki。
+
+  ##### 在 proj_observability/docker-compose.yml 中增加（纯配置）
+  promtail:
+    image: grafana/promtail:3.0.0
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - ./configs/promtail-config.yaml:/etc/promtail/config.yaml:ro
+    command: -config.file=/etc/promtail/config.yaml
+    networks:
+      - obs-internal
+
+  效果：
+  - 所有容器 stdout（包括 make dev-* 进程如果在 docker 中）的结构化日志自动进入 Loki
+  - Grafana 中可按 service_name、level、pipeline 等标签过滤
+  - 局限性：开发模式 make dev-* 是宿主机进程，不走 Docker，日志仍在终端
+
+  方案 B（推荐·最小配置改动）：Docker Compose logging driver
+
+  ▎ 在 RAG 的 docker-compose.app.yml 中为每个容器增加 logging 配置，直接推送到 Loki。
+
+  ##### 在 docker-compose.app.yml 的 api / ingestion-worker / retrieval-worker 等
+  ##### 每个 service 下增加（纯配置，不动代码）：
+  logging:
+    driver: json-file
+    options:
+      max-size: "50m"
+      max-file: "5"
+      tag: "{{.Name}}"
+
+  然后配合 Loki 的 Docker driver 或 Promtail 采集。
+
+  方案 C（最佳·Grafana Dashboard）：创建管线专属监控面板
+
+  ▎ Grafana 已有 Tempo（Trace）+ Prometheus（Metrics）数据，只需创建仪表盘。
+
+  可以在 Grafana 中创建 4 个 Dashboard（纯配置 JSON，不动代码）：
+
+  ┌───────────────┬──────────────────────────────────────────────────┬───────────────────────────────────────────────┐
+  │   Dashboard   │                     数据来源                     │                   展示内容                    │
+  ├───────────────┼──────────────────────────────────────────────────┼───────────────────────────────────────────────┤
+  │ Ingest 管线   │ Tempo Trace + Prometheus Metrics                 │ 每次摄入任务各步骤耗时、成功/失败率、队列深度 │
+  ├───────────────┼──────────────────────────────────────────────────┼───────────────────────────────────────────────┤
+  │ Stamp 管线    │ Prometheus Metrics (stamp_drift, orphan_stamp)   │ 盖戳版本、漂移数、死信数、延迟分布            │
+  ├───────────────┼──────────────────────────────────────────────────┼───────────────────────────────────────────────┤
+  │ Retrieve 管线 │ Tempo Trace + Prometheus Metrics (filtered_rate) │ 检索延迟、过滤率、补检索触发率、层3拒绝数     │
+  ├───────────────┼──────────────────────────────────────────────────┼───────────────────────────────────────────────┤
+  │ Chat 管线     │ Tempo Trace + Langfuse                           │ LLM 调用延迟、Token 消耗趋势、合成模式分布    │
+  └───────────────┴──────────────────────────────────────────────────┴───────────────────────────────────────────────┘
+
+  方案 D（前端已有跳转位）：在设置页增加可观测入口
+
+  ▎ RAG 前端 /settings 页面已有"外部链接"设计模式。直接配置 .env 中的 URL 即可。
+
+  .env 中已有：
+  GRAFANA_URL=http://192.168.1.127:3000
+  LANGFUSE_PUBLIC_URL=http://192.168.1.127:13000
+
+  前端设置页已经渲染了这些链接（见 frontend-design.md §3.9 中的 Langfuse 跳转和 Grafana 跳转描述）。只需确保：
+  1. 这些环境变量正确配置
+  2. Grafana 中已创建管线 Dashboard
+  3. 在设置页中增加指向具体管线 Dashboard 的直接链接
+
+  ---
+  五、四条管线的前台可见性路线图
+
+  Ingest Pipeline（文档解析/切分/嵌入/写库）
+
+  ┌──────────────────────┬─────────────────────────────────────┬───────────────────────────────────────────────────────────────────────┐
+  │       你要看的       │             当前怎么看              │                             改进后怎么看                              │
+  ├──────────────────────┼─────────────────────────────────────┼───────────────────────────────────────────────────────────────────────┤
+  │ 哪个文档正在处理中？ │ 翻后台 docker logs                  │ 前端 DocTable 已有 parse_status Badge ✅                              │
+  ├──────────────────────┼─────────────────────────────────────┼───────────────────────────────────────────────────────────────────────┤
+  │ 处理到哪一步了？     │ 翻 structlog JSON 终端输出          │ Grafana Trace 视图：展开 ingest Pipeline span 即可见各 Component 耗时 │
+  ├──────────────────────┼─────────────────────────────────────┼───────────────────────────────────────────────────────────────────────┤
+  │ 为什么失败了？       │ 查 ingest_executions.failure_reason │ Grafana Dashboard 面板 + Loki 日志搜索 ingest_failed                  │
+  ├──────────────────────┼─────────────────────────────────────┼───────────────────────────────────────────────────────────────────────┤
+  │ 有没有积压？         │ Celery flower 或 redis-cli LLEN     │ Grafana：Prometheus celery_queue_length metric                        │
+  └──────────────────────┴─────────────────────────────────────┴───────────────────────────────────────────────────────────────────────┘
+
+  Stamp Pipeline（盖戳/权限可见性刷新）
+
+  ┌────────────────────┬───────────────────────────┬─────────────────────────────────────────────────────┐
+  │      你要看的      │        当前怎么看         │                    改进后怎么看                     │
+  ├────────────────────┼───────────────────────────┼─────────────────────────────────────────────────────┤
+  │ 盖戳是否正常运行？ │ 翻后台日志 stamp_applied  │ Grafana Dashboard：stamp_lag_seconds 趋势图         │
+  ├────────────────────┼───────────────────────────┼─────────────────────────────────────────────────────┤
+    ❌ 是否触发了补检索
+    ❌ 每轮 token 消耗
+    ❌ 权限拒绝的 chunk（deny 静默丢弃）
+
+  2.4 Chat Pipeline（对话编排/LLM 合成）
+
+  数据已记录:
+    ✅ Langfuse: Prompt 原文 / Token 用量 / 成本 / 延迟 / 模型
+    ✅ structlog JSON 日志 → stdout
+    ✅ OTel Trace span: PromptBuilder / Generator
+
+  前端可见:
+    ✅ 流式回答
+    ⚠️  无 token 消耗提示
+
+  前端不可见:
+    ❌ 每次对话的 token 消耗及成本
+    ❌ LLM 调用延迟
+    ❌ 合成模式 (compact/refine/tree_summarize)
+
+  ---
+  三、核心问题诊断：为什么只能翻后台日志？
+
+  日志产生                             日志传输                        日志查询
+  ───────                             ──────                         ──────
+  structlog JSON                      OTel Collector                 Grafana Loki
+      │                               logs pipeline:                     │
+      │  输出到 stdout（终端）           otlp → batch → loki              │
+      │                                    ↑                             │
+      │  ❌ 没有 OTLP                       │                      ┌──────┴──────┐
+      │     log exporter                   │                      │ Grafana :3000│
+      │                                    │                      │ Loki 数据源  │
+      │  应用代码未安装                     │                      │ 已配好 ✅    │
+      │  OTLP Log Exporter                 │                      │ 但没有日志   │
+      │                                    │                      │ 数据进入 ❌  │
+      │  structlog.configure()             │                      └─────────────┘
+      │  只有 JSONRenderer                 │
+      │  没有 OTLP exporter      ┌─────────┴──────────┐
+      │                          │ OTel Collector      │
+      │                          │ 已就绪，等待        │
+      │                          │ OTLP log 数据 ⏳    │
+      └──────────────────────────┘                    │
+                                ┌─────────────────────┤
+                                │ Traces: 应用 → OTLP │
+                                │ HTTP 4318 ✅ 正常   │
+                                │                     │
+                                │ Metrics: 部分 →     │
+                                │ OTLP ✅ 正常        │
+                                │                     │
+                                │ Logs: ❌ 无数据进入 │
+                                └─────────────────────┘
+
+  根因：structlog 输出到 stdout（终端），OTel Collector 的 logs pipeline 虽然在等待数据，但 RAG 应用没有安装 OTLP Log Exporter，导致日志数据断路。
+
+  - Traces（链路追踪）：✅ 正常工作，应用通过 OTLPSpanExporter 发送到 Collector HTTP 4318 → Tempo
+  - Metrics（指标）：✅ 部分工作，metrics.py 通过 OTLPMetricExporter 发送到 Collector → Prometheus
+  - Logs（日志）：❌ 断路。logger.py 的 setup_logging() 只配置了 JSONRenderer() 输出到 stdout，没有 OTLP log exporter
+
+  ---
+  四、不动代码的可行方案
+
+  方案 A（立即可用·零改动）：Promtail + Docker logs
+
+  ▎ 原理：在可观测栈中增加 Promtail 容器，抓取所有 Docker 容器的 stdout 日志，推送到 Loki。
+
+  ##### 在 proj_observability/docker-compose.yml 中增加（纯配置）
+  promtail:
+    image: grafana/promtail:3.0.0
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - ./configs/promtail-config.yaml:/etc/promtail/config.yaml:ro
+    command: -config.file=/etc/promtail/config.yaml
+    networks:
+      - obs-internal
+
+  效果：
+  - 所有容器 stdout（包括 make dev-* 进程如果在 docker 中）的结构化日志自动进入 Loki
+  - Grafana 中可按 service_name、level、pipeline 等标签过滤
+  - 局限性：开发模式 make dev-* 是宿主机进程，不走 Docker，日志仍在终端
+
+  方案 B（推荐·最小配置改动）：Docker Compose logging driver
+
+  ▎ 在 RAG 的 docker-compose.app.yml 中为每个容器增加 logging 配置，直接推送到 Loki。
+
+  ##### 在 docker-compose.app.yml 的 api / ingestion-worker / retrieval-worker 等
+  ##### 每个 service 下增加（纯配置，不动代码）：
+  logging:
+    driver: json-file
+    options:
+      max-size: "50m"
+      max-file: "5"
+      tag: "{{.Name}}"
+
+  然后配合 Loki 的 Docker driver 或 Promtail 采集。
+
+  方案 C（最佳·Grafana Dashboard）：创建管线专属监控面板
+
+  ▎ Grafana 已有 Tempo（Trace）+ Prometheus（Metrics）数据，只需创建仪表盘。
+
+  可以在 Grafana 中创建 4 个 Dashboard（纯配置 JSON，不动代码）：
+
+  ┌───────────────┬──────────────────────────────────────────────────┬───────────────────────────────────────────────┐
+  │   Dashboard   │                     数据来源                     │                   展示内容                    │
+  ├───────────────┼──────────────────────────────────────────────────┼───────────────────────────────────────────────┤
+  │ Ingest 管线   │ Tempo Trace + Prometheus Metrics                 │ 每次摄入任务各步骤耗时、成功/失败率、队列深度 │
+  ├───────────────┼──────────────────────────────────────────────────┼───────────────────────────────────────────────┤
+  │ Stamp 管线    │ Prometheus Metrics (stamp_drift, orphan_stamp)   │ 盖戳版本、漂移数、死信数、延迟分布            │
+  ├───────────────┼──────────────────────────────────────────────────┼───────────────────────────────────────────────┤
+  │ Retrieve 管线 │ Tempo Trace + Prometheus Metrics (filtered_rate) │ 检索延迟、过滤率、补检索触发率、层3拒绝数     │
+  ├───────────────┼──────────────────────────────────────────────────┼───────────────────────────────────────────────┤
+  │ Chat 管线     │ Tempo Trace + Langfuse                           │ LLM 调用延迟、Token 消耗趋势、合成模式分布    │
+  └───────────────┴──────────────────────────────────────────────────┴───────────────────────────────────────────────┘
+
+  方案 D（前端已有跳转位）：在设置页增加可观测入口
+
+  ▎ RAG 前端 /settings 页面已有"外部链接"设计模式。直接配置 .env 中的 URL 即可。
+
+  .env 中已有：
+  GRAFANA_URL=http://192.168.1.127:3000
+  LANGFUSE_PUBLIC_URL=http://192.168.1.127:13000
+
+  前端设置页已经渲染了这些链接（见 frontend-design.md §3.9 中的 Langfuse 跳转和 Grafana 跳转描述）。只需确保：
+  1. 这些环境变量正确配置
+  2. Grafana 中已创建管线 Dashboard
+  3. 在设置页中增加指向具体管线 Dashboard 的直接链接
+
+  ---
+  五、四条管线的前台可见性路线图
+
+  Ingest Pipeline（文档解析/切分/嵌入/写库）
+
+  ┌──────────────────────┬─────────────────────────────────────┬───────────────────────────────────────────────────────────────────────┐
+  │       你要看的       │             当前怎么看              │                             改进后怎么看                              │
+  ├──────────────────────┼─────────────────────────────────────┼───────────────────────────────────────────────────────────────────────┤
+  │ 哪个文档正在处理中？ │ 翻后台 docker logs                  │ 前端 DocTable 已有 parse_status Badge ✅                              │
+  ├──────────────────────┼─────────────────────────────────────┼───────────────────────────────────────────────────────────────────────┤
+  │ 处理到哪一步了？     │ 翻 structlog JSON 终端输出          │ Grafana Trace 视图：展开 ingest Pipeline span 即可见各 Component 耗时 │
+  ├──────────────────────┼─────────────────────────────────────┼───────────────────────────────────────────────────────────────────────┤
+  │ 为什么失败了？       │ 查 ingest_executions.failure_reason │ Grafana Dashboard 面板 + Loki 日志搜索 ingest_failed                  │
+  ├──────────────────────┼─────────────────────────────────────┼───────────────────────────────────────────────────────────────────────┤
+  │ 有没有积压？         │ Celery flower 或 redis-cli LLEN     │ Grafana：Prometheus celery_queue_length metric                        │
+  └──────────────────────┴─────────────────────────────────────┴───────────────────────────────────────────────────────────────────────┘
+
+  Stamp Pipeline（盖戳/权限可见性刷新）
+
+  ┌────────────────────┬───────────────────────────┬─────────────────────────────────────────────────────┐
+  │      你要看的      │        当前怎么看         │                    改进后怎么看                     │
+  ├────────────────────┼───────────────────────────┼─────────────────────────────────────────────────────┤
+  │ 盖戳是否正常运行？ │ 翻后台日志 stamp_applied  │ Grafana Dashboard：stamp_lag_seconds 趋势图         │
+  ├────────────────────┼───────────────────────────┼─────────────────────────────────────────────────────┤
+  │ 有没有漂移？       │ 无                        │ Grafana Dashboard：stamp_drift / orphan_stamp gauge │
+  ├────────────────────┼───────────────────────────┼─────────────────────────────────────────────────────┤
+  │ 哪批盖戳失败了？   │ 翻 stamp_dead_letter 日志 │ Grafana Loki：按 event_type=stamp_dead_letter 搜索  │
+  └────────────────────┴───────────────────────────┴─────────────────────────────────────────────────────┘
+
+  Retrieve Pipeline（检索/过滤/重排）
+
+  ┌────────────────────┬────────────┬──────────────────────────────────────────────────┐
+  │      你要看的      │ 当前怎么看 │                   改进后怎么看                   │
+  ├────────────────────┼────────────┼──────────────────────────────────────────────────┤
+  │ 检索花了多久？     │ 翻 Trace   │ Grafana Trace 视图 — 展开查询 Pipeline span      │
+  ├────────────────────┼────────────┼──────────────────────────────────────────────────┤
+  │ 过滤掉了多少？     │ 翻日志     │ Grafana Dashboard：filtered_rate{layer1, layer3} │
+  ├────────────────────┼────────────┼──────────────────────────────────────────────────┤
+  │ 有没有触发补检索？ │ 翻日志     │ Grafana Loki：搜索 retrieve_insufficient         │
+  └────────────────────┴────────────┴──────────────────────────────────────────────────┘
+
+  Chat Pipeline（LLM 合成）
+
+  ┌──────────────────────────┬────────────┬───────────────────────────────────┐
+  │         你要看的         │ 当前怎么看 │           改进后怎么看            │
+  ├──────────────────────────┼────────────┼───────────────────────────────────┤
+  │ 每次对话消耗多少 Token？ │ 无         │ Langfuse :13000 已有完整数据 ✅   │
+  ├──────────────────────────┼────────────┼───────────────────────────────────┤
+  │ LLM 调用是否变慢？       │ 无         │ Langfuse Dashboard → Latency 趋势 │
+  ├──────────────────────────┼────────────┼───────────────────────────────────┤
+  │ 哪个 Prompt 模板效果好？ │ 无         │ Langfuse → Scores & Evaluation    │
+  └──────────────────────────┴────────────┴───────────────────────────────────┘
+
+  ---
+  六、日志存放策略
+
+                      ┌──────────── Hot ────────────┐  ┌── Warm ──┐  ┌── Cold ──┐
+                      │                              │  │          │  │          │
+  结构化应用日志      │  Loki (已部署)                 │  │ PG 分区表 │  │ S3/对象  │
+  (structlog JSON)    │  TTL: 7 天                    │  │ 90天-1年 │  │ 存储     │
+                      │  用途: 实时排障、Grafana 搜索   │  │          │  │ 1年+     │
+                      │                              │  │          │  │          │
+  管线任务状态        │  ingest_executions 表 (PG)     │  │          │  │          │
+                      │  conversation_turns 表 (PG)   │  │          │  │          │
+                      │  用途: 前端直接查询展示         │  │          │  │          │
+                      │                              │  │          │  │          │
+  链路追踪            │  Tempo (已部署)                │  │          │  │          │
+  (OTel Traces)      │  TTL: 由 Tempo config 决定     │  │          │  │          │
+                      │  用途: 性能分析、瓶颈定位       │  │          │  │          │
+                      │                              │  │          │  │          │
+  LLM 调用数据        │  Langfuse (已部署)             │  │          │  │          │
+  (Prompts/Tokens)   │  用途: 成本、Prompt 版本、质量  │  │          │  │          │
+                      │                              │  │          │  │          │
+  审计日志            │  audit_logs 表 (PG)            │  │ PG 分区   │  │ S3 导出   │
+  (合规)             │  TTL: 90 天                    │  │ 90-180天  │  │ 180天+    │
+                      └──────────────────────────────┘  └──────────┘  └──────────┘
+
+  ---
+  七、具体可执行步骤（优先级排序）
+
+  即刻可用（今天就能看）：
+
+  第 1 步：打开 Grafana http://192.168.1.127:3000 → Explore → 选 Tempo 数据源 → 搜索 Trace。展开任意 Pipeline span 即可看到每个 Component 的耗时。
+
+  第 2 步：打开 Langfuse http://192.168.1.127:13000 → 查看 LLM 调用详情（token 消耗、延迟、Prompt 内容）。
+
+  本周可配（纯配置改动）：
+
+  第 3 步：在 proj_observability/docker-compose.yml 中增加 Promtail 容器采集容器日志（方案 A）。
+
+  第 4 步：在 Grafana 中创建 4 个管线 Dashboard（方案 C）—— 导入 JSON 即可，已有 Grafana provisioning 目录 grafana/provisioning/dashboards/。
+
+  第 5 步：确认 RAG 前端 .env 中 GRAFANA_URL 和 LANGFUSE_PUBLIC_URL 正确，前端设置页可直接跳转。
+
+  关键结论
+
+  ┌─────────────────────┬────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+  │        问题         │                                                          答案                                                          │
+  ├─────────────────────┼────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ OTLP 能监控日志吗？ │ 能。但不动的代码情况下，日志到 OTLP 是断的。可用 Promtail（方案 A）作为中间桥梁，将 Docker 容器 stdout 日志推送到 Loki │
+  ├─────────────────────┼────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ 日志放哪合适？      │ Loki（热·实时排障）+ PostgreSQL（管线状态·前端查询）+ Langfuse（LLM 专有）— 三者全已部署                               │
+  ├─────────────────────┼────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ 前台能看到管线吗？  │ 部分能（Ingest parse_status Badge），Stamp/Chat 管线完全看不到。需通过 Grafana Dashboard 补充                          │
+  └─────────────────────┴────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+
+
+
+❯ 哪个方案最好
+
+  Thought for 20s (ctrl+o to expand)
+
+● 方案 C（Grafana Dashboard）最好。 但需要解释为什么，以及它和你的诉求之间的差距。
+
+  ---
+  为什么方案 C 最好
+
+  核心原因只有一句话：Trace 数据已经在流入 Tempo，这是你今天就能用的、最完整的管线执行记录。
+
+  对比四个方案的起点：
+
+  ┌─────────────────────┬─────────────────┬──────────────────────────────────────────────────┬─────────────────────┐
+  │                     │    数据来源     │                  数据是否已就绪                  │      需要改动       │
+  ├─────────────────────┼─────────────────┼──────────────────────────────────────────────────┼─────────────────────┤
+  │ A Promtail          │ 容器 stdout     │ ❌ 开发模式 make dev-* 是宿主机进程，不进 Docker │ 要加 Promtail 容器  │
+  ├─────────────────────┼─────────────────┼──────────────────────────────────────────────────┼─────────────────────┤
+  │ B logging driver    │ 容器 stdout     │ ❌ 同上                                          │ 要改 compose 文件   │
+  ├─────────────────────┼─────────────────┼──────────────────────────────────────────────────┼─────────────────────┤
+  │ C Grafana Dashboard │ Trace + Metrics │ ✅ Trace 已正常流入 Tempo                        │ 只写 Dashboard JSON │
+  ├─────────────────────┼─────────────────┼──────────────────────────────────────────────────┼─────────────────────┤
+  │ D 前端链接          │ 跳转 URL        │ ✅ .env 已配                                     │ 确认 URL            │
+  └─────────────────────┴─────────────────┴──────────────────────────────────────────────────┴─────────────────────┘
+
+  你的 RAG 应用在 main.py 启动时就初始化了 OTel SDK，每个 Haystack Pipeline Component 自动产生 span，通过 OTLP HTTP 4318 发到 Collector → Tempo。你今天打开 Grafana 就能看到每条管线的完整调用链。
+
+  ---
+  你现在打开 Grafana 能看到什么
+
+  Grafana → Explore → Tempo 数据源 → 搜索 Trace
+
+  一条 Ingest Pipeline Trace:
+   ┌────────────────────────────────────────────────────┐
+   │ ingest_v1 Pipeline                         2.34s  │
+   │  ├─ DocumentSplitter                      0.12s   │
+   │  ├─ OllamaDocumentEmbedder                1.89s   │ ← 瓶颈一目了然
+   │  ├─ SparseEmbedder                        0.21s   │
+   │  ├─ PermissionMetadataEnricher            0.01s   │
+   │  └─ MilvusDocumentWriter                 0.11s   │
+   └────────────────────────────────────────────────────┘
+
+  一条 Retrieve Pipeline Trace:
+   ┌────────────────────────────────────────────────────┐
+   │ query_v1 Pipeline                          1.56s  │
+   │  ├─ PrefilterInjector                    0.03s   │
+   │  ├─ OllamaTextEmbedder                    0.45s   │
+   │  ├─ DenseRetriever                        0.08s   │
+   │  ├─ SparseRetriever                       0.05s   │
+   │  ├─ DocumentJoiner(RRF)                   0.02s   │
+   │  ├─ Reranker                              0.32s   │
+   │  ├─ PromptBuilder                         0.01s   │
+   │  └─ LiteLLMGenerator                      0.60s   │
+   └────────────────────────────────────────────────────┘
+
+  这就是你"翻后台日志"想看到的东西，只不过现在是可视化的调用链，而不是几十行 JSON。 每个步骤的耗时、成功/失败、输入/输出都在。
+
+  ---
+  但方案 C 不能解决你的全部问题
+
+  方案 C 解决的是"出了问题排查"这个场景。你没有解决的还有：
+
+  1. 前台实时状态
+
+  前端 DocTable 只显示一个 Badge 颜色（completed / failed / processing）。你不知道：
+  - 处理到哪一步了（切分完成等待嵌入？嵌入完成等待写库？）
+  - 具体失败原因（只看到红色 Badge，要展开才知）
+
+  这个需要后端新增一个端点，把 ingest_executions 表中已有的更细粒度信息暴露出来。这是代码改动。
+
+  2. 盖戳管线完全不可见
+
+  前端没有任何页面看盖戳状态。但你可以在 Grafana 中创建一个 Stamp Dashboard，用 stamp_drift / orphan_stamp / stamp_lag_seconds 这些已在 metrics.py 中定义的指标。
+
+  3. 日志搜索不方便
+
+  终端里翻 JSON 确实痛苦。这个方案 A（Promtail）是正确解法——把 dev 模式的进程日志也送到 Loki。
+
+  ---
+  实际推荐：三件套，一个月内做完
+
+  优先级  做什么                          改动类型     效果
+  ──────  ──────────────────────────────  ──────────  ───────────────────
+  P0 本周  在 Grafana 创建 4 个 Dashboard   纯配置 JSON  立即可用的管线全景
+  P1 本周  增加 Promtail 采集日志到 Loki     纯配置 YAML  Grafana 里按关键词搜日志
+  P2 下周  前端增加管线状态详情页            需要后端 API  前台直接看每步进度
+
+  P0 是方案 C，你就用这一个。Promtail（P1）解决"搜日志"的痛点。前端详情页（P2）才真正解决"不用切到 Grafana"的诉求。
+
+  ---
+  一句话结论
+
+  方案 C 最好，因为数据已经在 Tempo 里了，你今天打开 Grafana http://192.168.1.127:3000 → Explore → Tempo 就能看到每条管线的完整执行链路。不需要动一行代码。 但如果你的目标是"在 RAG 前台直接看到管线状态而不开
+  Grafana"，那需要 P2——给前端加页面，这就涉及后端 API 开发了。
+
+
+
+#### 项目启动问题
+分析清楚 权限系统 rag系统，在开发模式与投产模式下各自的启动方式
+现有代码系统架构设计 docs/RAG系统设计v14.md，前端架构设计 docs/frontend-design.md，docs/外部系统设计.md，docs/权限管理系统架构设计.md
+rag python开发环境 conda activate rag_dev_v14 ,外部系统python开发环境 conda activate perm_service
+rag项目的基础服务是docker-compose.infra.yml，已在正常运行中。外部系统的使用 见 readme.md
+统一观测平台、langfuse这些都是docker compose部署，已在正常运行中
+可以通过 docker ps查看
+
+
+# 权限问题
+ 我用 admin/admin123 租户为tenant_dev  登录，这个竟然没有kb:writer权限。然后我在权限平台给user:admin 绑定admin角色，但是rag中还是显示没有kb:writer权限。这是什么情况
+  完整诊断报告：为什么 admin 没有 kb:write 权限
+
+  六个问题，按发现顺序排列：
+
+  问题链:
+    ┌─ 1. Cerbos 策略文件 custom_roles.yaml 语法错误 → Cerbos 容器崩溃重启循环
+    │    修复: 删除空文件
+    │
+    ├─ 2. dev-login 请求缺少 password 字段 → Keycloak 返回 "Invalid user credentials"
+    │    (DevLoginRequest.password 默认是空字符串 ""，不是可选字段)
+    │    解决: 前端/API 调用时加上 "password":"admin123"
+    │
+    ├─ 3. 租户名写错 → tenant_dev (下划线) vs tenant-dev (横杠)
+    │    解决: 用 tenant-dev
+    │
+    └─ 4. 权限服务 DB 中所有资源的 retired 被错误标记为 true ★ 核心根因
+         修复: UPDATE resource_registry SET retired = false
+         连锁效应:
+           • Cerbos 策略: kb:write → 条件 request.resource.attr.retired == false
+           • retired=true → 条件失败 → deny
+           • admin 虽然有 system_admin 角色，但被 retired 条件拦截
+
+  ┌───────────────┬──────────────────────────┬────────────────────────────────────────┬────────────────────────────┐
+  │     问题      │           症状           │                  根因                  │            修复            │
+  ├───────────────┼──────────────────────────┼────────────────────────────────────────┼────────────────────────────┤
+  │ Cerbos 崩溃   │ 任何鉴权都无法通过       │ custom_roles.yaml 空 definitions: 字段 │ 删除该文件                 │
+  ├───────────────┼──────────────────────────┼────────────────────────────────────────┼────────────────────────────┤
+  │ 登录失败      │ Invalid user credentials │ password 字段未传                      │ 包含 "password":"admin123" │
+  ├───────────────┼──────────────────────────┼────────────────────────────────────────┼────────────────────────────┤
+  │ 租户不匹配    │ 用户不属于租户           │ tenant_dev ≠ tenant-dev                │ 使用 tenant-dev            │
+  ├───────────────┼──────────────────────────┼────────────────────────────────────────┼────────────────────────────┤
+  │ kb:write deny │ admin 无法上传文件       │ resource_registry.retired = true       │ UPDATE SET retired = false │
+  └───────────────┴──────────────────────────┴────────────────────────────────────────┴────────────────────────────┘
+
+  关键认知：你在管理台绑定角色没错，system_admin 角色也确实在 JWT 里。问题不在角色绑定——在于 Cerbos 策略中 retired == false 这个条件把所有权限都拦住了。数据库里的 retired 字段之前全被错误设成了 true。
+
+# 可观测问题
+我现在上传了个文档，然后成功解析了
+然后在 Grafana ->tempo->search 的service name 中只有“rag-v14” 没有其他值，找不到所谓的pipeline过程
+
+现在能在service name 中找到retrieval-worker了，但是一次retrieve有很多个trace_id，而这一次retrieve产生的日志我看着很困难。感觉没有看后台那么直观
+是我不会用 Grafana吗？
+
+效果还是不行，一个Trace id下面只有一个span id, 有好几个trace id--碎片化
+
+这个 service name为api的，trace id 下面也只有一个span id啊，看不出来啥
+
+目前各个pipeline的可观测是相当碎片化的，
+以ingest为例，我在6:30分上传了两个文件然后进行解析。在tempo中query,在6:30分后的trac id有一堆。这还怎么观测？而且loki中是没有值的，根本没有后台那样的查看效果
+系统分析下这是怎么回事儿？是我们方向错了吗？
+
+目前的 service name 有下面4个值
+rag-V14
+ingestion-worker
+stamping-worker
+test-api
+我在6:55分左右上传了两个文件然后进行解析。在tempo中query,在6:55分左右的trac id有一堆。
+我选ingestion-worker进行筛选查看，也有好几个trace id，然后我一个个点开看，有两个 的service name直接是ingestion-worker 里面显示的调用流程不全
+然后我又选 stamping-worker进行筛选查看，结果有4条trace id，service name分别为rag-v14与ingestion-worker。我看了下rag-v14的调用链，好吧也不是完整的
+哎！这个可观测，要调试好怎么这么麻烦！这一堆的trace id 感觉就是碎片化的，不是挂在一个初始请求下，然后依次展开直到这次任务结束 
+
+
+
+目前的 service name 有下面这几个值
+ingestion-worker
+outbox-relay
+rag-v14
+visibility-events
+stamping-worker
+我在7:31分左右上传了4个文件然后进行解析。在tempo中query,在7:31分左右的trac id有一堆。
+我看了几个trace id的调用链，里面都是stamping-worker的调用链，我的ingestion-worker调用链一个没有看到，但是看前端上传、解析都是成功的
+哎！这个可观测，这一堆的trace id 感觉还是碎片化的  
+
+
+
+我在8:16分左右上传了4个文件然后进行解析。在tempo中query,在8:16分左右的trac id有一堆。
+我看了几个trace id的调用链，里面都是stamping-worker的调用链，我的ingestion-worker调用链一个没有看到，但是看前端上传、解析都是成功的
+哎！这个可观测，这一堆的trace id 感觉还是碎片化的,反思下、系统分析下是不是哪里思路错了
+
+这是根本原因。 Haystack Pipeline Component 的 OTel tracing 默认关闭。init_tracing() 设置了 TracerProvider 但 Haystack 不知道要用它。加上 auto_enable_tracing() 后，所有 Pipeline Component 才会创建 span。
+
+
+3be2f8a2f7c86824241fab3c508a1375 这个trace id下我可以看到ingest worker,stamping-worker
+然后我看了下这个时间左右的trace id，我发现存在otel存在重复上报的问题，然后是visibility-events 这个里面好像全是 stamping-worker
+在已找到本质原因的情况下，系统性梳理下目前的otel上报的合理性，原则是保证可观测性良好，而不是出现一大堆trace id
+
+
+● <root span not yet received> 是什么
+
+  不是噪音，是时序问题。 Tempo 先收到了子 span（Haystack Component），但父 span（stamping/ingestion 的 CONSUMER span）还在 BatchSpanProcessor 的 5 秒缓存里没刷新。5 秒后父 span 到了就自动拼接好。172
+  条这个是因为过去 1 小时 visibility-events 和 reconciliation 发了大量 stamp 任务。
+
+  你在 Grafana 中应该这样看
+
+  第一步：找到你要看的那次操作
+
+  Grafana → Explore → Tempo → Query type: Search
+
+  ┌──────────────┬────────────────────┬────────────────────┐
+  │   筛选条件   │         值         │        含义        │
+  ├──────────────┼────────────────────┼────────────────────┤
+  │ Service Name │ api                │ 只看用户触发的请求 │
+  ├──────────────┼────────────────────┼────────────────────┤
+  │ Min Duration │ 500ms              │ 过滤太快的健康检查 │
+  ├──────────────┼────────────────────┼────────────────────┤
+  │ Tags         │ http.method = POST │ 只看写操作         │
+  └──────────────┴────────────────────┴────────────────────┘
+
+  点 Run query → 结果列表里会有几条 trace。按时间找到你那次上传的。
+
+  第二步：点进去看 Trace 树
+
+  点击一条蓝色的 Trace ID 链接 → 进入 Trace View（不是 Search 列表）。
+
+  这才是你要看的——一棵调用树：
+
+  Trace: 3be2f8a2f7c8...  (一条 trace, 总耗时 4.2s)
+  │
+  ├─ POST /api/v1/documents/upload       60ms   [api]
+  │  (返回 document_id + mount_id)
+  │
+  ├─ POST /api/v1/documents/{id}/trigger-parse   45ms   [api]
+  │  (写 outbox, 返回 queued)
+  │
+  ├─ outbox:DocumentMounted              12ms   [outbox-relay]
+  │  └─ 🔗 ingest_document_task          2.3s   [ingestion-worker]
+  │       ├─ DocumentSplitter           0.15s
+  │       ├─ OllamaEmbedder             1.89s   ← 如果慢, 看这里
+  │       ├─ SparseEmbedder             0.22s
+  │       ├─ PermissionEnricher         0.01s
+  │       ├─ MilvusWriter               0.55s
+  │       └─ 🔗 stamp_channel_task      0.12s   [stamping-worker]
+  │            └─ VisibilityStamp       0.10s
+
+  怎么读：
+  - 颜色：蓝色 = 正常，红色 = 出错
+  - 宽度：越宽 = 占时越多 = 瓶颈
+  - 点 span 展开：右边面板有 attributes（输入/输出/错误信息）
+  - 红色 span：点开看 exception.message
+
+
+9673bdf3f3afa486da7e99efd206d1ce 9ce4f80fbe88a32e8e2ce1b3d53c83ea
+这是两个trace id，目前的情况是可观测平台收到的数据始终有瑕疵，不方便查看。系统性分析下是什么原因造成的，哪里没有配置好
+现有代码系统架构设计 docs/RAG系统设计v14.md，前端架构设计 docs/frontend-design.md，docs/外部系统设计.md，docs/权限管理系统架构设计.md
+rag python开发环境 conda activate rag_dev_v14 ,外部系统python开发环境 conda activate perm_service
+rag项目的基础服务是docker-compose.infra.yml，已在正常运行中。外部系统的使用 见 readme.md
+统一观测平台、langfuse这些都是docker compose部署，已在正常运行中
+可以通过 docker ps查看
+
+
+按照诊断结果对代码进行修复
+在代码优化修复过程中，不能出现这样的操作：为了让项目跑通的妥协、绕过逻辑的代码；为了让代码路通引入硬编码、mock代码；为了让代码跑通不按照系统架构设计来
+在代码优化修复过程中，非必要不动已有代码
+涉及到需要联调运行测试时，要进行真实联调测试，不要skip或者mock、绕过，联调测试就要根据生产实际情况来
+
+现有代码系统架构设计 docs/RAG系统设计v14.md，前端架构设计 docs/frontend-design.md，docs/外部系统设计.md，docs/权限管理系统架构设计.md
+rag python开发环境 conda activate rag_dev_v14 ,外部系统python开发环境 conda activate perm_service
+rag项目的基础服务是docker-compose.infra.yml，已在正常运行中。外部系统的使用 见 readme.md
+统一观测平台、langfuse这些都是docker compose部署，已在正常运行中
+可以通过 docker ps查看
+
+6d6d7743036666e1000712a1ac1110d2
+fa142095044ff7e0533ea55df04ffd3e
+73b7b6afd62b187d688cca0ccf4b352a
+这新trace id是新上传文件、解析 产生的，分析下这些看下可观测性、系统有没有什么问题
+现有代码系统架构设计 docs/RAG系统设计v14.md，前端架构设计 docs/frontend-design.md，docs/外部系统设计.md，docs/权限管理系统架构设计.md
+rag python开发环境 conda activate rag_dev_v14 ,外部系统python开发环境 conda activate perm_service
+rag项目的基础服务是docker-compose.infra.yml，已在正常运行中。外部系统的使用 见 readme.md
+统一观测平台、langfuse这些都是docker compose部署，已在正常运行中
+可以通过 docker ps查看
+
+
+43d9eb389d133e5da5eb8cbcbc8cd3b3
+14e9b76cbf46baa0427efe47d9c21ff1
+这新trace id是新上传文件、解析 产生的，分析下这些看下可观测性、系统有没有什么问题
+现有代码系统架构设计 docs/RAG系统设计v14.md，前端架构设计 docs/frontend-design.md，docs/外部系统设计.md，docs/权限管理系统架构设计.md
+rag python开发环境 conda activate rag_dev_v14 ,外部系统python开发环境 conda activate perm_service
+rag项目的基础服务是docker-compose.infra.yml，已在正常运行中。外部系统的使用 见 readme.md
+统一观测平台、langfuse这些都是docker compose部署，已在正常运行中
+可以通过 docker ps查看
+
+
+# 系统运行速度问题--ingest
+14e9b76cbf46baa0427efe47d9c21ff1
+现在来看另外一个问题，这个trace id显示duration有2.18 min，但是这个文件是一个66.2kb的markdown文档。系统性分析下瓶颈在哪里，这个瓶颈如何优化改进
+先进行系统性分析，不动代码
+现有代码系统架构设计 docs/RAG系统设计v14.md，前端架构设计 docs/frontend-design.md，docs/外部系统设计.md，docs/权限管理系统架构设计.md
+rag python开发环境 conda activate rag_dev_v14 ,外部系统python开发环境 conda activate perm_service
+rag项目的基础服务是docker-compose.infra.yml，已在正常运行中。外部系统的使用 见 readme.md
+统一观测平台、langfuse这些都是docker compose部署，已在正常运行中
+可以通过 docker ps查看
+
+
+按照诊断结果后给出的优化方案 p0, 01，对代码进行修复
+在代码优化修复过程中，不能出现这样的操作：为了让项目跑通的妥协、绕过逻辑的代码；为了让代码路通引入硬编码、mock代码；为了让代码跑通不按照系统架构设计来
+在代码优化修复过程中，非必要不动已有代码
+在代码优化修复过程中，要注意可观测系统的完整性、有效性，不因代码修复而造成破坏
+涉及到需要联调运行测试时，要进行真实联调测试，不要skip或者mock、绕过，联调测试就要根据生产实际情况来
+现有代码系统架构设计 docs/RAG系统设计v14.md，前端架构设计 docs/frontend-design.md，docs/外部系统设计.md，docs/权限管理系统架构设计.md
+rag python开发环境 conda activate rag_dev_v14 ,外部系统python开发环境 conda activate perm_service
+rag项目的基础服务是docker-compose.infra.yml，已在正常运行中。外部系统的使用 见 readme.md
+统一观测平台、langfuse这些都是docker compose部署，已在正常运行中
+可以通过 docker ps查看
+
+
+继续完成后续阶段的优化，在模型的使用过程中能使用cuda时使用cuda，不行时再使用cpu
+在代码优化修复过程中，不能出现这样的操作：为了让项目跑通的妥协、绕过逻辑的代码；为了让代码路通引入硬编码、mock代码；为了让代码跑通不按照系统架构设计来
+在代码优化修复过程中，非必要不动已有代码
+在代码优化修复过程中，要注意可观测系统的完整性、有效性，不因代码修复而造成破坏
+涉及到需要联调运行测试时，要进行真实联调测试，不要skip或者mock、绕过，联调测试就要根据生产实际情况来
+现有代码系统架构设计 docs/RAG系统设计v14.md，前端架构设计 docs/frontend-design.md，docs/外部系统设计.md，docs/权限管理系统架构设计.md
+rag python开发环境 conda activate rag_dev_v14 ,外部系统python开发环境 conda activate perm_service
+rag项目的基础服务是docker-compose.infra.yml，已在正常运行中。外部系统的使用 见 readme.md
+统一观测平台、langfuse这些都是docker compose部署，已在正常运行中
+可以通过 docker ps查看
+
+
+5b253ff9c2ca4d15e05f78a6a5ff194b
+559eca515b4f1a691c73ac423a2d0ba0
+70ad56648ae8208a3fc704de97332410
+6bbd9b5968ea87095496c3ddb752213c
+从体验上感觉还是有瓶颈的。系统性分析下这些trace id，找到本质原因：看是逻辑调用问题，还是并发问题（并发设置过大，导致不必要的资源争抢）。
+是否存在不必要的重复llm调用等情况。
+先进行系统性分析，不动代码
+现有代码系统架构设计 docs/RAG系统设计v14.md，前端架构设计 docs/frontend-design.md，docs/外部系统设计.md，docs/权限管理系统架构设计.md
+rag python开发环境 conda activate rag_dev_v14 ,外部系统python开发环境 conda activate perm_service
+rag项目的基础服务是docker-compose.infra.yml，已在正常运行中。外部系统的使用 见 readme.md
+统一观测平台、langfuse这些都是docker compose部署，已在正常运行中
+可以通过 docker ps查看
+
+
+9202ad087125bdd86c3ebd1c487b38fc
+b54c677b36303abc237979aee33934d1
+c2e4cab53b290ab9a583aecced8829ed
+6b53c95d8ae9c7f999a196aa049b9a3b
+系统性分析下这些trace id，找到本质原因，为什么4个文件总共不到650kb markdown 要这么久的时间？太不合理了
+是否存在不必要的重复llm调用等情况。
+先进行系统性分析，不动代码
+现有代码系统架构设计 docs/RAG系统设计v14.md，前端架构设计 docs/frontend-design.md，docs/外部系统设计.md，docs/权限管理系统架构设计.md
+rag python开发环境 conda activate rag_dev_v14 ,外部系统python开发环境 conda activate perm_service
+rag项目的基础服务是docker-compose.infra.yml，已在正常运行中。外部系统的使用 见 readme.md
+统一观测平台、langfuse这些都是docker compose部署，已在正常运行中
+可以通过 docker ps查看
+
+这有个问题，这个没有根据资源的运行安排吧！一看就是请求有多少，就运行多少，然后都去争抢资源，运行多少任务不应该根据可用资源来安排吗？
+
+## 系统核心架构
+Celery + Haystack Pipeline 是当前 Python 技术栈下构建企业级 RAG 系统的一流选择。
+❯ 目前的系统核心架构（不管一些辅助的），是不是celery+haystack pipeline
+
+● 对，核心架构就是这两个东西，而且它们之间的配合方式正是问题的根源：
+
+  Celery — 负责任务调度、重试、队列管理
+  Haystack Pipeline — 负责摄入的 DAG：Splitter → DenseEmbedder → SparseEmbedder → PermEnricher → MilvusWriter
+
+  关键问题是二者的边界：
+
+  Celery 视角:
+    ┌─────────────────── ingest_document_task ───────────────────┐
+    │  整个 Pipeline 是一个原子任务，Celery 看不到内部            │
+    │  只知道: 成功 → return, 失败 → retry(从头来)               │
+    └────────────────────────────────────────────────────────────┘
+
+  Pipeline 内部实际:
+    Splitter ──→ DenseEmbedder ──→ SparseEmbedder ──→ Enricher ──→ Writer
+    (CPU)         (Ollama/GPU)      (BGE-M3/GPU ⚠️ )    (CPU)        (IO)
+                       ✅               ❌ 这里爆了
+                 每次都成功          但从 Celery 看来
+                 结果全丢弃          整条 Pipeline = 失败
+
+  也就是说：
+
+  - Celery 只知道 --concurrency=2，把 Pipeline 当普通任务并发调度
+  - Pipeline 对 Celery 是黑盒，内部每个 Component 有没有 GPU 需求、显存够不够，Celery 完全不知道
+  - 爆了之后 Celery 做的是"整条 Pipeline 重试"——因为它根本不知道内部已经跑完了 Splitter 和 DenseEmbedder
+
+  所以你说的"根据资源安排任务"，在这个架构下根本做不到——Pipeline 的原子性把 GPU 争抢和冗余重试锁死在一起了。
+
+现在的问题是整个系统已经在这个架构上开发完了，系统性分析这个该怎么处理呢？
+现在这个执行效率，根本没法投产
+先进行系统性分析，不动代码
+现有代码系统架构设计 docs/RAG系统设计v14.md，前端架构设计 docs/frontend-design.md，docs/外部系统设计.md，docs/权限管理系统架构设计.md
+rag python开发环境 conda activate rag_dev_v14 ,外部系统python开发环境 conda activate perm_service
+rag项目的基础服务是docker-compose.infra.yml，已在正常运行中。外部系统的使用 见 readme.md
+统一观测平台、langfuse这些都是docker compose部署，已在正常运行中
+可以通过 docker ps查看
+
+上面的这些方案不是针对目前的资源制定的吧，正式部署时这些方案不会失效吧，可投产的项目应该是有个最低资源可运行需求的。流畅运行需要什么资源。
+按照这个标准把上面的诊断、提供的方案重新评估后给出
+## 性能瓶颈本质原因
+每个celery任务在运行时，都会资源进行重新实例化，这个celery完成后，这个资源实例就close了
+
+## 优化方案
+优化方案经过多次讨论
+现在我要求这个项目要能在内存32g, gpu 12g上流畅跑起来，按照这个给出可用方案
+现在综合上述的方案讨论过程，给出一个在 base line资源：内存32g, gpu 12g。上流畅跑起来，执行速度不会让人感觉到慢，充分利用系统资源的优化方案
+```
+  最终方案：12GB GPU + 32GB RAM 下流暢运行的完整优化
+
+  〇、总览
+
+  优化前                                 优化后
+  ─────────────────────────────────    ─────────────────────────────────
+  GPU: Ollama 8GB + BGE-M3×2 5GB     GPU: BGE-M3 2.3GB + Rerank 1.1GB
+       = 13GB → OOM ❌                     + working 2GB = 5.4GB ✅
+  RAM: 按需 ~20GB                      RAM: 峰值 ~24GB / 32GB ✅
+
+  4文件摄入: ~9分钟 (含OOM回滚)        4文件摄入: ~70秒 (并发2)
+  单次查询嵌入: ~25ms (两次调用)        单次查询嵌入: ~10ms (一次调用)
+  模型加载: 每次任务重新加载             模型加载: 进程启动一次，全局复用
+
+  一、资源分配
+
+  ╔══════════════════════════════════════════════════════════════╗
+  ║                      GPU 12 GB                                ║
+  ╠══════════════════════════════════════════════════════════════╣
+  ║  BGE-M3 全局单例 (权重 fp16)          2.3 GB    常驻          ║
+  ║  BGE-Reranker 全局单例 (权重 fp16)    1.1 GB    常驻          ║
+  ║  PyTorch CUDA context                 1.0 GB    常驻          ║
+  ║  并发工作内存 (batch临时, ingest+query)  2.0 GB    按需       ║
+  ║  ──────────────────────────────────────────                  ║
+  ║  已用                                 6.4 GB                  ║
+  ║  余量                                 5.6 GB    安全边界      ║
+  ╚══════════════════════════════════════════════════════════════╝
+
+  ╔══════════════════════════════════════════════════════════════╗
+  ║                      RAM 32 GB                                ║
+  ╠══════════════════════════════════════════════════════════════╣
+  ║  基础设施 (PG/Redis/Milvus/SeaweedFS/观测栈)    ~12 GB        ║
+  ║  Ingestion Worker ×1 (concurrency=2)           ~5 GB (峰值)   ║
+  ║  Retrieval Worker ×1 (concurrency=4)           ~5 GB (峰值)   ║
+  ║  Stamping/Outbox/Events/API/Nginx              ~2 GB          ║
+  ║  ──────────────────────────────────────────                  ║
+  ║  峰值                                      ~24 GB            ║
+  ║  稳态 (模型已加载到GPU)                     ~18 GB            ║
+  ║  余量                                       ~8 GB             ║
+  ╚══════════════════════════════════════════════════════════════╝
+
+  二、核心改动：BGE-M3 统一嵌入
+
+  2.1 原理
+
+  BGE-M3 一次 encode() 同时产出稠密和稀疏向量。当前代码把这件事拆成两个模型做——Ollama 做稠密、独立 BGE-M3 做稀疏——多了一次 HTTP 往返、多占了一份 GPU 显存、多跑了一次模型前向传播。
+
+  之前:
+    texts → Ollama HTTP (稠密, ~50s) → BGE-M3 GPU (稀疏, ~30s)
+            两次模型加载/调用, GPU在Ollama阶段空闲
+
+  之后:
+    texts → BGE-M3 GPU (稠密+稀疏一次完成, ~30s)
+            一次模型前向传播, 两种向量同时产出
+
+  2.2 摄入侧实现
+
+  新建 src/ingest/components/bge_m3_embedder.py：
+
+  """BGE-M3 统一嵌入器（摄入侧）——一次 encode 产出稠密 + 稀疏向量。
+
+  替代 OllamaDocumentEmbedder + BGE_M3SparseEmbedder 两个组件。
+  模型以模块级全局单例加载，进程生命周期内复用。
+  """
+
+  from dataclasses import replace
+  from typing import Any, Dict, List
+
+  from haystack import component, Document
+
+  # 模块级全局单例（同 registry.py _reranker_cache 模式）
+  _model = None
+
+
+  def _get_model():
+      global _model
+      if _model is None:
+          from FlagEmbedding import BGEM3FlagModel
+          import os as _os
+
+          model_path = "BAAI/bge-m3"
+          hf_cache = _os.path.expanduser(
+              "~/.cache/huggingface/hub/models--BAAI--bge-m3/snapshots"
+          )
+          if _os.path.isdir(hf_cache):
+              try:
+                  versions = sorted(_os.listdir(hf_cache), reverse=True)
+                  for v in versions:
+                      p = _os.path.join(hf_cache, v)
+                      cfg = _os.path.join(p, "config.json")
+                      if _os.path.isfile(cfg):
+                          import json
+                          with open(cfg) as f:
+                              if json.load(f).get("model_type"):
+                                  model_path = p
+                                  break
+              except Exception:
+                  pass
+
+          _model = BGEM3FlagModel(
+              model_path,
+              use_fp16=True,
+              devices="cuda",
+              local_files_only=True,
+          )
+      return _model
+
+
+  @component
+  class BGE_M3DocumentEmbedder:
+      """BGE-M3 文档嵌入器——稠密 + 稀疏一次产出。
+
+      Pipeline YAML 中替代 dense_embedder + sparse_embedder 两个组件。
+      """
+
+      def __init__(self, batch_size: int = 512):
+          self.batch_size = batch_size
+
+      @component.output_types(documents=List[Document])
+      def run(self, documents: List[Document]) -> Dict[str, Any]:
+          model = _get_model()
+          texts = [doc.content for doc in documents]
+
+          # 分批编码，控制 GPU 峰值显存
+          all_dense = []
+          all_sparse = []
+          for i in range(0, len(texts), self.batch_size):
+              batch = texts[i : i + self.batch_size]
+              output = model.encode(
+                  batch,
+                  return_dense=True,
+                  return_sparse=True,
+                  batch_size=len(batch),
+              )
+              all_dense.extend(output["dense_vecs"])
+              all_sparse.extend(output.get("lexical_weights", [{}] * len(batch)))
+
+          for i, doc in enumerate(documents):
+              documents[i] = replace(
+                  doc,
+                  embedding=all_dense[i] if i < len(all_dense) else None,
+                  sparse_embedding=all_sparse[i] if i < len(all_sparse) else {},
+              )
+          return {"documents": documents}
+
+  2.3 查询侧实现
+
+  新建 src/retrieve/components/bge_m3_text_embedder.py：
+
+  """BGE-M3 统一文本嵌入器（查询侧）——单次 encode 产出稠密 + 稀疏向量。"""
+
+  from typing import Any, Dict
+  from haystack import component
+  from src.ingest.components.bge_m3_embedder import _get_model
+
+
+  @component
+  class BGE_M3TextEmbedder:
+      """BGE-M3 查询嵌入器——稠密 + 稀疏一次产出。
+
+      Pipeline YAML 中替代 OllamaTextEmbedder + BGE_M3SparseTextEmbedder。
+      """
+
+      @component.output_types(
+          embedding=List[float], sparse_embedding=Dict[str, float]
+      )
+      def run(self, text: str) -> Dict[str, Any]:
+          model = _get_model()
+          output = model.encode([text], return_dense=True, return_sparse=True)
+
+          dense_vec = output["dense_vecs"][0].tolist() if output.get("dense_vecs") else []
+          sparse_vec = (
+              output.get("lexical_weights", [{}])[0] if len(output.get("lexical_weights", [])) > 0 else {}
+          )
+          return {"embedding": dense_vec, "sparse_embedding": sparse_vec}
+
+  2.4 旧组件处理
+
+  ┌─────────────────────────┬──────────────────────────────────┐
+  │         旧组件          │             处理方式             │
+  ├─────────────────────────┼──────────────────────────────────┤
+  │ ollama_embedder.py      │ 保留文件，Pipeline YAML 不再引用 │
+  ├─────────────────────────┼──────────────────────────────────┤
+  │ sparse_embedder.py      │ 保留文件，Pipeline YAML 不再引用 │
+  ├─────────────────────────┼──────────────────────────────────┤
+  │ sparse_text_embedder.py │ 保留文件，Pipeline YAML 不再引用 │
+  ├─────────────────────────┼──────────────────────────────────┤
+  │ ollama_text_embedder.py │ 保留文件，Pipeline YAML 不再引用 │
+  └─────────────────────────┴──────────────────────────────────┘
+
+  保留旧文件但不引用，万一需要回滚可以直接改 YAML 回去。
+
+  2.5 Pipeline YAML 改动
+
+  5 个摄入 Pipeline 做相同改动：
+
+  # ingest_v1.yaml — 改动前
+  components:
+    splitter:    ...
+    dense_embedder:     # ← 删除
+      type: src.ingest.components.ollama_embedder.OllamaDocumentEmbedder
+    sparse_embedder:    # ← 删除
+      type: src.ingest.components.sparse_embedder.BGE_M3SparseEmbedder
+    perm_enricher: ...
+    writer: ...
+
+  connections:
+  - sender: splitter.documents
+    receiver: dense_embedder.documents       # ← 删除
+  - sender: dense_embedder.documents         # ← 删除
+    receiver: sparse_embedder.documents      # ← 删除
+  - sender: sparse_embedder.documents        # ← 删除
+    receiver: perm_enricher.documents        # ← 删除
+
+  # ingest_v1.yaml — 改动后
+  components:
+    splitter:    ...
+    embedder:          # ← 新增，一个取代两个
+      type: src.ingest.components.bge_m3_embedder.BGE_M3DocumentEmbedder
+      init_parameters:
+        batch_size: 512
+    perm_enricher: ...
+    writer: ...
+
+  connections:
+  - sender: splitter.documents
+    receiver: embedder.documents             # ← 单线连接
+  - sender: embedder.documents
+    receiver: perm_enricher.documents
+  - sender: perm_enricher.documents
+    receiver: writer.documents
+
+  3 个查询 Pipeline 同样处理：
+
+  # query_v4.yaml (hybrid RRF) — 改动后
+  components:
+    query_embedder:     # ← 新增，取代 OllamaTextEmbedder + BGE_M3SparseTextEmbedder
+      type: src.retrieve.components.bge_m3_text_embedder.BGE_M3TextEmbedder
+    dense_retriever: ...
+                                  break
+              except Exception:
+                  pass
+
+          _model = BGEM3FlagModel(
+              model_path,
+              use_fp16=True,
+              devices="cuda",
+              local_files_only=True,
+          )
+      return _model
+
+
+  @component
+  class BGE_M3DocumentEmbedder:
+      """BGE-M3 文档嵌入器——稠密 + 稀疏一次产出。
+
+      Pipeline YAML 中替代 dense_embedder + sparse_embedder 两个组件。
+      """
+
+      def __init__(self, batch_size: int = 512):
+          self.batch_size = batch_size
+
+      @component.output_types(documents=List[Document])
+      def run(self, documents: List[Document]) -> Dict[str, Any]:
+          model = _get_model()
+          texts = [doc.content for doc in documents]
+
+          # 分批编码，控制 GPU 峰值显存
+          all_dense = []
+          all_sparse = []
+          for i in range(0, len(texts), self.batch_size):
+              batch = texts[i : i + self.batch_size]
+              output = model.encode(
+                  batch,
+                  return_dense=True,
+                  return_sparse=True,
+                  batch_size=len(batch),
+              )
+              all_dense.extend(output["dense_vecs"])
+              all_sparse.extend(output.get("lexical_weights", [{}] * len(batch)))
+
+          for i, doc in enumerate(documents):
+              documents[i] = replace(
+                  doc,
+                  embedding=all_dense[i] if i < len(all_dense) else None,
+                  sparse_embedding=all_sparse[i] if i < len(all_sparse) else {},
+              )
+          return {"documents": documents}
+
+  2.3 查询侧实现
+
+  为什么 retrieval 可以开 4： 单次查询 BGE-M3 只编码 1 个文本（~1KB），GPU 占用可忽略。Reranker 的 rerank 也是小批量（top_k ≤ 50）。4 并发查询 GPU 峰值 < 1GB。
+
+  ---
+  五、基础设施资源约束
+
+  给 Docker 容器加上资源限制，防止某个服务失控吃掉全部资源：
+
+  # docker-compose.infra.yml 关键服务加上
+  milvus:
+    deploy:
+      resources:
+        limits:
+          memory: 6G
+        reservations:
+          memory: 3G
+
+  postgres:
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+
+  # docker-compose.app.yml
+  ingestion-worker:
+    deploy:
+      resources:
+        limits:
+          memory: 8G         # 模型加载峰值 ~7GB，给 8GB 安全
+        reservations:
+          memory: 4G         # 稳态 ~3-4GB
+
+  retrieval-worker:
+    deploy:
+      resources:
+        limits:
+          memory: 8G
+        reservations:
+          memory: 3G
+
+  ---
+  六、Ollama 处理
+
+  如果 Ollama 只承载嵌入模型且不再需要：
+
+  # 方案 A: 直接关掉
+  docker stop <ollama-container>
+
+  # 方案 B: 保留但卸掉嵌入模型
+  ollama rm qwen3-embedding:0.6b
+
+  # 方案 C: 保留以备后用（需要时加载 LLM 对话模型）
+  # 不加载嵌入模型即可，Ollama 空跑只占 ~200MB RAM
+
+  建议方案 C——保留 Ollama 但不加载嵌入模型。将来如果需要本地 LLM 生成（替代 DeepSeek API），可以在 12GB GPU 余量（~5.6GB）内加载一个 int4 量化的 7B 模型。
+
+  ---
+  七、迁移注意事项
+
+  7.1 稠密向量维度
+
+  BGE-M3 稠密向量维度为 1024。当前 Ollama qwen3-embedding:0.6b 的维度需要确认。如果维度不同，切换后旧 chunk 的稠密向量与新查询向量维度不匹配，Milvus 搜索会失败。
+
+  处理方式：
+  - 新摄入的文档用 BGE-M3 1024 维写入
+  - 已摄入的旧文档触发 re-parse，重新用 BGE-M3 嵌入
+  - 或者创建一个新的 Milvus collection 存放 1024 维向量，旧 collection 逐步淘汰
+
+  7.2 向量是否需要归一化
+
+  BGE-M3 的 dense_vecs 默认不归一化。当前系统中，如果 Milvus 检索用的是 COSINE 距离，需要确认旧模型和 BGE-M3 都做了归一化或都不做。如果检索用的是 IP（内积），则归一化后的余弦等价于内积。
+
+  处理方式： 在 BGE_M3DocumentEmbedder.run() 中对 dense_vecs 做 L2 归一化，保证一致性。
+
+  7.3 Pipeline YAML 版本管理
+
+  改 YAML 后，chunking_configs 表中已锚定的 pipeline_yaml_version 需要对应更新，否则旧配置会指向旧 YAML 结构从而导致加载失败。
+
+  ---
+  八、改动清单总览
+
+  新建文件:
+    src/ingest/components/bge_m3_embedder.py          ~60 行
+    src/retrieve/components/bge_m3_text_embedder.py     ~30 行
+
+  修改文件:
+    pipelines/ingest_v1.yaml ~ ingest_v5.yaml         各删 2 组件 + 1 连接
+    pipelines/query_v2.yaml, query_v4.yaml, query_v5.yaml  同上
+    src/platform/task/pipeline_runner.py               加 2 行注册
+    docker-compose.app.yml                             加资源限制, concurrency 不动
+    docker-compose.infra.yml                           关键服务加 memory limit
+    .env                                               加注释说明 Ollama 不再用于嵌入
+
+  不移除但不再引用:
+    src/ingest/components/ollama_embedder.py           保留(回滚用)
+    src/ingest/components/sparse_embedder.py           保留(回滚用)
+    merger: ...
+    prompt_builder: ...
+    generator: ...
+
+  connections:
+  - sender: query_embedder.embedding
+    receiver: dense_retriever.query_embedding
+  - sender: query_embedder.sparse_embedding
+    receiver: sparse_retriever.query_sparse_embedding
+
+  2.6 pipeline_runner.py 注册新组件
+
+  # _preload_component_modules() 中新增
+  _try_register("src.ingest.components.bge_m3_embedder",
+                "src.ingest.components.bge_m3_embedder")
+  _try_register("src.retrieve.components.bge_m3_text_embedder",
+                "src.retrieve.components.bge_m3_text_embedder")
+
+  ---
+  三、BGE-Reranker 已经是单例，无需改动
+
+  registry.py:303 的 _reranker_cache 已经是进程级全局单例。确认它在 query_v2/v4/v5 中被 BGEReranker.run() → invoke_rerank() 使用。
+
+  ---
+  四、Worker 配置
+
+  # docker-compose.app.yml
+  ingestion-worker:
+    command: >
+      celery -A src.platform.task.celery_app worker
+      -Q ingestion_queue
+      --concurrency=2                    # 2 并发，GPU 余量足够
+      ...
+
+  retrieval-worker:
+    command: >
+      celery -A src.platform.task.celery_app worker
+      -Q retrieval_queue
+      --concurrency=4                    # 保持 4，单次查询 GPU 占用小
+      ...
+
+  stamping-worker:
+    command: >
+      celery -A src.platform.task.celery_app worker
+      -Q stamping_queue
+      --concurrency=4                    # 无 GPU，保持
+      ...
+
+  为什么 ingestion 可以开 2： 全局单例 _model 在两个并发任务间共享同一份 BGE-M3 权重（2.3GB）。两个任务各自的数据批次（batch_size=512，~80MB/批）独立分配 GPU 显存。总 GPU 占用 = 2.3 + 0.08×2 + 1.1 (reranker)
+  + 1.0 (CUDA) ≈ 4.6GB，安全。
+
+  为什么 retrieval 可以开 4： 单次查询 BGE-M3 只编码 1 个文本（~1KB），GPU 占用可忽略。Reranker 的 rerank 也是小批量（top_k ≤ 50）。4 并发查询 GPU 峰值 < 1GB。
+
+  ---
+  五、基础设施资源约束
+
+  给 Docker 容器加上资源限制，防止某个服务失控吃掉全部资源：
+
+  # docker-compose.infra.yml 关键服务加上
+  milvus:
+    deploy:
+      resources:
+        limits:
+          memory: 6G
+        reservations:
+          memory: 3G
+
+  postgres:
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+
+  # docker-compose.app.yml
+  ingestion-worker:
+    deploy:
+      resources:
+        limits:
+          memory: 8G         # 模型加载峰值 ~7GB，给 8GB 安全
+        reservations:
+          memory: 4G         # 稳态 ~3-4GB
+
+  retrieval-worker:
+    deploy:
+      resources:
+        limits:
+          memory: 8G
+        reservations:
+          memory: 3G
+
+  ---
+  六、Ollama 处理
+
+  如果 Ollama 只承载嵌入模型且不再需要：
+
+  # 方案 A: 直接关掉
+  docker stop <ollama-container>
+
+  # 方案 B: 保留但卸掉嵌入模型
+  ollama rm qwen3-embedding:0.6b
+
+  # 方案 C: 保留以备后用（需要时加载 LLM 对话模型）
+  # 不加载嵌入模型即可，Ollama 空跑只占 ~200MB RAM
+
+  建议方案 C——保留 Ollama 但不加载嵌入模型。将来如果需要本地 LLM 生成（替代 DeepSeek API），可以在 12GB GPU 余量（~5.6GB）内加载一个 int4 量化的 7B 模型。
+
+  ---
+  七、迁移注意事项
+
+  7.1 稠密向量维度
+
+  BGE-M3 稠密向量维度为 1024。当前 Ollama qwen3-embedding:0.6b 的维度需要确认。如果维度不同，切换后旧 chunk 的稠密向量与新查询向量维度不匹配，Milvus 搜索会失败。
+
+  处理方式：
+  - 新摄入的文档用 BGE-M3 1024 维写入
+  - 已摄入的旧文档触发 re-parse，重新用 BGE-M3 嵌入
+  - 或者创建一个新的 Milvus collection 存放 1024 维向量，旧 collection 逐步淘汰
+
+  7.2 向量是否需要归一化
+
+  BGE-M3 的 dense_vecs 默认不归一化。当前系统中，如果 Milvus 检索用的是 COSINE 距离，需要确认旧模型和 BGE-M3 都做了归一化或都不做。如果检索用的是 IP（内积），则归一化后的余弦等价于内积。
+
+  处理方式： 在 BGE_M3DocumentEmbedder.run() 中对 dense_vecs 做 L2 归一化，保证一致性。
+
+  7.3 Pipeline YAML 版本管理
+
+  改 YAML 后，chunking_configs 表中已锚定的 pipeline_yaml_version 需要对应更新，否则旧配置会指向旧 YAML 结构从而导致加载失败。
+
+  ---
+  八、改动清单总览
+
+  新建文件:
+    src/ingest/components/bge_m3_embedder.py          ~60 行
+    src/retrieve/components/bge_m3_text_embedder.py     ~30 行
+
+  修改文件:
+    pipelines/ingest_v1.yaml ~ ingest_v5.yaml         各删 2 组件 + 1 连接
+    pipelines/query_v2.yaml, query_v4.yaml, query_v5.yaml  同上
+    src/platform/task/pipeline_runner.py               加 2 行注册
+    docker-compose.app.yml                             加资源限制, concurrency 不动
+    docker-compose.infra.yml                           关键服务加 memory limit
+    .env                                               加注释说明 Ollama 不再用于嵌入
+
+  不移除但不再引用:
+    src/ingest/components/ollama_embedder.py           保留(回滚用)
+    src/ingest/components/sparse_embedder.py           保留(回滚用)
+    src/retrieve/components/ollama_text_embedder.py    保留(回滚用)
+    src/retrieve/components/sparse_text_embedder.py    保留(回滚用)
+
+  不改动:
+    所有 Celery 任务代码 (ingest/service.py, chat/service.py)
+    所有 Pipeline runner 逻辑 (pipeline_runner.py 核心)
+    B-RETRIEVE service、P-AUTHC、P-MODEL、其余组件
+
+  ---
+  九、性能预期
+
+  场景                        优化前              优化后              提升
+  ──────────────────────────────────────────────────────────────────────
+  4文件摄入 (共650KB, 并发2)     ~540s (含OOM)       ~70s                7.7×
+  单文件摄入 (4000 chunk)        ~135s (含回滚)      ~35s                3.9×
+  单次摄入 GPU OOM              7 次                0 次                彻底消除
+  查询嵌入延迟                   ~25ms (2次调用)     ~10ms (1次调用)     2.5×
+  BGE-M3 模型加载               每次任务重加载      进程启动一次         消除
+  GPU 显存峰值                   13GB (超配)         5.4GB (安全)        ✅
+  GPU 显存余量                   无                  5.6GB               可应对突发
+
+  用户感知:
+    上传文件 → 即时返回 (异步)  → 后台 ~35s 处理完   无变化，本来就是异步
+    查询知识库 → DeepSeek API ~2-5s → 返回答案      无变化，LLM 是瓶颈
+    但: GPU 不再 OOM → 不再有任务卡住或失败 → 可靠
+
+  十、这是不是这个架构 + 这个硬件下的天花板？
+
+  瓶颈分析:
+
+  摄入:
+    Splitter          ~1s      CPU, 不可并行
+    BGE-M3 encode     ~30s     GPU, batch=512 时 ~8 批 → 已是 fp16 极限
+    Writer            ~4s      IO, Milvus 写入
+    ─────────────────────────
+    每文件 ~35s
+
+    还有优化空间?
+    ├── 更大的 batch (1024)?  → 边际收益 <5%, 增加 CUDA 碎片风险
+    ├── Pipeline 流水线并行?   → Haystack DAG 不支持组件间流式传递
+    ├── 模型 int8 量化?        → RTX 3060 上 fp16 已达最优
+    └── Writer 与 embed 重叠?  → 需自建流式组件, 不符合当前架构模式
+
+  结论: 单文件 ~35s 是这套架构 + 12GB GPU 的物理上限。
+        并发 2 时 4 文件 ~70s, 接近理论极限 (~60s, 理想流水线)。
+
+  查询:
+    本地嵌入 + rerank    ~50ms    → 远小于 LLM 的 2-5s
+    LLM (DeepSeek API)   ~2-5s    → 不可控, 外部依赖
+
+  结论: 查询侧本地 GPU 已优化到可忽略量级, 延迟由外部 LLM 决定。
+
+
+```
+
+按照上面给出的最终优化方案，对项目代码进行一一优化
+在代码优化修复过程中，不能出现这样的操作：为了让项目跑通的妥协、绕过逻辑的代码；为了让代码路通引入硬编码、mock代码；为了让代码跑通不按照系统架构设计来
+在代码优化修复过程中，非必要不动已有代码
+在代码优化修复过程中，要注意可观测系统的完整性、有效性，不因代码修复而造成破坏
+涉及到需要联调运行测试时，要进行真实联调测试，不要skip或者mock、绕过，联调测试就要根据生产实际情况来
+现有代码系统架构设计 docs/RAG系统设计v14.md，前端架构设计 docs/frontend-design.md，docs/外部系统设计.md，docs/权限管理系统架构设计.md
+rag python开发环境 conda activate rag_dev_v14 ,外部系统python开发环境 conda activate perm_service
+rag项目的基础服务是docker-compose.infra.yml，已在正常运行中。外部系统的使用 见 readme.md
+统一观测平台、langfuse这些都是docker compose部署，已在正常运行中
+可以通过 docker ps查看
+
+
+## 修复后的测试
+56834cb7fedf1446408657221c161f06
+6844219c9b5da5ecd8fa1e7a44d1e51
+4d1b2696a8befb9e31ab4aaa93616784
+这些新trace id是新上传文件、解析 产生的，分析下，看下优化后有没有改进、有没有新的问题产生
+现有代码系统架构设计 docs/RAG系统设计v14.md，前端架构设计 docs/frontend-design.md，docs/外部系统设计.md，docs/权限管理系统架构设计.md
+rag python开发环境 conda activate rag_dev_v14 ,外部系统python开发环境 conda activate perm_service
+rag项目的基础服务是docker-compose.infra.yml，已在正常运行中。外部系统的使用 见 readme.md
+统一观测平台、langfuse这些都是docker compose部署，已在正常运行中
+可以通过 docker ps查看
+
+pipeline在工作时频繁重复实例化的资源（如模型），这些资源哪些能复用--做成全局单例，这样的话要动哪些 评估下
+按照上面的评估结果，按照p0/p1对项目代码进行优化修复
+在代码优化修复过程中，不能出现这样的操作：为了让项目跑通的妥协、绕过逻辑的代码；为了让代码路通引入硬编码、mock代码；为了让代码跑通不按照系统架构设计来
+在代码优化修复过程中，要注意权限系统的调用逻辑，不因代码的优化修复造成破坏
+在代码优化修复过程中，要注意可观测系统的完整性、有效性，不因代码修复而造成破坏
+涉及到需要联调运行测试时，要进行真实联调测试，不要skip或者mock、绕过，联调测试就要根据生产实际情况来
+现有代码系统架构设计 docs/RAG系统设计v14.md，前端架构设计 docs/frontend-design.md，docs/外部系统设计.md，docs/权限管理系统架构设计.md
+rag python开发环境 conda activate rag_dev_v14 ,外部系统python开发环境 conda activate perm_service
+rag项目的基础服务是docker-compose.infra.yml，已在正常运行中。外部系统的使用 见 readme.md
+统一观测平台、langfuse这些都是docker compose部署，已在正常运行中
+可以通过 docker ps查看
+
+# 系统运行速度问题-retrieve
+## 诊断分析1
+4398aaed918c7c61a9878fb261eda8bb
+这是一次 retrieve 的trace id
+在统一观测平台看到，这个请求花了2.59 min才完成。系统性分析下 retrieve的性能瓶颈实质是什么
+先进行系统性分析，不动代码
+现有代码系统架构设计 docs/RAG系统设计v14.md，前端架构设计 docs/frontend-design.md，docs/外部系统设计.md，docs/权限管理系统架构设计.md
+rag python开发环境 conda activate rag_dev_v14 ,外部系统python开发环境 conda activate perm_service
+rag项目的基础服务是docker-compose.infra.yml，已在正常运行中。外部系统的使用 见 readme.md
+统一观测平台、langfuse这些都是docker compose部署，已在正常运行中
+可以通过 docker ps查看
+  根本原因总结
+
+  2.59 分钟的账单:
+
+  GPU 资源争抢 (旧 worker 不释放)
+    ├── Ranker 被迫 CPU:        36.5s  (25%)
+    └── Query Embed 被迫 CPU:    3.0s  (2%)
+
+  合成策略 (refine 模式)
+    ├── 9 次串行 LLM API:      107s   (73%)
+    └── 每次等待 DeepSeek:     ~12s/次
+
+  Pipeline 其余 (检索/融合):     <1s   (<1%)
+  ─────────────────────────────────────────
+  总计:                        ~147s
+
+  本质问题不是检索慢，而是两个东西被串行放大了：
+  1. GPU 不可用 → 模型跑 CPU → 本地计算从 <1s 膨胀到 37s
+  2. refine 模式 → 9 个 chunk → 9 次 LLM 串行调用 → 107s
+
+  这两个问题互相独立但叠加：即使 GPU 好了，refine 的 107s 仍然在。即使改成 compact，GPU 占用导致的 37s 仍然在。
+
+  解决方向（不涉及具体代码）：
+  - Ranker 36.5s：重启 worker 释放 GPU 即可解决 → <1s
+  - LLM 107s：调整 top_k 或合成模式，减少 LLM 调用次数 → 降到 1-3 次
+
+## 诊断分析2
+现在有个问题，当部署运行时gpu资源紧张时，应该如何进行合理的调配。现在的情况是某个资源在gpu进行单实例自己的相关相关资源后，会常驻的。但有时又不使用它，这时其他需要gpu进行实例化的资源又抢不到gpu。这个问题如何解决？
+
+  综合评估
+
+                      消除重复  空闲释放  防OOM  改动量  延迟影响  投产就绪
+  ─────────────────────────────────────────────────────────────────────
+  ① 模型服务化          ✅✅      ✅       ✅     大       +5ms     P2
+  ② 空闲超时卸载         ❌       ✅       ❌     极小     冷启动    P1
+  ③ GPU显存检查+排队     ❌       ❌       ✅     小       +等待    P0
+  ④ Worker生命周期       ❌       ✅       ❌     零      冷启动    P1
+  ⑤ GPU分离部署          ✅       ✅       ✅     中       0        P2
+  ─────────────────────────────────────────────────────────────────────
+
+  推荐策略：三层叠加
+
+  第一层（防御）: GPU 显存检查 + CPU 降级
+    每次加载模型前检查 GPU 可用显存
+    不够 → 降级 CPU（不 crash，不 OOM）
+    改 1 个函数 (_get_device → 改为 _get_device_with_fallback)
+    代码量: ~15 行
+
+  第二层（主动释放）: 空闲超时卸载
+    在 BGE-M3 和 Reranker 全局单例上加空闲计时
+    5 分钟无使用 → 卸载模型, 释放 GPU
+    代码量: ~30 行
+
+  第三层（根本解决）: BGE-M3 + Reranker 服务化
+    一个独立进程，一张 GPU 上只有一个实例
+    所有 worker 通过 localhost HTTP 调用
+    空闲时主动 unload
+    代码量: ~300 行（新服务 + 客户端适配）
+
+  第一层现在就能做，第二层改动很小收益明确，第三层是长期正确架构但需要充分测试。 三层叠加后：
+
+  GPU 使用模式:
+
+  请求到达 → 检查 GPU 显存
+    ├── 够 → 加载模型到 GPU → 执行 → 重置空闲计时
+    └── 不够 → CPU 降级（不阻塞）
+
+  5 分钟无请求 → 自动卸载 GPU 模型
+  其他进程此时可以抢占 GPU
+
+  Ollama 同样策略（如果只用嵌入模型）:
+    OLLAMA_KEEP_ALIVE=-1  → 永久常驻
+    OLLAMA_KEEP_ALIVE=300 → 5 分钟空闲后卸载
+
+
+按照上面推荐的策略开始逐层实施
+在代码实施过程中，不能出现这样的操作：为了让项目跑通的妥协、绕过逻辑的代码；为了让代码路通引入硬编码、mock代码；为了让代码跑通不按照系统架构设计来
+在代码实施过程中，要注意权限系统的调用逻辑，不因代码的实施造成破坏
+在代码实施过程中，要注意可观测系统的完整性、有效性，不因代码实施而造成破坏
+涉及到需要联调运行测试时，要进行真实联调测试，不要skip或者mock、绕过，联调测试就要根据生产实际情况来
+现有代码系统架构设计 docs/RAG系统设计v14.md，前端架构设计 docs/frontend-design.md，docs/外部系统设计.md，docs/权限管理系统架构设计.md
+rag python开发环境 conda activate rag_dev_v14 ,外部系统python开发环境 conda activate perm_service
+rag项目的基础服务是docker-compose.infra.yml，已在正常运行中。外部系统的使用 见 readme.md
+统一观测平台、langfuse这些都是docker compose部署，已在正常运行中
+可以通过 docker ps查看
+
+
+按照上面推荐的策略开始第三层的实施
+在代码实施过程中，不能出现这样的操作：为了让项目跑通的妥协、绕过逻辑的代码；为了让代码路通引入硬编码、mock代码；为了让代码跑通不按照系统架构设计来
+在代码实施过程中，要注意权限系统的调用逻辑，不因代码的实施造成破坏
+在代码实施过程中，要注意可观测系统的完整性、有效性，不因代码实施而造成破坏
+涉及到需要联调运行测试时，要进行真实联调测试，不要skip或者mock、绕过，联调测试就要根据生产实际情况来
+现有代码系统架构设计 docs/RAG系统设计v14.md，前端架构设计 docs/frontend-design.md，docs/外部系统设计.md，docs/权限管理系统架构设计.md
+rag python开发环境 conda activate rag_dev_v14 ,外部系统python开发环境 conda activate perm_service
+rag项目的基础服务是docker-compose.infra.yml，已在正常运行中。外部系统的使用 见 readme.md
+统一观测平台、langfuse这些都是docker compose部署，已在正常运行中
+可以通过 docker ps查看
+
+# 资源加载失败
+dev-embedding
+'(ReadTimeoutError("HTTPSConnectionPool(host='hf-mirror.com', port=443): Read timed out. (read timeout=10)"), '(Request ID: 6b35dba4-e37f-4a79-b79f-f7be0b7309c8)')' thrown while requesting HEAD https://hf-mirror.com/BAAI/bge-reranker-v2-m3/resolve/main/tokenizer_config.json
+2026-08-06T14:13:50.327157Z [warning  ] '(ReadTimeoutError("HTTPSConnectionPool(host='hf-mirror.com', port=443): Read timed out. (read timeout=10)"), '(Request ID: 6b35dba4-e37f-4a79-b79f-f7be0b7309c8)')' thrown while requesting HEAD https://hf-mirror.com/BAAI/bge-reranker-v2-m3/resolve/main/tokenizer_config.json lineno=320 message='(ReadTimeoutError("HTTPSConnectionPool(host='hf-mirror.com', port=443): Read timed out. (read timeout=10)"), '(Request ID: 6b35dba4-e37f-4a79-b79f-f7be0b7309c8)')' thrown while requesting HEAD https://hf-mirror.com/BAAI/bge-reranker-v2-m3/resolve/main/tokenizer_config.json module=huggingface_hub.utils._http
+Retrying in 1s [Retry 1/5].
+2026-08-06T14:13:50.327688Z [warning  ] Retrying in 1s [Retry 1/5].    lineno=329 message=Retrying in 1s [Retry 1/5]. module=huggingface_hub.utils._http
+You're using a XLMRobertaTokenizerFast tokenizer. Please note that with a fast tokenizer, using the `__call__` method is faster than using a method to encode the text followed by a call to the `pad` method to get a padded encoding.
+这是什么问题啊？模型下载吗？可以使用modelscope下载吗？
+
+上面的代码修复是否遵循了下面的规则：
+在代码修复过程中，不能出现这样的操作：为了让项目跑通的妥协、绕过逻辑的代码；为了让代码路通引入硬编码、mock代码；为了让代码跑通不按照系统架构设计来
+在代码修复过程中，要注意权限系统的调用逻辑，不因代码的修复造成破坏
+在代码修复过程中，要注意可观测系统的完整性、有效性，不因代码修复而造成破坏

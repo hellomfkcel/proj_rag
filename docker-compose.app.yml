@@ -35,7 +35,8 @@ services:
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL}
       OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:7b}
       JWT_PUBLIC_KEY_URL: ${JWT_PUBLIC_KEY_URL}
-      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_COLLECTOR_ENDPOINT}
+      EMBEDDING_SERVICE_URL: ${EMBEDDING_SERVICE_URL:-http://embedding-service:19500}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://host.docker.internal:4318}
       OTEL_SERVICE_NAME: api
       PIPELINE_YAML_DIR: /app/pipelines
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
@@ -71,6 +72,12 @@ services:
     networks:
       - rag-network
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 8G
+        reservations:
+          memory: 4G
     healthcheck:
       test:
         [
@@ -106,6 +113,12 @@ services:
     networks:
       - rag-network
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 8G
+        reservations:
+          memory: 3G
     healthcheck:
       test:
         [
@@ -139,6 +152,12 @@ services:
     networks:
       - rag-network
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 512M
     # P1-2: 健康检查 — 通过 celery inspect ping 验证 worker 存活
     # worker 无响应或 ping 失败 → 标记 unhealthy，由 Docker/编排系统自动重启
     healthcheck:
@@ -151,6 +170,45 @@ services:
       timeout: 10s
       retries: 3
       start_period: 15s
+
+  # ════════════════════════════════════════════════════════════
+  # GPU 嵌入服务（Layer 3）
+  # ════════════════════════════════════════════════════════════
+
+  # 用途：独立 GPU 模型服务，单进程持有 BGE-M3 + BGE-Reranker 全局单例。
+  #       所有 worker（ingestion / retrieval）通过 HTTP API 共享模型。
+  #       消除多 worker 重复加载模型的 GPU 显存浪费。
+  #       空闲超时（GPU_MODEL_IDLE_TIMEOUT）后自动卸载模型释放 GPU。
+  # 依赖：无（GPU 需可用，否则降级 CPU）
+  embedding-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: uvicorn src.services.embedding_service:app --host 0.0.0.0 --port 19500
+    environment:
+      <<: *app_env
+      OTEL_SERVICE_NAME: embedding-service
+      SENTENCE_TRANSFORMERS_HOME: /models
+    volumes:
+      - ./pipelines:/app/pipelines
+      - model_cache:/models
+    ports:
+      - "19500:19500"
+    networks:
+      - rag-network
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 8G
+        reservations:
+          memory: 3G
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:19500/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
 
   # 用途：B-DOC outbox relay
   #        轮询 outbox 表，将领域事件可靠投递到 Redis 消息总线

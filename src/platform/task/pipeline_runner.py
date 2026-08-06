@@ -8,6 +8,13 @@ v14 核心包装层——所有 Pipeline 执行的唯一入口：
 规则：
 - API 进程禁止调用 pipeline.run()——只用 run_pipeline_async
 - Pipeline 对象在 worker 内部构造，不跨进程共享
+
+OTel Trace Context 传播：
+- run_pipeline_async（API 侧）从当前 OTel span 提取 trace context，
+  序列化到 task_metadata，确保跨 Redis/Celery 边界不丢失。
+- run_pipeline_task（Worker 侧）从 task_metadata 还原 trace context，
+  创建子 span 包裹整条 Pipeline 执行，使 API→Worker→Pipeline
+  形成一条完整 Trace（同一 trace_id）。
 """
 
 import os
@@ -113,6 +120,8 @@ def _preload_component_modules() -> None:
                   "milvus_haystack.milvus_embedding_retriever")
 
     # 本系统自定义组件（摄入 Pipeline）
+    _try_register("src.ingest.components.bge_m3_embedder",
+                  "src.ingest.components.bge_m3_embedder")
     _try_register("src.ingest.components.ollama_embedder",
                   "src.ingest.components.ollama_embedder")
     _try_register("src.ingest.components.sparse_embedder",
@@ -127,6 +136,8 @@ def _preload_component_modules() -> None:
                   "src.ingest.components.milvus_writer")
 
     # 本系统自定义组件（查询 Pipeline）
+    _try_register("src.retrieve.components.bge_m3_text_embedder",
+                  "src.retrieve.components.bge_m3_text_embedder")
     _try_register("src.retrieve.components.ollama_text_embedder",
                   "src.retrieve.components.ollama_text_embedder")
     _try_register("src.retrieve.components.sparse_text_embedder",
@@ -180,6 +191,10 @@ def run_pipeline_task(
     """Celery 任务：执行 Pipeline 并通过 Redis Pub/Sub 流式回传。
 
     检索类 Pipeline 结果经 Redis Pub/Sub 流式推送到 API 层。
+
+    ★ Trace context 由 celery_app 的 task_prerun 信号自动还原——
+    本函数无需手动创建 span，Haystack Pipeline Component 自动成为
+    CONSUMER span 的子节点。
     """
     import json
 
@@ -223,8 +238,51 @@ def run_pipeline_async(
     """异步提交 Haystack Pipeline 任务到 Celery 队列。
 
     在 API 进程中调用此函数——不在 API 进程内调用 pipeline.run()。
+
+    ★ 自动传播 OTel Trace Context：从当前 span 提取 trace_id/span_id，
+    写入 task_metadata["_otel_trace_ctx"]，供 Worker 侧还原父子关系。
     """
+    # ── 注入 OTel Trace Context ──
+    _inject_trace_context(task_metadata)
+
     return run_pipeline_task.apply_async(
         args=[pipeline_name, pipeline_input, task_metadata],
         queue=queue,
     )
+
+
+def _inject_trace_context(meta: Dict[str, Any]) -> None:
+    """从当前 OTel span 提取 trace context，序列化到 task_metadata。"""
+    try:
+        from opentelemetry import trace
+        span = trace.get_current_span()
+        ctx = span.get_span_context()
+        if ctx.is_valid:
+            meta["_otel_trace_ctx"] = {
+                "trace_id": format(ctx.trace_id, "032x"),
+                "span_id": format(ctx.span_id, "016x"),
+                "trace_flags": ctx.trace_flags,
+                "is_remote": True,
+            }
+    except Exception:
+        pass
+
+
+def _extract_trace_context(meta: Dict[str, Any]) -> Any:
+    """从 task_metadata 还原 OTel trace context 为 parent span context。
+
+    返回 None 表示无有效的 trace context（worker 自行创建 root span）。
+    """
+    from opentelemetry.trace import SpanContext, TraceFlags
+    try:
+        otel_ctx = meta.get("_otel_trace_ctx")
+        if otel_ctx:
+            return SpanContext(
+                trace_id=int(otel_ctx["trace_id"], 16),
+                span_id=int(otel_ctx["span_id"], 16),
+                is_remote=otel_ctx.get("is_remote", True),
+                trace_flags=TraceFlags(otel_ctx.get("trace_flags", 1)),
+            )
+    except Exception:
+        pass
+    return None

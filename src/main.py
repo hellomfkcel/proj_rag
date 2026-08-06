@@ -26,8 +26,9 @@ from src.platform.obs.logger import setup_logging
 setup_logging()
 
 # 分布式追踪 SDK（必须在 FastAPIInstrumentor 之前初始化，因为 instrumentor 读取全局 TracerProvider）
+import os as _os
 from src.platform.obs.tracing import init_tracing
-init_tracing("rag-v14")
+init_tracing(_os.getenv("OTEL_SERVICE_NAME", "rag-v14"))
 
 # ═══════════════════════════════════════════════════════════════════════
 # 阶段 1：FastAPI 应用创建 + OTel 自动插桩（必须在 lifespan 之外）
@@ -48,7 +49,38 @@ async def lifespan(app: FastAPI):
     # P-MODEL: Langfuse 模型观测（fail-open，未配置 key 时跳过）
     from src.platform.model.registry import init_langfuse
     init_langfuse()
+
+    # 确保 celery_app 被 import——这会触发 celery_app.py 模块级的
+    # CeleryInstrumentor().instrument()，使 trace context 在 API 发送
+    # Celery 任务时自动注入任务消息头
+    import src.platform.task.celery_app  # noqa: F401
+
     yield
+
+
+# ── 原始 ASGI middleware: 捕获 OTel trace context ──
+# 在 OTel instrument 之前注册，由 OTel middleware 的 span 覆盖。
+# 此 middleware 读取的是"内层"（OTel span 之后的执行上下文）。
+from starlette.types import ASGIApp, Scope, Receive, Send
+
+class OtelTraceCaptureMiddleware:
+    """在 OTel span 内层捕获 trace context，存入 ASGI scope。"""
+
+    def __init__(self, app: ASGIApp):
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] == "http":
+            try:
+                from opentelemetry import trace as _otel_trace
+                _span = _otel_trace.get_current_span()
+                _sc = _span.get_span_context()
+                if _sc.is_valid:
+                    scope["otel_trace_id"] = format(_sc.trace_id, "032x")
+                    scope["otel_span_id"] = format(_sc.span_id, "016x")
+            except Exception:
+                pass
+        await self.app(scope, receive, send)
 
 
 app = FastAPI(
@@ -57,10 +89,8 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# FastAPI OTel 自动插桩：为每个 HTTP 请求创建 span，记录 method/path/status_code。
-# ★ 必须在所有其他 add_middleware 之前调用，且必须在 app 启动前（lifespan 之外）。
-from src.platform.obs.tracing import instrument_fastapi
-instrument_fastapi(app)
+# OtelTraceCaptureMiddleware 在 OTel span 内运行，捕获 trace context 到 scope
+app.add_middleware(OtelTraceCaptureMiddleware)
 
 # ═══════════════════════════════════════════════════════════════════════
 # 阶段 2：业务中间件 + 路由注册
@@ -89,6 +119,10 @@ app.add_middleware(
     allow_credentials=True,
 )
 app.add_middleware(AuthMiddleware)
+
+# ── FastAPI OTel 自动插桩（★ 必须最后添加，确保是最外层） ──
+from src.platform.obs.tracing import instrument_fastapi
+instrument_fastapi(app)
 
 app.include_router(api_router)
 app.include_router(auth_router)

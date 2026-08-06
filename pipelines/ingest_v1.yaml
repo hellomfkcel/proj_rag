@@ -5,13 +5,10 @@ components:
       split_by: sentence
       split_length: ${CHUNK_SPLIT_LENGTH}
       split_overlap: ${CHUNK_SPLIT_OVERLAP}
-  dense_embedder:
-    type: src.ingest.components.ollama_embedder.OllamaDocumentEmbedder
+  embedder:
+    type: src.ingest.components.bge_m3_embedder.BGE_M3DocumentEmbedder
     init_parameters:
-      model: ${EMBEDDING_MODEL}
-  sparse_embedder:
-    type: src.ingest.components.sparse_embedder.BGE_M3SparseEmbedder
-    init_parameters: {}
+      batch_size: 512
   perm_enricher:
     type: src.ingest.components.perm_enricher.PermissionMetadataEnricher
     init_parameters: {}
@@ -23,10 +20,8 @@ components:
       milvus_port: ${MILVUS_PORT}
 connections:
 - sender: splitter.documents
-  receiver: dense_embedder.documents
-- sender: dense_embedder.documents
-  receiver: sparse_embedder.documents
-- sender: sparse_embedder.documents
+  receiver: embedder.documents
+- sender: embedder.documents
   receiver: perm_enricher.documents
 - sender: perm_enricher.documents
   receiver: writer.documents

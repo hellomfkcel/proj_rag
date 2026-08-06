@@ -55,10 +55,12 @@ class BGE_M3SparseEmbedder:
                 except Exception:
                     pass
 
+            from src.platform.model.registry import _get_device
+            _device = _get_device()
             self._model = BGEM3FlagModel(
                 model_path,
                 use_fp16=True,
-                devices="cpu",
+                devices=_device,
                 local_files_only=True,  # 强制本地：6.4G 模型已完整缓存
             )
         return self._model
@@ -66,10 +68,19 @@ class BGE_M3SparseEmbedder:
     @component.output_types(documents=List[Document])
     def run(self, documents: List[Document]) -> Dict[str, Any]:
         model = self._get_model()
+
+        # ★ 批处理：将所有 chunk 文本收集后一次提交给 BGE-M3，而非逐条调用
+        texts = [doc.content for doc in documents]
+        output = model.encode(
+            texts,
+            return_dense=False,
+            return_sparse=True,
+            batch_size=len(texts),  # 全量批处理，避免逐条调用的模型前向传播开销
+        )
+        lexical_weights = output.get("lexical_weights", [])
+
         for i, doc in enumerate(documents):
-            # 使用 BGE-M3 生成稀疏向量（lexical weights）
-            output = model.encode([doc.content], return_dense=False, return_sparse=True)
-            sparse_vec = output.get("lexical_weights", [{}])[0]
+            sparse_vec = lexical_weights[i] if i < len(lexical_weights) else {}
             # 使用 dataclasses.replace() 替代直接属性赋值
             # （doc.sparse_embedding = sparse_vec）。
             # 直接 mutation 可能导致共享 Document 实例的并行管道分支出现未预期行为。

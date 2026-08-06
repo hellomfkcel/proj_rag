@@ -20,7 +20,8 @@ def init_tracing(service_name: str = "rag-v14"):
     """初始化 OpenTelemetry Tracing。
 
     在应用启动时调用一次。将全部 span 导出到 OTel Collector（HTTP 4318）。
-    先导入 Haystack 以避免循环引用，再初始化 OTel SDK。
+    ★ 同时启用 Haystack Pipeline 的 OpenTelemetry tracing，
+    使每个 Haystack Component 自动产生 span。
     """
     global _tracing_initialized
     if _tracing_initialized:
@@ -40,11 +41,72 @@ def init_tracing(service_name: str = "rag-v14"):
     provider = TracerProvider(resource=resource)
 
     otlp_exporter = OTLPSpanExporter(endpoint=f"{otel_endpoint}/v1/traces")
-    provider.add_span_processor(BatchSpanProcessor(otlp_exporter))
-    provider.add_span_processor(BatchSpanProcessor(ConsoleSpanExporter()))
+    # 控制批次大小和发送频率，避免单批 span 过多导致 gRPC 消息体超限（默认 4 MiB → 已调至 32 MiB）
+    # max_export_batch_size: 单批最多 256 个 span
+    # schedule_delay_millis: 每 2 秒发送一次（更频繁 = 更小批次）
+    # max_queue_size: 内存中最多缓冲 2048 个 span
+    provider.add_span_processor(BatchSpanProcessor(
+        otlp_exporter,
+        max_export_batch_size=256,
+        schedule_delay_millis=2000,
+        max_queue_size=2048,
+    ))
 
     trace.set_tracer_provider(provider)
+
+    # ★ 启用 Haystack Pipeline 的 OTel tracing（Haystack 2.31+ 需要独立包）
+    try:
+        from opentelemetry import trace as _otel_trace
+        from haystack.tracing import enable_tracing
+        from haystack_integrations.tracing.opentelemetry import OpenTelemetryTracer as _HsOtelTracer
+        _hs_tracer = _HsOtelTracer(_otel_trace.get_tracer("haystack"))
+        enable_tracing(_hs_tracer)
+    except ImportError as e:
+        import logging
+        logging.getLogger(__name__).warning(
+            "Haystack OpenTelemetry tracing integration not available, "
+            "Haystack Pipeline components will not produce OTel spans. "
+            "Install haystack-integrations-tracing-opentelemetry to enable. "
+            "Import error: %s", e
+        )
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning(
+            "Failed to initialize Haystack OpenTelemetry tracing: %s. "
+            "Haystack Pipeline components will not produce OTel spans.",
+            e, exc_info=True
+        )
+
+    # 注册进程退出时的优雅关闭（确保 BatchSpanProcessor 缓冲区中的 span 被 flush）
+    _register_shutdown_hook()
+
     _tracing_initialized = True
+
+
+def _register_shutdown_hook():
+    """注册 atexit 处理器，确保进程正常退出时 OTel span 被 flush 并关闭。
+
+    注意：不覆盖 SIGTERM handler——uvicorn reload 等机制依赖默认 SIGTERM 行为。
+    atexit 在进程正常退出时触发，覆盖了容器/K8s SIGTERM 导致的正常退出场景。
+    BatchSpanProcessor 自身也有定时 flush（schedule_delay_millis），
+    非正常退出（SIGKILL/crash）丢失少量 span 是可接受的。
+    """
+    import atexit
+
+    def _shutdown():
+        provider = trace.get_tracer_provider()
+        if hasattr(provider, "force_flush"):
+            try:
+                provider.force_flush(timeout_millis=5000)
+            except Exception:
+                pass
+        if hasattr(provider, "shutdown"):
+            try:
+                provider.shutdown()
+            except Exception:
+                pass
+
+    atexit.register(_shutdown)
 
 
 def get_tracer(name: str = "rag-v14"):

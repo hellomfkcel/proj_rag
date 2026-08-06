@@ -6,6 +6,18 @@ this custom component wraps pymilvus for sparse (lexical/IP) search.
 
 from typing import Any, Dict, List, Optional
 from haystack import component, Document
+from pymilvus import MilvusClient
+
+# 模块级 MilvusClient 缓存，按 (host, port) 复用连接。
+# 消除每次 Pipeline.run() 重建 client 的开销。
+_clients: Dict[str, MilvusClient] = {}
+
+
+def _get_milvus_client(host: str, port: str) -> MilvusClient:
+    key = f"{host}:{port}"
+    if key not in _clients:
+        _clients[key] = MilvusClient(uri=f"http://{host}:{port}")
+    return _clients[key]
 
 
 @component
@@ -40,12 +52,11 @@ class MilvusSparseRetriever:
         filters: Milvus expression string (from _compile_filter_expr) or dict
         """
         from dataclasses import replace
-        from pymilvus import MilvusClient
         from milvus_haystack.filters import parse_filters
 
         # MilvusClient API 不会自动 load collection → 必须显式调用 load_collection。
         # load_collection 已加载时是快速空操作（幂等）。
-        client = MilvusClient(uri=f"http://{self.milvus_host}:{self.milvus_port}")
+        client = _get_milvus_client(self.milvus_host, str(self.milvus_port))
         client.load_collection(self.collection_name)
 
         # Build sparse vector for search.

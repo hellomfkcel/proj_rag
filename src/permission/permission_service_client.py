@@ -23,6 +23,27 @@ from src.platform.obs.logger import get_logger
 log = get_logger(__name__)
 
 
+def _build_traceparent() -> str | None:
+    """从当前 OTel span context 构建 W3C traceparent 头。
+
+    格式: 00-{trace_id_32hex}-{span_id_16hex}-01
+    权限服务 FastAPI 自动插桩检测到此头后，将 span 创建为当前 trace 的子 span。
+
+    fail-open: OTel SDK 未初始化或无活跃 span 时返回 None。
+    """
+    try:
+        from opentelemetry import trace as _otel_trace
+        span_context = _otel_trace.get_current_span().get_span_context()
+        if span_context.is_valid:
+            trace_id = format(span_context.trace_id, "032x")
+            span_id = format(span_context.span_id, "016x")
+            trace_flags = span_context.trace_flags
+            return f"00-{trace_id}-{span_id}-{trace_flags:02x}"
+    except Exception:
+        pass
+    return None
+
+
 class PermissionServiceClient:
     """HTTP 客户端 — 调用外部权限服务后端。
 
@@ -504,10 +525,14 @@ class PermissionServiceClient:
     def _headers(
         self, request_id: str, client_id: str
     ) -> Dict[str, str]:
-        """构造请求头 — 含 X-Client-Id + 可选 X-Api-Key 服务间认证。
+        """构造请求头 — 含 X-Client-Id + W3C Trace Context + 可选 X-Api-Key。
 
         设计依据：docs/RAG系统设计v14.md §18.2 — AUTHZ_CLIENT_CREDENTIAL
         用于 RAG 系统与权限服务之间的机器对机器认证。
+
+        ★ 2026-08-06: 新增 W3C traceparent 头，使权限服务的 OTel span
+        与 RAG 系统的 span 关联在同一个 trace 中（跨系统分布式追踪）。
+        格式：00-{trace_id}-{span_id}-01
         """
         headers = {
             "Content-Type": "application/json",
@@ -518,4 +543,11 @@ class PermissionServiceClient:
         credential = Settings().authz_client_credential
         if credential:
             headers["X-Api-Key"] = credential
+
+        # ★ W3C Trace Context 传播：将当前 OTel trace_id 传递给权限服务
+        # fail-open：tracing 未初始化时静默跳过
+        traceparent = _build_traceparent()
+        if traceparent:
+            headers["traceparent"] = traceparent
+
         return headers

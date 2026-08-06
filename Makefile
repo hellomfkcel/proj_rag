@@ -31,38 +31,48 @@ warmup:
 # ── 本地进程（开发期直接跑，不走 Docker） ─────────────────────────────
 
 # FastAPI（8000 端口，--reload 代码改动自动重载）
+# OTEL_SERVICE_NAME=api 让 Grafana/Tempo 中按服务名区分 trace 来源
 dev-api:
-	uvicorn src.main:app --host 0.0.0.0 --port 8000 --reload
+	OTEL_SERVICE_NAME=api conda run -n rag_dev_v14 uvicorn src.main:app --host 0.0.0.0 --port 8000 --reload
 
 # 摄入 worker（消费 ingestion_queue）
+# OTEL_SERVICE_NAME 与 docker-compose.app.yml 保持一致
 dev-ingest:
+	OTEL_SERVICE_NAME=ingestion-worker \
 	celery -A src.platform.task.celery_app worker \
 		-Q ingestion_queue --concurrency=2 \
 		-n ingestion-worker@%h --loglevel=info
 
 # 检索 worker（消费 retrieval_queue）
 dev-retrieve:
+	OTEL_SERVICE_NAME=retrieval-worker \
 	celery -A src.platform.task.celery_app worker \
 		-Q retrieval_queue --concurrency=2 \
 		-n retrieval-worker@%h --loglevel=info
 
 # 盖戳 worker（消费 stamping_queue）
 dev-stamp:
+	OTEL_SERVICE_NAME=stamping-worker \
 	celery -A src.platform.task.celery_app worker \
 		-Q stamping_queue --concurrency=2 \
 		-n stamping-worker@%h --loglevel=info
 
+# BGE-M3 嵌入服务（Layer 3，单进程 GPU 模型共享）
+dev-embedding:
+	OTEL_SERVICE_NAME=embedding-service \
+	conda run -n rag_dev_v14 uvicorn src.services.embedding_service:app --host 0.0.0.0 --port 19500 --reload
+
 # outbox relay
 dev-relay:
-	python -m src.platform.task.outbox_relay
+	OTEL_SERVICE_NAME=outbox-relay python -m src.platform.task.outbox_relay
 
 # VisibilityChanged 事件订阅器（Redis Pub/Sub + 轮询兜底）
 dev-visibility-events:
-	python -m src.permission.visibility_events
+	OTEL_SERVICE_NAME=visibility-events python -m src.permission.visibility_events
 
 # Celery beat（定时任务调度：对账等）
 dev-beat:
-	celery -A src.platform.task.celery_app beat --loglevel=info
+	OTEL_SERVICE_NAME=celery-beat celery -A src.platform.task.celery_app beat --loglevel=info
 
 # 前端（开发期直接跑，不走 Docker）
 dev-frontend:

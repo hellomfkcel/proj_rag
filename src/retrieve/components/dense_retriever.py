@@ -6,6 +6,31 @@ Fallback: direct PyMilvus search for pre-compiled expression strings (json_conta
 
 from typing import Any, Dict, List, Optional
 from haystack import component, Document
+from pymilvus import MilvusClient
+
+# 模块级 MilvusClient + MilvusDocumentStore 缓存，按 (host, port, collection) 复用。
+# 消除每次 Pipeline.loads() 重建 DocumentStore/Retriever 的开销。
+_clients: Dict[str, MilvusClient] = {}
+_stores: Dict[str, Any] = {}
+_retrievers: Dict[str, Any] = {}
+
+
+def _get_milvus_client(host: str, port: str) -> MilvusClient:
+    key = f"{host}:{port}"
+    if key not in _clients:
+        _clients[key] = MilvusClient(uri=f"http://{host}:{port}")
+    return _clients[key]
+
+
+def _get_document_store(collection_name: str, host: str, port: str):
+    key = f"{host}:{port}:{collection_name}"
+    if key not in _stores:
+        from milvus_haystack.document_store import MilvusDocumentStore
+        _stores[key] = MilvusDocumentStore(
+            collection_name=collection_name,
+            connection_args={"uri": f"http://{host}:{port}"},
+        )
+    return _stores[key]
 
 
 @component
@@ -30,17 +55,14 @@ class MilvusDenseRetriever:
         self._retriever = None
 
     def _get_retriever(self):
-        if self._retriever is None:
-            from milvus_haystack.document_store import MilvusDocumentStore
+        key = f"{self.milvus_host}:{self.milvus_port}:{self.collection_name}:{self.top_k}"
+        if key not in _retrievers:
             from milvus_haystack.milvus_embedding_retriever import MilvusEmbeddingRetriever
-            doc_store = MilvusDocumentStore(
-                collection_name=self.collection_name,
-                connection_args={"uri": f"http://{self.milvus_host}:{self.milvus_port}"},
-            )
-            self._retriever = MilvusEmbeddingRetriever(
+            doc_store = _get_document_store(self.collection_name, self.milvus_host, str(self.milvus_port))
+            _retrievers[key] = MilvusEmbeddingRetriever(
                 document_store=doc_store, top_k=self.top_k,
             )
-        return self._retriever
+        return _retrievers[key]
 
     @component.output_types(documents=List[Document])
     def run(
@@ -58,9 +80,8 @@ class MilvusDenseRetriever:
         # load_collection 已加载时是快速空操作（幂等）。
         if isinstance(filters, str):
             from dataclasses import replace
-            from pymilvus import MilvusClient
 
-            client = MilvusClient(uri=f"http://{self.milvus_host}:{self.milvus_port}")
+            client = _get_milvus_client(self.milvus_host, str(self.milvus_port))
             client.load_collection(self.collection_name)
             hits = client.search(
                 collection_name=self.collection_name,

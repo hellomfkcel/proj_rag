@@ -75,13 +75,13 @@ def retrieve(
     if retrieval_mode == "vector_only":
         _pipeline_name = "retrieval_v1"
         _pipeline_input_template: Dict[str, Any] = {
-            "text_embedder": {"text": query},
+            "query_embedder": {"text": query},
         }
         _docs_key = "retriever"
     elif retrieval_mode == "keyword_only":
         _pipeline_name = "query_v2"
         _pipeline_input_template = {
-            "sparse_embedder": {"text": query},
+            "query_embedder": {"text": query},
         }
         _docs_key = "ranker"
     else:  # hybrid (default) — select pipeline by fusion_method
@@ -92,8 +92,7 @@ def retrieve(
             _pipeline_name = "query_v4"
             _joiner_input = {}
         _pipeline_input_template = {
-            "text_embedder": {"text": query},
-            "sparse_embedder": {"text": query},
+            "query_embedder": {"text": query},
             "joiner": _joiner_input,
         }
         _docs_key = "ranker"

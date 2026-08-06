@@ -1,8 +1,7 @@
 components:
-  text_embedder:
-    type: src.retrieve.components.ollama_text_embedder.OllamaTextEmbedder
-    init_parameters:
-      model: ${EMBEDDING_MODEL}
+  query_embedder:
+    type: src.retrieve.components.bge_m3_text_embedder.BGE_M3TextEmbedder
+    init_parameters: {}
   retriever:
     type: src.retrieve.components.dense_retriever.MilvusDenseRetriever
     init_parameters:
@@ -32,7 +31,7 @@ components:
       api_base_url: ${LLM_BASE_URL}
       model: ${LLM_MODEL}
 connections:
-- sender: text_embedder.embedding
+- sender: query_embedder.embedding
   receiver: retriever.query_embedding
 - sender: retriever.documents
   receiver: prompt_builder.documents

@@ -63,10 +63,7 @@ def init_metrics() -> None:
         return
 
     s = Settings()
-    otlp_endpoint = getattr(s, "otel_exporter_otlp_endpoint", "") or ""
-    if not otlp_endpoint:
-        # 尝试从 tracing 配置推断
-        otlp_endpoint = getattr(s, "otel_exporter_otlp_http_endpoint", "") or ""
+    otlp_endpoint = s.otel_endpoint  # Settings 的统一 OTLP 端点属性
 
     try:
         from opentelemetry import metrics as otel_metrics

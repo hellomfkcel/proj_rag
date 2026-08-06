@@ -53,6 +53,7 @@ PyJWT==2.9.0
 
 # ── 可观测（OTel） ───────────────────────────────────────
 opentelemetry-sdk==1.33.1
+opentelemetry-distro==0.54b1
 opentelemetry-exporter-otlp==1.33.1
 opentelemetry-instrumentation-fastapi==0.54b1
 opentelemetry-instrumentation-celery==0.54b1
@@ -61,6 +62,9 @@ opentelemetry-instrumentation-httpx==0.54b1
 
 # ── 日志 ─────────────────────────────────────────────────
 structlog==24.4.0
+
+# ── Haystack OTel Tracing（替代已弃用的内置版） ──────────
+opentelemetry-haystack>=1.0.0
 
 # ── 模型观测（阶段二接入） ───────────────────────────────
 langfuse==4.14.0
