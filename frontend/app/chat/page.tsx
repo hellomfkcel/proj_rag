@@ -120,7 +120,14 @@ export default function ChatPage() {
       const msgs: Message[] = [];
       for (const t of turns) {
         msgs.push({ role: "user", content: t.user_question });
-        msgs.push({ role: "assistant", content: t.resolved_query || t.user_question, sources: [] });
+        // 优先使用持久化的 answer；历史轮次无 answer 时回退到提示文本
+        const displayAnswer = t.answer
+          || (t.chunk_ids?.length ? "回答已生成（请刷新查看完整内容）" : "正在生成回答...");
+        msgs.push({
+          role: "assistant",
+          content: displayAnswer,
+          sources: (t.chunk_ids || []).map((id: string) => ({ chunk_id: id, content: "" })),
+        });
       }
       setMessages(msgs);
     } catch {
@@ -169,120 +176,164 @@ export default function ChatPage() {
       }
 
       // ── Step 2: Open SSE with CORRECT conversation_id + turn_index ──
-      // The Celery worker hasn't published yet (retrieval+generation take seconds).
-      // By the time it publishes, this SSE subscription is already active.
-      // Browser EventSource cannot send Authorization headers; pass JWT as ?token= query param.
+      // The Celery worker publishes results to Redis Pub/Sub when done.
+      // We subscribe via SSE and wait for the "done" event (or 60s timeout).
       const streamUrl = `/api/v1/conversations/${activeConvIdNew}/stream?turn_index=${turnIndex}&token=${encodeURIComponent(token || "")}`;
-      let sseDone = false;
-      const evtSource = new EventSource(streamUrl);
 
-      // Timeout fallback — close after 60s
-      const streamTimeout = setTimeout(() => {
-        if (!sseDone) {
+      // Use a Promise to properly await SSE completion
+      await new Promise<void>((resolve) => {
+        let resolved = false;
+        const finish = () => { if (!resolved) { resolved = true; resolve(); } };
+
+        const evtSource = new EventSource(streamUrl);
+
+        // Timeout fallback — close after 60s
+        const streamTimeout = setTimeout(() => {
           evtSource.close();
-          sseDone = true;
-        }
-      }, 60_000);
+          finish();
+        }, 60_000);
 
-      evtSource.addEventListener("retrieved", (e: MessageEvent) => {
-        try {
-          const d = JSON.parse(e.data);
-          sseSources = (d.chunks || []).map((c: any) => ({
-            chunk_id: c.chunk_id || c.id || "",
-            content: c.content || "",
-          }));
+        evtSource.addEventListener("retrieved", (e: MessageEvent) => {
+          try {
+            const d = JSON.parse(e.data);
+            sseSources = (d.chunks || []).map((c: any) => ({
+              chunk_id: c.chunk_id || c.id || "",
+              content: c.content || "",
+            }));
+            setMessages(prev => {
+              const next = [...prev];
+              const last = next[next.length - 1];
+              if (last?.role === "assistant") {
+                last.sources = sseSources.length > 0
+                  ? sseSources
+                  : (d.chunk_ids || []).map((id: string) => ({ chunk_id: id, content: "" }));
+              }
+              return [...next];
+            });
+          } catch {}
+        });
+
+        evtSource.addEventListener("token", (e: MessageEvent) => {
+          try {
+            const d = JSON.parse(e.data);
+            sseAnswer += d.content || "";
+            setMessages(prev => {
+              const next = [...prev];
+              const last = next[next.length - 1];
+              if (last?.role === "assistant") { last.content = sseAnswer; last.streaming = true; }
+              return [...next];
+            });
+          } catch {}
+        });
+
+        evtSource.addEventListener("error", (e: MessageEvent) => {
+          try {
+            const d = JSON.parse((e as any).data || "{}");
+            const code = d.error_code || "chat:stream_error";
+            setStreamError(code);
+            setMessages(prev => {
+              const next = [...prev];
+              const last = next[next.length - 1];
+              if (last?.role === "assistant") {
+                last.errorCode = code;
+                if (!last.content) last.content = getErrorMessage(code);
+                last.streaming = false;
+              }
+              return [...next];
+            });
+          } catch {}
+          evtSource.close();
+          clearTimeout(streamTimeout);
+          finish();
+        });
+
+        evtSource.addEventListener("done", () => {
+          evtSource.close();
+          clearTimeout(streamTimeout);
           setMessages(prev => {
             const next = [...prev];
             const last = next[next.length - 1];
-            if (last?.role === "assistant") {
-              last.sources = sseSources.length > 0
-                ? sseSources
-                : (d.chunk_ids || []).map((id: string) => ({ chunk_id: id, content: "" }));
+            if (last?.role === "assistant") last.streaming = false;
+            return [...next];
+          });
+          finish();
+        });
+
+        evtSource.onerror = () => {
+          if (!resolved) {
+            evtSource.close();
+            clearTimeout(streamTimeout);
+            finish();
+          }
+        };
+      });
+
+      // SSE stream ended — if no content was delivered via SSE,
+      // start auto-polling the turns API until the answer is persisted by the worker.
+      if (!sseAnswer && !streamError) {
+        const POLL_INTERVAL_MS = 2000;  // 每 2 秒查询一次
+        const POLL_TIMEOUT_MS = 45_000; // 最多轮询 45 秒
+        const pollStart = Date.now();
+        let pollAnswer: string | null = null;
+        let pollChunkIds: string[] = [];
+
+        // Progress dots animation — cycles through "生成中.", "生成中..", "生成中..."
+        const progressStates = ["正在生成回答.", "正在生成回答..", "正在生成回答..."];
+        let progressIdx = 0;
+        const progressInterval = setInterval(() => {
+          progressIdx = (progressIdx + 1) % progressStates.length;
+          setMessages(prev => {
+            const next = [...prev];
+            const last = next[next.length - 1];
+            if (last?.role === "assistant" && !last.content) {
+              last.content = progressStates[progressIdx];
+              last.streaming = true;
             }
             return [...next];
           });
-        } catch {}
-      });
+        }, 600);
 
-      evtSource.addEventListener("token", (e: MessageEvent) => {
-        try {
-          const d = JSON.parse(e.data);
-          sseAnswer += d.content || "";
-          setMessages(prev => {
-            const next = [...prev];
-            const last = next[next.length - 1];
-            if (last?.role === "assistant") { last.content = sseAnswer; last.streaming = true; }
-            return [...next];
-          });
-        } catch {}
-      });
+        while (Date.now() - pollStart < POLL_TIMEOUT_MS) {
+          await new Promise(r => setTimeout(r, POLL_INTERVAL_MS));
+          try {
+            const turns = await getTurns(activeConvIdNew!);
+            const latestTurn = turns.find(t => t.turn_index === turnIndex);
+            if (latestTurn?.answer) {
+              pollAnswer = latestTurn.answer;
+              pollChunkIds = latestTurn.chunk_ids || [];
+              break;  // 答案已就绪，停止轮询
+            }
+          } catch {
+            // DB 暂时不可达，继续轮询
+          }
+        }
 
-      evtSource.addEventListener("error", (e: MessageEvent) => {
-        try {
-          const d = JSON.parse((e as any).data || "{}");
-          const code = d.error_code || "chat:stream_error";
-          setStreamError(code);
+        clearInterval(progressInterval);
+
+        if (pollAnswer) {
+          // 轮询成功——显示答案
           setMessages(prev => {
             const next = [...prev];
             const last = next[next.length - 1];
             if (last?.role === "assistant") {
-              last.errorCode = code;
-              if (!last.content) last.content = getErrorMessage(code);
+              last.content = pollAnswer!;
+              last.sources = pollChunkIds.map((id: string) => ({ chunk_id: id, content: "" }));
               last.streaming = false;
             }
             return [...next];
           });
-        } catch {}
-        evtSource.close();
-        clearTimeout(streamTimeout);
-        sseDone = true;
-      });
-
-      evtSource.addEventListener("done", () => {
-        evtSource.close();
-        clearTimeout(streamTimeout);
-        sseDone = true;
-        setMessages(prev => {
-          const next = [...prev];
-          const last = next[next.length - 1];
-          if (last?.role === "assistant") last.streaming = false;
-          return [...next];
-        });
-      });
-
-      evtSource.onerror = () => {
-        // Connection error or server closed the stream
-        if (!sseDone) {
-          evtSource.close();
-          clearTimeout(streamTimeout);
-          sseDone = true;
+        } else {
+          // 轮询超时——显示友好提示（用户可以稍后刷新查看）
+          setMessages(prev => {
+            const next = [...prev];
+            const last = next[next.length - 1];
+            if (last?.role === "assistant" && !last.content) {
+              last.content = "回答生成时间较长，请稍后点击会话刷新查看结果。";
+              last.streaming = false;
+            }
+            return [...next];
+          });
         }
-      };
-
-      // If SSE didn't deliver content, use the synchronous result as fallback
-      setMessages(prev => {
-        const next = [...prev];
-        const last = next[next.length - 1];
-        if (last?.role === "assistant") {
-          // Use SSE answer if available, otherwise use synchronous result
-          if (!last.content && !sseAnswer) {
-            last.content = result.answer;
-          }
-          last.streaming = false;
-          // If SSE never delivered sources, use chunk_ids from result
-          if (!last.sources?.length && result.chunk_ids?.length) {
-            last.sources = result.chunk_ids.map((id: string) => ({ chunk_id: id, content: "" }));
-          }
-        }
-        return [...next];
-      });
-
-      // Wait for SSE to deliver remaining events
-      if (!sseDone) {
-        await new Promise(r => setTimeout(r, 500));
-      }
-      if (evtSource.readyState !== EventSource.CLOSED) {
-        evtSource.close();
       }
 
       fetchConvs();

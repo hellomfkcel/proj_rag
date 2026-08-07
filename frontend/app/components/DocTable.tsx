@@ -112,7 +112,20 @@ export default function DocTable({
     if (!confirm(`确认删除 ${sel.size} 个文档？此操作不可撤销。`)) return;
     setBusy(true);
     const items = docs.filter(d => sel.has(d.document_id)).map(d => ({ document_id: d.document_id, kb_id: kbId }));
-    await batchDelete(items); setSel(new Set()); setBusy(false); onRefresh();
+    try {
+      const res = await batchDelete(items);
+      const results = res?.results || [];
+      const ok = results.filter((r: any) => r.status === "deleted").length;
+      const fail = results.filter((r: any) => r.status !== "deleted").length;
+      if (fail > 0) {
+        const failures = results.filter((r: any) => r.status !== "deleted")
+          .map((r: any) => `${r.document_id}: ${r.error || "未知错误"}`).join("\n");
+        alert(`批量删除完成：${ok} 成功，${fail} 失败\n\n失败详情：\n${failures}`);
+      }
+      setSel(new Set()); onRefresh();
+    } catch (e: any) {
+      alert("批量删除请求失败: " + (e?.message || e));
+    } finally { setBusy(false); }
   };
 
   const doBatchParse = async () => {

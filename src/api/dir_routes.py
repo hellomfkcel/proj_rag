@@ -35,9 +35,6 @@ class DocMoveRequest(BaseModel):
 class DocRenameRequest(BaseModel):
     filename: str
 
-class BatchDeleteRequest(BaseModel):
-    items: List[dict]  # [{document_id, kb_id}]
-
 class BatchParseRequest(BaseModel):
     mount_ids: List[str]
 
@@ -147,23 +144,8 @@ async def rename_document(doc_id: str, body: DocRenameRequest, ctx: RequestConte
 
 
 # ── 批量删除 ──
-
-@router.post("/documents/batch/delete")
-def batch_delete(body: BatchDeleteRequest, ctx: RequestContext = Depends(get_request_context)):
-    from src.doc.service import delete_document_from_kb
-    import concurrent.futures as _cf
-    with _cf.ThreadPoolExecutor(max_workers=len(body.items)) as ex:
-        futures = {ex.submit(delete_document_from_kb, ctx.user_id, item["document_id"], item["kb_id"], ctx.tenant_id, False): item for item in body.items}
-        results = []
-        for f in _cf.as_completed(futures):
-            item = futures[f]
-            try:
-                f.result(timeout=30)
-                results.append({"document_id": item["document_id"], "status": "deleted"})
-            except Exception as e:
-                results.append({"document_id": item["document_id"], "status": "failed", "error": str(e)[:200]})
-        return {"results": results}
-
+# 已移除：此端点与 kb_routes.py:batch_delete_documents 重复，且缺少权限检查。
+# 批量删除统一使用 kb_routes.py 的 POST /documents/batch/delete（含逐资源 doc:unmount 校验）。
 
 # ── 批量解析 ──
 

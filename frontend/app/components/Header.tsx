@@ -9,6 +9,7 @@ import { useKBStore } from "@/stores/useKBStore";
 import KBList from "@/app/components/KBList";
 import { listKBs, renameKB, deleteKB } from "@/lib/kb";
 import { listTenants } from "@/lib/auth";
+import { isAdmin } from "@/lib/permissions";
 import type { Tenant } from "@/lib/auth";
 
 interface KB {
@@ -181,8 +182,12 @@ export default function Header() {
             <nav className="flex items-center gap-2 text-sm">
               <Link href="/kb" className="px-2.5 py-1.5 rounded-lg text-gray-600 hover:bg-gray-100 transition font-medium">📂 知识库</Link>
               <Link href="/chat" className="px-2.5 py-1.5 rounded-lg text-gray-600 hover:bg-gray-100 transition font-medium">💬 对话</Link>
-              <Link href="/settings" className="px-2.5 py-1.5 rounded-lg text-gray-600 hover:bg-gray-100 transition font-medium">⚙️ 设置</Link>
-              <Link href="/dashboard" className="px-2.5 py-1.5 rounded-lg text-gray-600 hover:bg-gray-100 transition font-medium">📊 Dashboard</Link>
+              {isAdmin() && (
+                <Link href="/settings" className="px-2.5 py-1.5 rounded-lg text-gray-600 hover:bg-gray-100 transition font-medium">⚙️ 设置</Link>
+              )}
+              {isAdmin() && (
+                <Link href="/dashboard" className="px-2.5 py-1.5 rounded-lg text-gray-600 hover:bg-gray-100 transition font-medium">📊 Dashboard</Link>
+              )}
             </nav>
           </div>
 

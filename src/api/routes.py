@@ -206,17 +206,43 @@ async def query(request: QueryRequest, ctx: RequestContext = Depends(get_request
 async def query_stream(conversation_id: str, turn_index: int = 1):
     """SSE 流式订阅查询结果。
 
-    从 Redis Pub/Sub 转发流事件到客户端。
-    §9.3: 设 30s 空闲超时——无消息即发 error 断开。
+    1. 首先检查 DB 中该 turn 是否已有答案（worker 在 SSE 订阅前已完成）
+    2. 若有 → 直接以 SSE 事件返回（retrieved + token + done）
+    3. 若无 → 订阅 Redis Pub/Sub 等待 worker 发布
+    §9.3: 设 60s 空闲超时——无消息即发 error 断开。
     """
     from src.config import Settings
     import redis
     import time as _time
 
     s = Settings()
-    SSE_IDLE_TIMEOUT = 30  # 秒，设计 §9.3
+    SSE_IDLE_TIMEOUT = 60  # 秒 — 匹配 LLM 生成最长等待时间
 
     async def _stream():
+        # ── Step 1: 检查 DB 中是否已有答案（worker prior-art race condition）──
+        import asyncpg as _apg
+        try:
+            db_conn = await _apg.connect(
+                s.database_url.replace("postgresql+asyncpg://", "postgresql://")
+            )
+            row = await db_conn.fetchrow(
+                "SELECT answer, retrieved_chunk_ids FROM conversation_turns "
+                "WHERE conversation_id=$1 AND turn_index=$2",
+                conversation_id, turn_index,
+            )
+            await db_conn.close()
+
+            if row and row["answer"]:
+                # Worker 已完成——直接返回持久化结果，无需等待 Redis
+                chunk_ids = row["retrieved_chunk_ids"] or []
+                yield f"event: retrieved\ndata: {json.dumps({'chunk_ids': chunk_ids, 'chunks': []}, default=str)}\n\n"
+                yield f"event: token\ndata: {json.dumps({'content': row['answer']}, default=str)}\n\n"
+                yield f"event: done\ndata: {json.dumps({})}\n\n"
+                return
+        except Exception:
+            pass  # DB 不可达时回退到 Redis Pub/Sub
+
+        # ── Step 2: 订阅 Redis Pub/Sub 等待 worker 发布 ──
         r = redis.from_url(s.redis_url)
         pubsub = r.pubsub()
         channel = f"query-stream:{conversation_id}:{turn_index}"
@@ -226,10 +252,8 @@ async def query_stream(conversation_id: str, turn_index: int = 1):
 
         try:
             while True:
-                # 非阻塞获取消息，超时 1s 便于检查空闲时长
                 message = pubsub.get_message(timeout=1.0)
                 if message is None:
-                    # 检查是否超过空闲超时
                     if _time.time() - last_msg_time > SSE_IDLE_TIMEOUT:
                         error_data = json.dumps({
                             "event": "error",
@@ -276,26 +300,21 @@ async def query_stream(conversation_id: str, turn_index: int = 1):
 # ══════════════════════════════════════════════════════════════
 
 @router.delete("/documents/{doc_id}/kb/{kb_id}", response_model=DeleteResponse)
-def delete_document(doc_id: str, kb_id: str, purge: bool = False, req: Request = None):
+def delete_document(doc_id: str, kb_id: str, purge: bool = False,
+                     ctx: RequestContext = Depends(get_request_context)):
     """从 KB 移除文档。需要 doc:unmount 权限。"""
     from src.doc.service import delete_document_from_kb
     from src.permission.authz import check
 
-    if req:
-        ctx = getattr(req.state, "ctx", None)
-    else:
-        ctx = None
-
     # ★ 权限检查：移除文档需要 doc:unmount（通道类动词，必须带 channel.kb）
-    if ctx:
-        decision = check(ctx, "doc:unmount", "document", doc_id, channel_kb=kb_id)
-        if decision.get("decision") != "allow":
-            raise HTTPException(status_code=403, detail="auth:forbidden — 您没有移除此文档的权限（需要 doc:unmount）")
+    decision = check(ctx, "doc:unmount", "document", doc_id, channel_kb=kb_id)
+    if decision.get("decision") != "allow":
+        raise HTTPException(status_code=403, detail="auth:forbidden — 您没有移除此文档的权限（需要 doc:unmount）")
 
-    request_id = ctx.request_id if ctx else ""
-    credential = ctx.credential if ctx else ""
-    user_id = ctx.user_id if ctx else "unknown"
-    tenant_id = ctx.tenant_id if ctx else "unknown"
+    request_id = ctx.request_id
+    credential = ctx.credential
+    user_id = ctx.user_id
+    tenant_id = ctx.tenant_id
 
     try:
         result = delete_document_from_kb(

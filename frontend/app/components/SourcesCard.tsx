@@ -1,7 +1,7 @@
 "use client";
-// Source Card — click-to-toggle popover showing chunk content
+// Source Card — hover-to-show popover, auto-dismiss on mouse leave
 
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 
 interface Source {
   chunk_id: string;
@@ -11,8 +11,37 @@ interface Source {
 export default function SourcesCard({ index, source }: { index: number; source: Source }) {
   const [show, setShow] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
+  const hideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Close on outside click
+  // Cleanup timer on unmount
+  useEffect(() => {
+    return () => {
+      if (hideTimerRef.current) clearTimeout(hideTimerRef.current);
+    };
+  }, []);
+
+  const startHide = useCallback(() => {
+    // Delay hiding to allow mouse to move between button and popover
+    hideTimerRef.current = setTimeout(() => setShow(false), 200);
+  }, []);
+
+  const cancelHide = useCallback(() => {
+    if (hideTimerRef.current) {
+      clearTimeout(hideTimerRef.current);
+      hideTimerRef.current = null;
+    }
+  }, []);
+
+  const handleMouseEnter = useCallback(() => {
+    cancelHide();
+    setShow(true);
+  }, [cancelHide]);
+
+  const handleMouseLeave = useCallback(() => {
+    startHide();
+  }, [startHide]);
+
+  // Close on outside click (for touch / click-to-toggle accessibility)
   useEffect(() => {
     if (!show) return;
     const handler = (e: MouseEvent) => {
@@ -25,10 +54,12 @@ export default function SourcesCard({ index, source }: { index: number; source: 
   const hasContent = source.content && source.content.length > 0;
 
   return (
-    <div ref={ref} className="relative inline-block">
+    <div ref={ref} className="relative inline-block"
+      onMouseEnter={handleMouseEnter}
+      onMouseLeave={handleMouseLeave}
+    >
       <button
         onClick={() => setShow(!show)}
-        onMouseEnter={() => setShow(true)}
         className={`px-2.5 py-1 text-xs border rounded-full transition font-medium ${
           show
             ? "border-blue-400 bg-blue-50 text-blue-700"

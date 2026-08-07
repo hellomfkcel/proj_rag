@@ -245,7 +245,14 @@ async def get_chunking_config(kb_id: str, ctx: RequestContext = Depends(get_requ
 
 @router.patch("/knowledge-bases/{kb_id}/chunking-config", response_model=ChunkingConfigResponse)
 async def update_chunking_config(kb_id: str, body: ChunkingConfigPatch, ctx: RequestContext = Depends(get_request_context)):
-    """更新 KB 切分配置 — 更新已有版本或插入新版本。"""
+    """更新 KB 切分配置 — 更新已有版本或插入新版本。需要 kb:manage 权限。"""
+    from src.permission.authz import check
+
+    # ★ 权限检查：修改切分配置需要 kb:manage 权限
+    decision = check(ctx, "kb:manage", "kb", kb_id)
+    if decision.get("decision") != "allow":
+        raise HTTPException(status_code=403, detail="auth:forbidden — 您没有修改此知识库切分配置的权限（需要 kb:manage）")
+
     valid_strategies = {"sentence", "word", "passage", "semantic", "hierarchical"}
     conn = await asyncpg.connect(_dsn())
     try:
@@ -368,6 +375,9 @@ async def list_documents(
 
 @router.get("/documents/{doc_id}")
 async def get_document(doc_id: str, ctx: RequestContext = Depends(get_request_context)):
+    """获取文档详情。需要 doc:view 权限。"""
+    from src.permission.authz import check
+
     conn = await asyncpg.connect(_dsn())
     try:
         row = await conn.fetchrow(
@@ -376,6 +386,18 @@ async def get_document(doc_id: str, ctx: RequestContext = Depends(get_request_co
         )
         if not row:
             raise HTTPException(404, "doc:not_found")
+
+        # ★ 权限检查：查看文档需要 doc:view（通道类动词，需带 channel.kb）
+        mount_row = await conn.fetchrow(
+            "SELECT kb_id FROM document_kb_mounts WHERE document_id=$1 LIMIT 1",
+            doc_id,
+        )
+        if mount_row:
+            kb_id = str(mount_row["kb_id"])
+            decision = check(ctx, "doc:view", "document", doc_id, channel_kb=kb_id)
+            if decision.get("decision") != "allow":
+                raise HTTPException(status_code=403, detail="auth:forbidden — 您没有查看此文档的权限（需要 doc:view）")
+
         return {
             "id": str(row["id"]), "tenant_id": row["tenant_id"],
             "filename": row["filename"], "file_size": row["file_size"],
@@ -390,7 +412,24 @@ async def get_document(doc_id: str, ctx: RequestContext = Depends(get_request_co
 
 @router.get("/documents/{doc_id}/chunks")
 async def get_document_chunks(doc_id: str, ctx: RequestContext = Depends(get_request_context)):
-    """从 Milvus 查询文档的所有 chunk（限制 100 条）。"""
+    """从 Milvus 查询文档的所有 chunk（限制 100 条）。需要 doc:view 权限。"""
+    from src.permission.authz import check
+
+    # ★ 权限检查：查看文档 chunk 需要 doc:view
+    conn = await asyncpg.connect(_dsn())
+    try:
+        mount_row = await conn.fetchrow(
+            "SELECT kb_id FROM document_kb_mounts WHERE document_id=$1 LIMIT 1",
+            doc_id,
+        )
+        if mount_row:
+            kb_id = str(mount_row["kb_id"])
+            decision = check(ctx, "doc:view", "document", doc_id, channel_kb=kb_id)
+            if decision.get("decision") != "allow":
+                raise HTTPException(status_code=403, detail="auth:forbidden — 您没有查看此文档的权限（需要 doc:view）")
+    finally:
+        await conn.close()
+
     from pymilvus import connections as _mc, Collection
 
     try:
@@ -417,7 +456,9 @@ async def get_document_chunks(doc_id: str, ctx: RequestContext = Depends(get_req
 
 @router.get("/documents/{doc_id}/content")
 async def get_document_content(doc_id: str, ctx: RequestContext = Depends(get_request_context)):
-    """从 P-STORE 读取文档原文。"""
+    """从 P-STORE 读取文档原文。需要 doc:view 权限。"""
+    from src.permission.authz import check
+
     conn = await asyncpg.connect(_dsn())
     try:
         row = await conn.fetchrow(
@@ -425,6 +466,17 @@ async def get_document_content(doc_id: str, ctx: RequestContext = Depends(get_re
             doc_id, ctx.tenant_id)
         if not row:
             raise HTTPException(404, "doc:not_found")
+
+        # ★ 权限检查：查看文档内容需要 doc:view
+        mount_row = await conn.fetchrow(
+            "SELECT kb_id FROM document_kb_mounts WHERE document_id=$1 LIMIT 1",
+            doc_id,
+        )
+        if mount_row:
+            kb_id = str(mount_row["kb_id"])
+            decision = check(ctx, "doc:view", "document", doc_id, channel_kb=kb_id)
+            if decision.get("decision") != "allow":
+                raise HTTPException(status_code=403, detail="auth:forbidden — 您没有查看此文档内容的权限（需要 doc:view）")
 
         storage_path = row["storage_path"]
         # Dev mode: try local filesystem if DEV_DOCS_DIR is configured
@@ -449,8 +501,9 @@ async def get_document_content(doc_id: str, ctx: RequestContext = Depends(get_re
 
 @router.get("/documents/{doc_id}/download")
 async def download_document(doc_id: str, ctx: RequestContext = Depends(get_request_context)):
-    """生成签名 URL 并 302 重定向。"""
+    """生成签名 URL 并 302 重定向。需要 doc:download 权限。"""
     from fastapi.responses import RedirectResponse
+    from src.permission.authz import check
 
     conn = await asyncpg.connect(_dsn())
     try:
@@ -459,6 +512,17 @@ async def download_document(doc_id: str, ctx: RequestContext = Depends(get_reque
             doc_id, ctx.tenant_id)
         if not row:
             raise HTTPException(404, "doc:not_found")
+
+        # ★ 权限检查：下载文档需要 doc:download
+        mount_row = await conn.fetchrow(
+            "SELECT kb_id FROM document_kb_mounts WHERE document_id=$1 LIMIT 1",
+            doc_id,
+        )
+        if mount_row:
+            kb_id = str(mount_row["kb_id"])
+            decision = check(ctx, "doc:download", "document", doc_id, channel_kb=kb_id)
+            if decision.get("decision") != "allow":
+                raise HTTPException(status_code=403, detail="auth:forbidden — 您没有下载此文档的权限（需要 doc:download）")
 
         # Dev mode: try local file if DEV_DOCS_DIR is configured
         import os as _os
@@ -666,7 +730,7 @@ async def rename_document(doc_id: str, body: DocRenameRequest,
 # ── POST /documents/batch/delete — 批量删除（P1 #27） ─────────────
 
 class BatchDeleteRequest(BaseModel):
-    items: List[dict]  # [{"doc_id": "...", "kb_id": "..."}]
+    items: List[dict]  # [{"document_id": "...", "kb_id": "..."}]
 
 class BatchDeleteResponse(BaseModel):
     results: List[dict]  # [{"doc_id": "...", "kb_id": "...", "status": "deleted|failed", "error": "..."}]
@@ -683,7 +747,7 @@ async def batch_delete_documents(body: BatchDeleteRequest,
 
     results = []
     for item in body.items:
-        doc_id = item.get("doc_id", "")
+        doc_id = item.get("document_id", "")
         kb_id = item.get("kb_id", "")
         try:
             # 逐资源独立权限校验（经 P-AUTHC 门面）

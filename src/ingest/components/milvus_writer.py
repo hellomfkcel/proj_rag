@@ -14,8 +14,34 @@ from pymilvus import MilvusClient, DataType, CollectionSchema, FieldSchema
 DENSE_DIM = 1024
 
 
-@component
-class MilvusDocumentStoreWriter:
+def _ensure_indices(client: MilvusClient, collection_name: str) -> None:
+    """幂等确保索引存在——并发安全的索引补齐。
+
+    并发场景：Writer A 创建 collection + 索引，Writer B 在索引建成前到达。
+    Writer B 看到 collection 已存在但索引缺失 → load_collection 报 code=700。
+    此函数用 describe_index 检查每个字段的索引状态并幂等补齐缺失的索引，
+    避免竞态导致的 ingest 失败和重试。
+    """
+    FIELDS = [
+        ("vector", "HNSW", "IP", {"M": 16, "efConstruction": 200}),
+        ("sparse_vector", "SPARSE_INVERTED_INDEX", "IP", {}),
+    ]
+    for field_name, index_type, metric_type, params in FIELDS:
+        try:
+            existing = client.describe_index(collection_name, field_name)
+            if existing and existing.get("index_name"):
+                continue  # 索引已存在，跳过
+        except Exception:
+            pass  # 索引不存在，需要创建
+
+        index_params = client.prepare_index_params()
+        index_params.add_index(
+            field_name=field_name,
+            index_type=index_type,
+            metric_type=metric_type,
+            params=params,
+        )
+        client.create_index(collection_name, index_params)
     """Write Haystack Documents to Milvus via MilvusClient API.
 
     Uses the recommended MilvusClient API (pymilvus >= 2.6) instead of the
@@ -79,7 +105,11 @@ class MilvusDocumentStoreWriter:
                 # Schema 不兼容：缺少 sparse_vector 显式字段 → 重建
                 client.drop_collection(self._collection_name)
             else:
-                # Schema 兼容，无需重建。确保 collection 已加载到内存——
+                # Schema 兼容，无需重建。
+                # 确保索引存在——并发场景下 collection 可能是其他 writer 刚创建的，
+                # 索引可能尚未建成。用 describe_index 检查并幂等补齐。
+                _ensure_indices(client, self._collection_name)
+                # 确保 collection 已加载到内存——
                 # Milvus 重启后 collection 会回到 NotLoad 状态。
                 # load_collection 已加载时是快速空操作（幂等）。
                 client.load_collection(self._collection_name)
@@ -108,20 +138,8 @@ class MilvusDocumentStoreWriter:
             metric_type="IP",
         )
 
-        # 创建索引（pymilvus 2.6.x 使用 prepare_index_params API）
-        index_params = client.prepare_index_params()
-        index_params.add_index(
-            field_name="vector",
-            index_type="HNSW",
-            metric_type="IP",
-            params={"M": 16, "efConstruction": 200},
-        )
-        index_params.add_index(
-            field_name="sparse_vector",
-            index_type="SPARSE_INVERTED_INDEX",
-            metric_type="IP",
-        )
-        client.create_index(self._collection_name, index_params)
+        # 创建索引 + 加载 collection（复用 _ensure_indices，幂等安全）
+        _ensure_indices(client, self._collection_name)
 
         # 加载 collection 到内存（MilvusClient API 不会自动 load）。
         # load_collection 在 collection 已加载时是快速空操作（幂等）。
