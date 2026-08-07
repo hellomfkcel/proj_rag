@@ -8,6 +8,7 @@ import Header from "@/app/components/Header";
 import { listModels, setDefaultModel, getRetrievalConfig, updateRetrievalConfig,
          listPrompts, activatePrompt, getAppConfig } from "@/lib/settings";
 import { getChunkingConfig, updateChunkingConfig } from "@/lib/kb";
+import { isAdmin } from "@/lib/permissions";
 
 interface Model { model_id:string;model_type:string;provider:string;model_name:string;base_url:string;is_default:boolean; }
 interface Prompt { id:string;prompt_id:string;version:string;template_text:string;description:string;is_active:boolean; }
@@ -103,6 +104,28 @@ export default function SettingsPage() {
   }, [models]);
 
   if (!token) return null;
+
+  // 非管理员用户：显示权限不足页面
+  if (!isAdmin()) {
+    return <div className="min-h-screen bg-gray-50">
+      <Header />
+      <main className="max-w-4xl mx-auto px-6 py-8">
+        <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-12 text-center">
+          <div className="text-6xl mb-4">🔒</div>
+          <h1 className="text-2xl font-bold text-gray-900 mb-2">需要管理员权限</h1>
+          <p className="text-gray-500 mb-6">
+            系统设置（模型管理、检索配置、切分配置、Prompt 模板）仅对系统管理员开放。
+          </p>
+          <a
+            href="/kb"
+            className="inline-block px-6 py-2.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition font-medium"
+          >
+            返回知识库 →
+          </a>
+        </div>
+      </main>
+    </div>;
+  }
 
   return <div className="min-h-screen bg-gray-50">
     <Header />

@@ -112,23 +112,14 @@ async def _handle_document_unmounted(payload: dict):
 
     mount_id = payload.get("mount_id", "")
     kb_id = payload.get("kb_id", "")
+    document_id = payload.get("document_id", "")
 
-    if mount_id:
+    if mount_id and document_id:
         try:
-            import asyncpg as _apg
-            s = Settings()
-            dsn = s.database_url.replace("postgresql+asyncpg://", "postgresql://")
-            conn = await _apg.connect(dsn)
-            try:
-                doc_id = await conn.fetchval(
-                    "SELECT document_id FROM document_kb_mounts WHERE id=$1", mount_id)
-            finally:
-                await conn.close()
-
-            if doc_id:
-                cleanup_mount_chunks(mount_id, str(doc_id), kb_id)
+            cleanup_mount_chunks(mount_id, document_id, kb_id)
         except Exception as exc:
-            log.warning("unmounted_cleanup_failed", mount_id=mount_id, error=str(exc))
+            log.warning("unmounted_cleanup_failed", mount_id=mount_id,
+                       document_id=document_id, error=str(exc))
 
 
 def _handle_mount_enabled_changed(payload: dict):

@@ -149,7 +149,7 @@ def submit_ingest_task(
         finally:
             await conn.close()
 
-    return asyncio.run(_do())
+    return _run_async_safe(_do())
 
 
 def trigger_parse(mount_id: str, kb_id: str, tenant_id: str) -> dict:
@@ -174,7 +174,7 @@ def trigger_parse(mount_id: str, kb_id: str, tenant_id: str) -> dict:
         finally:
             await conn.close()
 
-    return asyncio.run(_do())
+    return _run_async_safe(_do())
 
 
 async def _trigger_parse_internal(conn, mount_id: str, kb_id: str, tenant_id: str,
@@ -253,6 +253,28 @@ async def _trigger_parse_internal(conn, mount_id: str, kb_id: str, tenant_id: st
     return {"mount_id": mount_id, "parse_status": "queued"}
 
 
+def _is_permission_service_not_found(exc: Exception) -> bool:
+    """检查异常是否由权限服务返回 404（资源未注册）引起。
+
+    当 mount_registry 中不存在该挂载时，unlink_resource 返回 404，
+    这表示资源从未在权限服务注册（早期文档/重置后的文档），
+    此时本地清理应正常进行，而非 fail-closed。
+    """
+    import httpx
+    cause = exc
+    while cause is not None:
+        if isinstance(cause, httpx.HTTPStatusError):
+            return cause.response.status_code == 404
+        if "404" in str(cause) and "not found" in str(cause).lower():
+            return True
+        cause = cause.__cause__
+    if isinstance(exc, RuntimeError):
+        msg = str(exc).lower()
+        if "404" in msg or "not found" in msg:
+            return True
+    return False
+
+
 def delete_document_from_kb(
     user_id: str,
     doc_id: str,
@@ -285,7 +307,15 @@ def delete_document_from_kb(
         try:
             # 同步调权限服务 unlink_resource（经 P-AUTHC 门面，单一出口）
             ctx = _build_ctx(user_id, tenant_id, request_id, credential)
-            unlink_resource(ctx, doc_id, kb_id)
+            try:
+                unlink_resource(ctx, doc_id, kb_id)
+            except RuntimeError as exc:
+                if _is_permission_service_not_found(exc):
+                    from src.platform.obs.logger import get_logger as _gl
+                    _gl(__name__).warning("unlink_not_registered",
+                        doc_id=doc_id, kb_id=kb_id, tenant_id=tenant_id)
+                else:
+                    raise
 
             # 查询 mount_id 用于级联删除
             mount_row = await conn.fetchrow(
@@ -309,15 +339,24 @@ def delete_document_from_kb(
                 "SELECT count(*) FROM document_kb_mounts WHERE document_id=$1", doc_id,
             )
             if remaining == 0:
-                retire_resource(ctx, "document", doc_id)
+                try:
+                    retire_resource(ctx, "document", doc_id)
+                except RuntimeError as exc2:
+                    if _is_permission_service_not_found(exc2):
+                        _gl(__name__).warning("retire_not_registered",
+                            doc_id=doc_id, tenant_id=tenant_id)
+                    else:
+                        raise
                 await conn.execute("DELETE FROM documents WHERE id=$1", doc_id)
 
             # 发 DocumentUnmounted 事件
+            # mount_id/doc_id 在执行 DELETE 前已从 DB 取出，删除后 relay 仍可用
             from src.doc.events import document_unmounted_event
             event = document_unmounted_event(
-                mount_id=f"{doc_id}-{kb_id}",
+                mount_id=mount_id,
                 kb_id=kb_id,
                 tenant_id=tenant_id,
+                document_id=doc_id,
             )
             import json
             payload = event.to_outbox_dict()
@@ -334,10 +373,33 @@ def delete_document_from_kb(
         finally:
             await conn.close()
 
-    return asyncio.run(_do())
+    return _run_async_safe(_do())
 
 
-# ══════════════════════════════════════════════════════════════════
+def _run_async_safe(coro):
+    """安全运行 async 协程——兼容同步调用和异步调用两种上下文。
+
+    当调用方在 event loop 中时（如 FastAPI async endpoint / Celery worker），
+    asyncio.run() 会抛出 RuntimeError: cannot be called from a running event loop。
+    此时回退到线程池执行，避免阻塞或死锁。
+
+    当调用方在同步上下文中时（如 routes.py 的同步 def endpoint），
+    直接使用 asyncio.run()，无额外开销。
+    """
+    import asyncio
+    import concurrent.futures
+
+    try:
+        loop = asyncio.get_running_loop()
+        # 已在 event loop 中 — 在线程池中新建 loop 执行，避免冲突
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(asyncio.run, coro)
+            return future.result(timeout=120)
+    except RuntimeError:
+        # 无 running loop — 安全使用 asyncio.run
+        return asyncio.run(coro)
+
+
 # _purge_document（阶段三：purge=true 四合一 retire）
 # ══════════════════════════════════════════════════════════════════
 
@@ -387,7 +449,7 @@ def _purge_document(user_id: str, doc_id: str, tenant_id: str,
                 await conn.execute("DELETE FROM document_kb_mounts WHERE id = $1", mount_id)
 
                 from src.doc.events import document_unmounted_event
-                event = document_unmounted_event(mount_id=mount_id, kb_id=kb_id, tenant_id=tenant_id)
+                event = document_unmounted_event(mount_id=mount_id, kb_id=kb_id, tenant_id=tenant_id, document_id=doc_id)
                 import json
                 payload = event.to_outbox_dict()
                 await conn.execute(
@@ -423,4 +485,4 @@ def _purge_document(user_id: str, doc_id: str, tenant_id: str,
         finally:
             await conn.close()
 
-    return asyncio.run(_do())
+    return _run_async_safe(_do())

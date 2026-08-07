@@ -6,6 +6,7 @@ import { useAuthStore } from "@/stores/useAuthStore";
 import Header from "@/app/components/Header";
 import { usageStats, topKBs, docStats, qualityStats } from "@/lib/dashboard";
 import { getAppConfig } from "@/lib/settings";
+import { isAdmin } from "@/lib/permissions";
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
   PieChart, Pie, Cell, Legend,
@@ -45,6 +46,24 @@ export default function DashboardPage() {
   ] : [];
 
   if (!token) return null;
+
+  if (!isAdmin()) {
+    return <div className="min-h-screen bg-gray-50">
+      <Header />
+      <main className="max-w-4xl mx-auto px-6 py-8">
+        <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-12 text-center">
+          <div className="text-6xl mb-4">🔒</div>
+          <h1 className="text-2xl font-bold text-gray-900 mb-2">需要管理员权限</h1>
+          <p className="text-gray-500 mb-6">
+            Dashboard 和系统运行数据仅对系统管理员开放。
+          </p>
+          <a href="/kb" className="inline-block px-6 py-2.5 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition font-medium">
+            返回知识库 →
+          </a>
+        </div>
+      </main>
+    </div>;
+  }
 
   return <div className="min-h-screen bg-gray-50">
     <Header />

@@ -472,3 +472,130 @@
   │ RAG 权限模式 │ AUTHZ_SERVICE_MODE=remote │ AUTHZ_SERVICE_MODE=remote      │ —                      │ —                          │
   └──────────────┴───────────────────────────┴────────────────────────────────┴────────────────────────┴────────────────────────────┘
 
+  ---
+  八、运维操作手册
+
+  8.1 安全关机与重启
+
+  **必须先 stop 容器再关机**，Milvus Standalone 扛不住硬关机。
+  直接断电/关机可能导致 etcd 或 MinIO 元数据损坏，collection 全部丢失。
+
+  # 安全关机流程
+  docker stop $(docker ps -q)          # 先停所有容器
+  # 或按项目分别停止:
+  docker compose -f ~/proj_rag_dev/docker-compose.infra.yml stop
+  docker compose -f ~/proj_rag_dev/docker-compose.app.yml stop
+  docker compose -f ~/permission-system/docker-compose.yml stop
+
+  # 重启后容器会自动拉起 (restart: unless-stopped)，但建议手动确认:
+  docker compose -f ~/proj_rag_dev/docker-compose.infra.yml up -d
+  docker compose -f ~/proj_rag_dev/docker-compose.app.yml up -d
+  docker compose -f ~/permission-system/docker-compose.yml up -d
+
+  # 验证关键服务
+  curl localhost:8000/healthz          # RAG API
+  curl localhost:18080/healthz         # 权限服务
+  docker ps --filter "health=healthy"  # 全部 healthy
+
+  8.2 Milvus 数据恢复
+
+  **症状**：检索返回空、日志报 `collection not found[collection=rag_documents]`。
+
+  **诊断**：
+  conda activate rag_dev_v14
+  python3 -c "
+  from pymilvus import MilvusClient
+  client = MilvusClient(uri='http://localhost:19530')
+  print('Collections:', client.list_collections())
+  "
+  # 如果输出 Collections: [] → collection 丢失，需要重建
+
+  **恢复步骤**：
+  # 1. 停止相关容器
+  docker stop proj_rag_dev-milvus-1 proj_rag_dev-etcd-1 proj_rag_dev-minio-1
+
+  # 2. 删除损坏的卷（数据不可恢复，确认后执行）
+  docker rm proj_rag_dev-milvus-1 proj_rag_dev-etcd-1 proj_rag_dev-minio-1
+  docker volume rm proj_rag_dev_milvus_data proj_rag_dev_etcd_data proj_rag_dev_minio_data
+
+  # 3. 重建容器 + 卷
+  docker compose -f ~/proj_rag_dev/docker-compose.infra.yml up -d etcd minio milvus
+
+  # 4. 等待 healthy 后，重新摄入文档（collection 会在首次写入时自动创建）
+  #    不需要手动建 collection——MilvusDocumentStoreWriter._ensure_collection() 自动处理
+
+  8.3 权限资源回填（文档无法删除/无权限时）
+
+  **症状**：前端删除文档报 "权限不足"，日志中出现 `unlink_resource_not_registered`。
+
+  **原因**：文档在 PostgreSQL 中有记录，但权限服务（resource_registry / mount_registry）中没有对应条目。
+  常见于：早期上传的文档、权限服务数据被重建后、reset_rag_data.py 执行后。
+
+  **回填脚本**：
+  conda activate rag_dev_v14
+  cd ~/proj_rag_dev
+  python -m src.scripts.backfill_resource_registry
+
+  **输出示例**：
+  回填完成:
+    文档: 注册 15, 跳过(已存在) 120, 失败 0
+    挂载: 链接 15, 跳过(已存在) 120, 失败 0
+
+  脚本是幂等的——已注册的文档会自动跳过，可以安全地多次运行。
+
+  **验证回填效果**：
+  # 在前端 KB 页面尝试删除之前报 403 的文档
+  # 或查询权限服务数据库:
+  PGPASSWORD=perm_pass psql -h localhost -p 25433 -U perm_user -d permission_db \
+    -c "SELECT resource_type, count(*) FROM resource_registry WHERE retired=false GROUP BY resource_type;"
+
+  8.4 批量删除文档
+
+  前端 KB 管理页支持两种删除方式：
+
+  | 方式 | 触发 | 权限 | 说明 |
+  |------|------|------|------|
+  | 单条删除 | 文档行右侧 🗑 按钮 | `doc:unmount` | 调用 `DELETE /documents/{doc_id}/kb/{kb_id}` |
+  | 批量删除 | 勾选多文档 → [🗑 批量删除] | `doc:unmount`（逐资源独立校验） | 调用 `POST /documents/batch/delete`，某文档权限不足时该条单独失败，不影响其余 |
+
+  批量删除后，前端会弹窗汇总：成功数 + 失败数 + 每条失败的 doc_id 和原因。
+
+  如果批量删除全部失败，检查：
+  1. 字段名一致性：前端发送 `document_id`，后端接收 `document_id`（已于 2026-08-07 修复）
+  2. 权限：当前用户需要在 KB 上有 `kb_writer` / `kb_admin` / `admin` 角色
+  3. 资源注册：如果文档未在权限服务注册，运行 8.3 回填脚本
+
+  8.5 权限诊断速查
+
+  # 查看 RAG 当前权限模式
+  grep AUTHZ_SERVICE_MODE ~/proj_rag_dev/.env
+
+  # 查看权限服务是否正常
+  curl -s http://localhost:18080/healthz
+
+  # 查看 Cerbos PDP 是否正常
+  curl -s http://localhost:13592/_ah/health
+
+  # 查看权限服务日志（开发模式）
+  # 终端中 uvicorn 输出
+
+  # 查看权限服务日志（Docker 模式）
+  docker logs permission-service --tail 50
+
+  # 查看 RAG 侧权限调用日志
+  grep "authz\|perm_service" ~/proj_rag_dev/logs/*.log 2>/dev/null | tail -20
+
+  8.6 日志与可观测
+
+  所有权限相关的异常处理都输出了结构化日志，可在 Grafana Loki 中查询：
+
+  # 关键日志标记
+  unlink_resource_not_registered    # 删除时发现文档未在权限服务注册（自动降级处理）
+  retire_resource_not_registered    # 退役时发现文档未注册（自动降级处理）
+  authz_check_failed                # 权限判定调用失败
+  perm_service_check_failed         # 权限服务 /v1/check 请求失败
+  backfill_document_failed          # 回填脚本注册文档失败
+  backfill_link_failed              # 回填脚本链接挂载失败
+
+  对应的 Grafana 仪表盘路径：Explore → Loki → 选择 label `service=rag-api` / `service=permission-service`。
+

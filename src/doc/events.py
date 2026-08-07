@@ -70,6 +70,7 @@ def document_unmounted_event(
     kb_id: str,
     tenant_id: str,
     trace_id: str = "",
+    document_id: str = "",
 ) -> DomainEvent:
     return DomainEvent(
         event_type="DocumentUnmounted",
@@ -78,6 +79,7 @@ def document_unmounted_event(
         payload={
             "mount_id": mount_id,
             "kb_id": kb_id,
+            "document_id": document_id,
         },
     )
 

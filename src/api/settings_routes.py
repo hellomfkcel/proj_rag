@@ -57,7 +57,15 @@ async def list_models(ctx: RequestContext = Depends(get_request_context)):
 
 @router.patch("/models/{model_id}/set-default", response_model=ModelItem)
 async def set_default_model(model_id: str, ctx: RequestContext = Depends(get_request_context)):
-    """将指定模型设为该类型的默认模型。"""
+    """将指定模型设为该类型的默认模型。需要 kb:manage 权限（系统管理员/租户管理员）。"""
+    from src.permission.authz import check
+
+    # ★ 权限检查：修改模型默认配置是系统级操作，需要 kb:manage 权限
+    # 使用 system-wide resource "config" 进行判定
+    decision = check(ctx, "kb:manage", "kb", "config")
+    if decision.get("decision") != "allow":
+        raise HTTPException(status_code=403, detail="auth:forbidden — 您没有修改模型配置的权限（需要 kb:manage）")
+
     conn = await asyncpg.connect(_dsn())
     try:
         # Get the target model
@@ -104,6 +112,14 @@ async def get_retrieval_config(kb_id: str, ctx: RequestContext = Depends(get_req
 @router.patch("/configs/retrieval", response_model=RetrievalConfigModel)
 async def update_retrieval_config(kb_id: str, body: RetrievalConfigPatch,
                                   ctx: RequestContext = Depends(get_request_context)):
+    """更新检索配置。需要 kb:manage 权限。"""
+    from src.permission.authz import check
+
+    # ★ 权限检查：修改检索配置需要对该 KB 的 kb:manage 权限
+    decision = check(ctx, "kb:manage", "kb", kb_id)
+    if decision.get("decision") != "allow":
+        raise HTTPException(status_code=403, detail="auth:forbidden — 您没有修改此知识库检索配置的权限（需要 kb:manage）")
+
     conn = await asyncpg.connect(_dsn())
     try:
         existing = await conn.fetchrow(
@@ -161,19 +177,32 @@ async def list_prompts(ctx: RequestContext = Depends(get_request_context)):
 
 @router.get("/config")
 async def app_config(ctx: RequestContext = Depends(get_request_context)):
-    """返回前端需要的动态配置（外部服务地址等）。"""
+    """返回前端需要的动态配置（外部服务地址等）。
+
+    外部工具 URL（Grafana, Langfuse, Cerbos, Admin Console）仅对管理员用户返回。
+    普通用户仅获取 OTel collector URL（用于前端链路追踪）。
+    """
     s = Settings()
+    is_admin = bool({"system_admin", "admin"} & set(ctx.roles))
     return {
-        "grafana_url": s.grafana_url,
-        "langfuse_url": s.langfuse_public_url,
-        "cerbos_url": s.cerbos_public_url,
-        "admin_console_url": s.admin_console_url,
+        "grafana_url": s.grafana_url if is_admin else "",
+        "langfuse_url": s.langfuse_public_url if is_admin else "",
+        "cerbos_url": s.cerbos_public_url if is_admin else "",
+        "admin_console_url": s.admin_console_url if is_admin else "",
         "otel_collector_url": s.otel_endpoint,
     }
 
 
 @router.patch("/prompts/{prompt_id}/activate")
 async def activate_prompt(prompt_id: str, ctx: RequestContext = Depends(get_request_context)):
+    """激活指定版本的 Prompt 模板。需要 kb:manage 权限。"""
+    from src.permission.authz import check
+
+    # ★ 权限检查：修改 Prompt 激活状态需要 kb:manage 权限
+    decision = check(ctx, "kb:manage", "kb", "config")
+    if decision.get("decision") != "allow":
+        raise HTTPException(status_code=403, detail="auth:forbidden — 您没有修改 Prompt 配置的权限（需要 kb:manage）")
+
     conn = await asyncpg.connect(_dsn())
     try:
         # Deactivate all versions of this prompt

@@ -175,7 +175,7 @@ def retrieve_and_generate_task(
     except Exception as exc:
         log.warning("redis_publish_failed", error=str(exc))
 
-    # 4. 写 conversation_turn
+    # 4. 写 conversation_turn（含 LLM 生成的答案，供前端刷新时加载历史）
     _save_turn(
         conversation_id=conversation_id,
         turn_index=turn_index,
@@ -183,6 +183,7 @@ def retrieve_and_generate_task(
         resolved_query=resolved_query,
         chunk_ids=chunk_ids,
         pipeline_yaml_version=yaml_version,
+        answer=answer,
     )
 
     # 5. 审计
@@ -602,8 +603,9 @@ def _save_turn(
     resolved_query: str,
     chunk_ids: List[str],
     pipeline_yaml_version: str = "v1",
+    answer: str = "",
 ) -> None:
-    """写 conversation_turn 记录。"""
+    """写 conversation_turn 记录（含 LLM 生成答案）。"""
     import asyncpg
     import asyncio
 
@@ -616,10 +618,10 @@ def _save_turn(
             await conn.execute(
                 """INSERT INTO conversation_turns
                    (id, conversation_id, turn_index, user_question, resolved_query,
-                    retrieved_chunk_ids, pipeline_yaml_version, created_at)
-                   VALUES ($1,$2,$3,$4,$5,$6,$7,$8)""",
+                    answer, retrieved_chunk_ids, pipeline_yaml_version, created_at)
+                   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)""",
                 str(uuid.uuid4()), conversation_id, turn_index,
-                user_question, resolved_query,
+                user_question, resolved_query, answer,
                 chunk_ids, pipeline_yaml_version,
                 datetime.now(timezone.utc),
             )

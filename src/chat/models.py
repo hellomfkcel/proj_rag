@@ -44,6 +44,7 @@ class ConversationTurn(Base):
     turn_index = Column(Integer, nullable=False)
     user_question = Column(Text, nullable=False)
     resolved_query = Column(Text, nullable=False)
+    answer = Column(Text, default="", nullable=False)
     retrieval_params_snapshot = Column(JSON, nullable=True)
     retrieved_chunk_ids = Column(ARRAY(Text), default=list)
     trace_id = Column(String(64), default="")

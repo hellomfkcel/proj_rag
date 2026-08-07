@@ -677,6 +677,16 @@ conda activate rag_dev_v14 && make dev-embedding
 uvicorn src.services.embedding_service:app --host 0.0.0.0 --port 19500
 
 
+权限后台
+开发模式：权限服务后端
+cd ~/permission-system/permission-service
+conda activate perm_service
+uvicorn app.main:app --host 0.0.0.0 --port 18080 --reload
+
+开发模式：管理台前端
+cd ~/permission-system/admin-console
+npm run dev  # http://localhost:3002
+
 
 ### retrieve pipeline问题
 
@@ -4945,3 +4955,1641 @@ You're using a XLMRobertaTokenizerFast tokenizer. Please note that with a fast t
 在代码修复过程中，不能出现这样的操作：为了让项目跑通的妥协、绕过逻辑的代码；为了让代码路通引入硬编码、mock代码；为了让代码跑通不按照系统架构设计来
 在代码修复过程中，要注意权限系统的调用逻辑，不因代码的修复造成破坏
 在代码修复过程中，要注意可观测系统的完整性、有效性，不因代码修复而造成破坏
+
+
+# 前端kb文档删除问题
+
+我在前端kb中删除文档时，发现两个问题首先批量删除无效，然后是一些早期上传文档没有操作权限（是用同样的账号上传的）   进行系统性分析后进行优化修复
+在代码优化修复过程中，不能出现这样的操作：为了让项目跑通的妥协、绕过逻辑的代码；为了让代码路通引入硬编码、mock代码；为了让代码跑通不按照系统架构设计来
+在代码优化修复过程中，要注意权限系统的调用逻辑，不因代码的优化修复造成破坏
+在代码优化修复过程中，要注意可观测系统的完整性、有效性，不因代码修复而造成破坏
+涉及到需要联调运行测试时，要进行真实联调测试，不要skip或者mock、绕过，联调测试就要根据生产实际情况来
+现有代码系统架构设计 docs/RAG系统设计v14.md，前端架构设计 docs/frontend-design.md，docs/外部系统设计.md，docs/权限管理系统架构设计.md
+rag python开发环境 conda activate rag_dev_v14 ,外部系统python开发环境 conda activate perm_service
+rag项目的基础服务是docker-compose.infra.yml，已在正常运行中。外部系统的使用 见 readme.md
+统一观测平台、langfuse这些都是docker compose部署，已在正常运行中
+可以通过 docker ps查看
+
+
+# 批量解析问题
+批量解析后的运行日志，最终解析结果是成功的，但日志显示中间有很多问题
+dev-relay 日志
+2026-08-07T01:16:41.984968Z [warning  ] unmounted_cleanup_failed       error=invalid input for query argument $1: '2b6d5f97-4fe1-4fad-83d6-cf01a88ba012-a6... (invalid UUID '2b6d5f97-4fe1-4fad-83d6-cf01a88ba012-a6a9f8c0-133a-4b2f-b3d8-8919b4fc187c': length must be between 32..36 characters, got 73) mount_id=2b6d5f97-4fe1-4fad-83d6-cf01a88ba012-a6a9f8c0-133a-4b2f-b3d8-8919b4fc187c
+2026-08-07T01:16:42.012924Z [warning  ] unmounted_cleanup_failed       error=invalid input for query argument $1: 'a26b1a3c-30da-4c15-9ebd-7422c4f125cd-a6... (invalid UUID 'a26b1a3c-30da-4c15-9ebd-7422c4f125cd-a6a9f8c0-133a-4b2f-b3d8-8919b4fc187c': length must be between 32..36 characters, got 73) mount_id=a26b1a3c-30da-4c15-9ebd-7422c4f125cd-a6a9f8c0-133a-4b2f-b3d8-8919b4fc187c
+...很长的日志类似这样的
+
+dev-ingest日志
+[2026-08-07 09:18:25,267: INFO/MainProcess] Task src.ingest.service.ingest_document_task[ee481731-dddd-430e-92fd-71b747848157] received
+[2026-08-07 09:18:25,311: INFO/MainProcess] Task src.ingest.service.ingest_document_task[2beaee8b-f7ca-41a1-a70e-53d4623dcbb4] received
+[2026-08-07 09:18:25,357: INFO/MainProcess] Task src.ingest.service.ingest_document_task[aecaa197-2ab8-47d3-83c5-402742d4ccf1] received
+[2026-08-07 09:18:25,404: INFO/MainProcess] Task src.ingest.service.ingest_document_task[186d8de0-576d-4ee7-8326-6518cce5b883] received
+[2026-08-07 09:18:25,445: INFO/MainProcess] Task src.ingest.service.ingest_document_task[56f5fbd2-901b-4f6c-9af0-eede9a837a73] received
+[2026-08-07 09:18:25,486: INFO/MainProcess] Task src.ingest.service.ingest_document_task[6f9652cc-dedd-44b5-add5-c814c2269b0c] received
+[2026-08-07 09:18:25,576: INFO/MainProcess] Task src.ingest.service.ingest_document_task[5888bdaf-7df0-4a5c-8be4-928d65712eb4] received
+[2026-08-07 09:18:25,672: INFO/MainProcess] Task src.ingest.service.ingest_document_task[49d91c77-66ab-4592-b865-3514ba28dd9e] received
+[2026-08-07 09:18:27,058: INFO/ForkPoolWorker-1] Running component splitter
+[2026-08-07 09:18:27,058: INFO/ForkPoolWorker-2] Running component splitter
+[2026-08-07 09:18:40,566: INFO/ForkPoolWorker-1] Running component embedder
+[2026-08-07 09:18:40,637: INFO/ForkPoolWorker-2] Running component embedder
+[2026-08-07 09:18:52,697: INFO/ForkPoolWorker-1] Running component perm_enricher
+[2026-08-07 09:18:52,708: INFO/ForkPoolWorker-2] Running component perm_enricher
+[2026-08-07 09:18:52,741: INFO/ForkPoolWorker-1] Running component writer
+[2026-08-07 09:18:52,757: INFO/ForkPoolWorker-2] Running component writer
+[2026-08-07 09:18:53,029: WARNING/ForkPoolWorker-2] 2026-08-07 09:18:53,029 [ERROR][_log_rpc_error]: RPC error: [load_collection], <MilvusException: (code=700, message=index not found[collection=rag_documents])>, <elapsed:20.8ms>
+Traceback:
+Traceback (most recent call last):
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/decorators.py", line 518, in handler
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/decorators.py", line 565, in handler
+    return func(self, *args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/decorators.py", line 456, in handler
+    raise e from e
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/decorators.py", line 419, in handler
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 1770, in load_collection
+    check_status(response)
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/utils.py", line 76, in check_status
+    raise MilvusException(status.code, status.reason, status.error_code)
+pymilvus.exceptions.MilvusException: <MilvusException: (code=700, message=index not found[collection=rag_documents])>
+ (decorators.py:472)
+[2026-08-07 09:18:53,315: WARNING/ForkPoolWorker-2] Failed to serialize the inputs of the current pipeline state. Haystack will omit only the non-serializable fields when possible. Error: 'dict' object has no attribute 'to_dict'
+[2026-08-07 09:18:53,362: WARNING/ForkPoolWorker-2] Failed to serialize the 'writer' field of the inputs of the current pipeline state. The field will be omitted from the snapshot. Error: 'dict' object has no attribute 'to_dict'
+[2026-08-07 09:18:53,365: ERROR/ForkPoolWorker-2] {'mount_id': '0136b7a6-a387-4ac5-8e6f-c680cac5dc9f', 'error': "The following component failed to run:\nComponent name: 'writer'\nComponent type: 'MilvusDocumentStoreWriter'\nError: <MilvusException: (code=700, message=index not found[collection=rag_documents])>", 'event': 'ingest_failed', 'level': 'error', 'timestamp': '2026-08-07T01:18:53.365068Z'}
+[2026-08-07 09:18:53,370: INFO/ForkPoolWorker-2] Task src.ingest.service.ingest_document_task[ee481731-dddd-430e-92fd-71b747848157] retry: Retry in 30s: PipelineRuntimeError("The following component failed to run:\nComponent name: 'writer'\nComponent type: 'MilvusDocumentStoreWriter'\nError: <MilvusException: (code=700, message=index not found[collection=rag_documents])>")
+[2026-08-07 09:18:53,373: INFO/MainProcess] Task src.ingest.service.ingest_document_task[b1228339-54d1-4295-8061-9bf8643be7ad] received
+[2026-08-07 09:18:53,498: INFO/ForkPoolWorker-2] Running component splitter
+[2026-08-07 09:18:56,036: INFO/ForkPoolWorker-1] Task src.ingest.service.ingest_document_task[2beaee8b-f7ca-41a1-a70e-53d4623dcbb4] succeeded in 30.72407967199979s: {'status': 'completed', 'mount_id': '3c3fd1e1-73a2-4260-84e2-422ea0d3d732', 'chunk_count': 254}
+[2026-08-07 09:18:56,037: INFO/MainProcess] Task src.ingest.service.ingest_document_task[986c8d95-3f72-4a85-8199-14666bb080ba] received
+[2026-08-07 09:18:56,153: INFO/ForkPoolWorker-1] Running component splitter
+[2026-08-07 09:19:06,278: INFO/ForkPoolWorker-2] Running component embedder
+[2026-08-07 09:19:06,294: INFO/ForkPoolWorker-1] Running component embedder
+[2026-08-07 09:19:24,317: INFO/ForkPoolWorker-2] Running component perm_enricher
+[2026-08-07 09:19:24,352: INFO/ForkPoolWorker-1] Running component perm_enricher
+[2026-08-07 09:19:24,368: INFO/ForkPoolWorker-2] Running component writer
+[2026-08-07 09:19:24,417: INFO/ForkPoolWorker-1] Running component writer
+[2026-08-07 09:19:24,588: INFO/ForkPoolWorker-2] Task src.ingest.service.ingest_document_task[aecaa197-2ab8-47d3-83c5-402742d4ccf1] succeeded in 31.21565474900035s: {'status': 'completed', 'mount_id': '6f6c9062-a935-49ea-8e17-c56947fff221', 'chunk_count': 290}
+[2026-08-07 09:19:24,590: INFO/MainProcess] Task src.ingest.service.ingest_document_task[46592d7a-8c17-4aa3-b683-7e6ea4bf2358] received
+[2026-08-07 09:19:24,593: INFO/ForkPoolWorker-1] Task src.ingest.service.ingest_document_task[186d8de0-576d-4ee7-8326-6518cce5b883] succeeded in 28.55644248000044s: {'status': 'completed', 'mount_id': 'bc6043eb-6d60-4a97-a4ce-338c038f1bba', 'chunk_count': 365}
+[2026-08-07 09:19:24,594: INFO/MainProcess] Task src.ingest.service.ingest_document_task[8dc1177f-14ee-42c7-9187-b7ca33322261] received
+[2026-08-07 09:19:24,732: INFO/ForkPoolWorker-2] Running component splitter
+[2026-08-07 09:19:24,764: INFO/ForkPoolWorker-1] Running component splitter
+[2026-08-07 09:20:00,997: INFO/ForkPoolWorker-2] Running component embedder
+[2026-08-07 09:20:01,086: INFO/ForkPoolWorker-1] Running component embedder
+[2026-08-07 09:20:24,628: INFO/ForkPoolWorker-2] Running component perm_enricher
+[2026-08-07 09:20:24,662: INFO/ForkPoolWorker-1] Running component perm_enricher
+[2026-08-07 09:20:24,740: INFO/ForkPoolWorker-2] Running component writer
+[2026-08-07 09:20:24,784: INFO/ForkPoolWorker-1] Running component writer
+[2026-08-07 09:20:24,942: INFO/ForkPoolWorker-2] Task src.ingest.service.ingest_document_task[56f5fbd2-901b-4f6c-9af0-eede9a837a73] succeeded in 60.352494552999815s: {'status': 'completed', 'mount_id': '52d499d9-6c16-4e70-bcdf-f005f7a259b4', 'chunk_count': 637}
+[2026-08-07 09:20:24,944: INFO/MainProcess] Task src.ingest.service.ingest_document_task[ee481731-dddd-430e-92fd-71b747848157] received
+[2026-08-07 09:20:25,012: INFO/ForkPoolWorker-1] Task src.ingest.service.ingest_document_task[6f9652cc-dedd-44b5-add5-c814c2269b0c] succeeded in 60.41856839800039s: {'status': 'completed', 'mount_id': '123eb1af-a375-4f4c-bb31-401fe09a7a87', 'chunk_count': 706}
+[2026-08-07 09:20:25,138: INFO/ForkPoolWorker-2] Running component splitter
+[2026-08-07 09:20:25,162: INFO/ForkPoolWorker-1] Running component splitter
+[2026-08-07 09:21:06,905: INFO/ForkPoolWorker-1] Running component embedder
+[2026-08-07 09:21:06,998: INFO/ForkPoolWorker-2] Running component embedder
+[2026-08-07 09:21:19,259: WARNING/ForkPoolWorker-1] {'free_mb': 1553, 'required_mb': 2500, 'total_mb': 11911, 'event': 'gpu_memory_insufficient_fallback_cpu', 'level': 'warning', 'timestamp': '2026-08-07T01:21:19.259667Z'}
+[2026-08-07 09:21:21,690: INFO/ForkPoolWorker-1] loading existing colbert_linear and sparse_linear---------
+pre tokenize:   0%|          | 0/1 [00:00<?, ?it/s] 
+pre tokenize: 100%|##########| 1/1 [00:00<00:00, 88.52it/s]
+[2026-08-07 09:21:21,954: WARNING/ForkPoolWorker-1] You're using a XLMRobertaTokenizerFast tokenizer. Please note that with a fast tokenizer, using the `__call__` method is faster than using a method to encode the text followed by a call to the `pad` method to get a padded encoding.
+[2026-08-07 09:21:44,862: ERROR/MainProcess] Process 'ForkPoolWorker-1' pid:129315 exited with 'signal 9 (SIGKILL)'
+[2026-08-07 09:21:50,934: ERROR/MainProcess] Task handler raised error: WorkerLostError('Worker exited prematurely: signal 9 (SIGKILL) Job: 7.')
+Traceback (most recent call last):
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/billiard/pool.py", line 1265, in mark_as_worker_lost
+    raise WorkerLostError(
+billiard.einfo.ExceptionWithTraceback: 
+"""
+Traceback (most recent call last):
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/billiard/pool.py", line 1265, in mark_as_worker_lost
+    raise WorkerLostError(
+billiard.exceptions.WorkerLostError: Worker exited prematurely: signal 9 (SIGKILL) Job: 7.
+"""
+[2026-08-07 09:22:10,255: INFO/MainProcess] missed heartbeat from stamping-worker@mfkcel-MS-7D22
+[2026-08-07 09:22:10,255: INFO/MainProcess] missed heartbeat from retrieval-worker@mfkcel-MS-7D22
+[2026-08-07 09:22:10,256: WARNING/MainProcess] Substantial drift from stamping-worker@mfkcel-MS-7D22 may mean clocks are out of sync.  Current drift is 25 seconds.  [orig: 2026-08-07 09:22:10.256031 recv: 2026-08-07 09:21:45.386591]
+[2026-08-07 09:22:10,256: WARNING/MainProcess] Substantial drift from retrieval-worker@mfkcel-MS-7D22 may mean clocks are out of sync.  Current drift is 25 seconds.  [orig: 2026-08-07 09:22:10.256236 recv: 2026-08-07 09:21:45.386552]
+[2026-08-07 09:22:10,257: INFO/MainProcess] Task src.ingest.service.ingest_document_task[49d91c77-66ab-4592-b865-3514ba28dd9e] received
+[2026-08-07 09:22:14,253: ERROR/MainProcess] Timed out waiting for UP message from <ForkProcess(ForkPoolWorker-3, started daemon)>
+[2026-08-07 09:22:14,272: ERROR/MainProcess] Process 'ForkPoolWorker-3' pid:377808 exited with 'signal 9 (SIGKILL)'
+[2026-08-07 09:22:18,378: ERROR/MainProcess] Timed out waiting for UP message from <ForkProcess(ForkPoolWorker-4, started daemon)>
+[2026-08-07 09:22:18,395: ERROR/MainProcess] Process 'ForkPoolWorker-4' pid:377833 exited with 'signal 9 (SIGKILL)'
+[2026-08-07 09:22:22,489: ERROR/MainProcess] Timed out waiting for UP message from <ForkProcess(ForkPoolWorker-5, started daemon)>
+[2026-08-07 09:22:22,726: ERROR/MainProcess] Process 'ForkPoolWorker-5' pid:377859 exited with 'signal 9 (SIGKILL)'
+[2026-08-07 09:22:26,821: ERROR/MainProcess] Timed out waiting for UP message from <ForkProcess(ForkPoolWorker-6, started daemon)>
+[2026-08-07 09:22:27,129: ERROR/MainProcess] Process 'ForkPoolWorker-6' pid:377886 exited with 'signal 9 (SIGKILL)'
+[2026-08-07 09:22:30,612: INFO/ForkPoolWorker-2] Running component perm_enricher
+[2026-08-07 09:22:30,776: INFO/ForkPoolWorker-2] Running component writer
+[2026-08-07 09:22:30,779: WARNING/ForkPoolWorker-2] 2026-08-07 09:22:30,778 [WARNING][_recover]: Connection recovery failed (connection_manager.py:676)
+Traceback (most recent call last):
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 250, in _wait_for_channel_ready
+    target_final_channel, target_stub = self._setup_identifier_interceptor(
+                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 443, in _setup_identifier_interceptor
+    else self._internal_register(user, host, stub=target_stub, timeout=timeout)
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 3113, in _internal_register
+    response = target_stub.Connect(request=req, timeout=kwargs.get("timeout"))
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/grpc/_channel.py", line 1181, in __call__
+    return _end_unary_response_blocking(state, call, False, None)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/grpc/_channel.py", line 1006, in _end_unary_response_blocking
+    raise _InactiveRpcError(state)  # pytype: disable=not-instantiable
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+grpc._channel._InactiveRpcError: <_InactiveRpcError of RPC that terminated with:
+	status = StatusCode.UNAVAILABLE
+	details = "failed to connect to all addresses; last error: UNAVAILABLE: ipv4:127.0.0.1:19530: recvmsg:Connection reset by peer"
+	debug_error_string = "UNKNOWN:Error received from peer  {created_time:"2026-08-07T09:22:30.778499616+08:00", grpc_status:14, grpc_message:"failed to connect to all addresses; last error: UNAVAILABLE: ipv4:127.0.0.1:19530: recvmsg:Connection reset by peer"}"
+>
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/connection_manager.py", line 672, in _recover
+    managed.handler.reconnect(address=new_address, timeout=managed.connect_timeout)
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 311, in reconnect
+    new_final_channel, new_stub = self._wait_for_channel_ready(
+                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 257, in _wait_for_channel_ready
+    raise MilvusException(
+pymilvus.exceptions.MilvusException: <MilvusException: (code=2, message=Fail connecting to server on localhost:19530, illegal connection params or server unavailable)>
+[2026-08-07 09:22:31,207: ERROR/MainProcess] Timed out waiting for UP message from <ForkProcess(ForkPoolWorker-7, started daemon)>
+[2026-08-07 09:22:31,215: ERROR/MainProcess] Process 'ForkPoolWorker-7' pid:377917 exited with 'signal 9 (SIGKILL)'
+[2026-08-07 09:22:31,517: WARNING/ForkPoolWorker-2] Failed to serialize the inputs of the current pipeline state. Haystack will omit only the non-serializable fields when possible. Error: 'dict' object has no attribute 'to_dict'
+[2026-08-07 09:22:31,674: WARNING/ForkPoolWorker-2] Failed to serialize the 'writer' field of the inputs of the current pipeline state. The field will be omitted from the snapshot. Error: 'dict' object has no attribute 'to_dict'
+[2026-08-07 09:22:31,680: ERROR/ForkPoolWorker-2] {'mount_id': '168e29d3-e811-4aa7-bed6-9419bed01bcc', 'error': "The following component failed to run:\nComponent name: 'writer'\nComponent type: 'MilvusDocumentStoreWriter'\nError: <MilvusException: (code=2, message=Fail connecting to server on localhost:19530, illegal connection params or server unavailable)>", 'event': 'ingest_failed', 'level': 'error', 'timestamp': '2026-08-07T01:22:31.680818Z'}
+[2026-08-07 09:22:31,683: INFO/MainProcess] Task src.ingest.service.ingest_document_task[5888bdaf-7df0-4a5c-8be4-928d65712eb4] received
+[2026-08-07 09:22:31,704: INFO/ForkPoolWorker-2] Task src.ingest.service.ingest_document_task[5888bdaf-7df0-4a5c-8be4-928d65712eb4] retry: Retry in 30s: PipelineRuntimeError("The following component failed to run:\nComponent name: 'writer'\nComponent type: 'MilvusDocumentStoreWriter'\nError: <MilvusException: (code=2, message=Fail connecting to server on localhost:19530, illegal connection params or server unavailable)>")
+[2026-08-07 09:22:35,296: ERROR/MainProcess] Timed out waiting for UP message from <ForkProcess(ForkPoolWorker-8, started daemon)>
+[2026-08-07 09:22:35,321: ERROR/MainProcess] Process 'ForkPoolWorker-8' pid:378038 exited with 'signal 9 (SIGKILL)'
+[2026-08-07 09:22:35,854: ERROR/ForkPoolWorker-2] Exception while exporting Span batch.
+Traceback (most recent call last):
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/urllib3/connectionpool.py", line 534, in _make_request
+    response = conn.getresponse()
+               ^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/urllib3/connection.py", line 571, in getresponse
+    httplib_response = super().getresponse()
+                       ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/http/client.py", line 1415, in getresponse
+    response.begin()
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/http/client.py", line 330, in begin
+    version, status, reason = self._read_status()
+                              ^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/http/client.py", line 291, in _read_status
+    line = str(self.fp.readline(_MAXLINE + 1), "iso-8859-1")
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/socket.py", line 718, in readinto
+    return self._sock.recv_into(b)
+           ^^^^^^^^^^^^^^^^^^^^^^^
+TimeoutError: timed out
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/requests/adapters.py", line 696, in send
+    resp = conn.urlopen(
+           ^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/urllib3/connectionpool.py", line 842, in urlopen
+    retries = retries.increment(
+              ^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/urllib3/util/retry.py", line 498, in increment
+    raise reraise(type(error), error, _stacktrace)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/urllib3/util/util.py", line 39, in reraise
+    raise value
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/urllib3/connectionpool.py", line 788, in urlopen
+    response = self._make_request(
+               ^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/urllib3/connectionpool.py", line 536, in _make_request
+    self._raise_timeout(err=e, url=url, timeout_value=read_timeout)
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/urllib3/connectionpool.py", line 367, in _raise_timeout
+    raise ReadTimeoutError(
+urllib3.exceptions.ReadTimeoutError: HTTPConnectionPool(host='localhost', port=13000): Read timed out. (read timeout=5)
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/opentelemetry/sdk/trace/export/__init__.py", line 362, in _export_batch
+    self.span_exporter.export(self.spans_list[:idx])  # type: ignore
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/langfuse/_client/span_exporter.py", line 138, in export
+    return self._exporter.export(transformed_spans)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/opentelemetry/exporter/otlp/proto/http/trace_exporter/__init__.py", line 204, in export
+    return self._export_serialized_spans(serialized_data)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/opentelemetry/exporter/otlp/proto/http/trace_exporter/__init__.py", line 174, in _export_serialized_spans
+    resp = self._export(serialized_data)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/opentelemetry/exporter/otlp/proto/http/trace_exporter/__init__.py", line 139, in _export
+    resp = self._session.post(
+           ^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/requests/sessions.py", line 712, in post
+    return self.request("POST", url, data=data, json=json, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/requests/sessions.py", line 651, in request
+    resp = self.send(prep, **send_kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/requests/sessions.py", line 784, in send
+    r = adapter.send(request, **kwargs)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/requests/adapters.py", line 742, in send
+    raise ReadTimeout(e, request=request)
+requests.exceptions.ReadTimeout: HTTPConnectionPool(host='localhost', port=13000): Read timed out. (read timeout=5)
+[2026-08-07 09:22:39,404: ERROR/MainProcess] Timed out waiting for UP message from <ForkProcess(ForkPoolWorker-9, started daemon)>
+[2026-08-07 09:22:39,417: ERROR/MainProcess] Process 'ForkPoolWorker-9' pid:378073 exited with 'signal 9 (SIGKILL)'
+[2026-08-07 09:22:41,139: INFO/ForkPoolWorker-2] Running component splitter
+[2026-08-07 09:22:41,346: ERROR/ForkPoolWorker-2] Exception while exporting Span batch.
+Traceback (most recent call last):
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/urllib3/connectionpool.py", line 534, in _make_request
+    response = conn.getresponse()
+               ^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/urllib3/connection.py", line 571, in getresponse
+    httplib_response = super().getresponse()
+                       ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/http/client.py", line 1415, in getresponse
+    response.begin()
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/http/client.py", line 330, in begin
+    version, status, reason = self._read_status()
+                              ^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/http/client.py", line 291, in _read_status
+    line = str(self.fp.readline(_MAXLINE + 1), "iso-8859-1")
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/socket.py", line 718, in readinto
+    return self._sock.recv_into(b)
+           ^^^^^^^^^^^^^^^^^^^^^^^
+TimeoutError: timed out
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/requests/adapters.py", line 696, in send
+    resp = conn.urlopen(
+           ^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/urllib3/connectionpool.py", line 842, in urlopen
+    retries = retries.increment(
+              ^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/urllib3/util/retry.py", line 498, in increment
+    raise reraise(type(error), error, _stacktrace)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/urllib3/util/util.py", line 39, in reraise
+    raise value
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/urllib3/connectionpool.py", line 788, in urlopen
+    response = self._make_request(
+               ^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/urllib3/connectionpool.py", line 536, in _make_request
+    self._raise_timeout(err=e, url=url, timeout_value=read_timeout)
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/urllib3/connectionpool.py", line 367, in _raise_timeout
+    raise ReadTimeoutError(
+urllib3.exceptions.ReadTimeoutError: HTTPConnectionPool(host='localhost', port=13000): Read timed out. (read timeout=5)
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/opentelemetry/sdk/trace/export/__init__.py", line 362, in _export_batch
+    self.span_exporter.export(self.spans_list[:idx])  # type: ignore
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/langfuse/_client/span_exporter.py", line 138, in export
+    return self._exporter.export(transformed_spans)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/opentelemetry/exporter/otlp/proto/http/trace_exporter/__init__.py", line 204, in export
+    return self._export_serialized_spans(serialized_data)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/opentelemetry/exporter/otlp/proto/http/trace_exporter/__init__.py", line 174, in _export_serialized_spans
+    resp = self._export(serialized_data)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/opentelemetry/exporter/otlp/proto/http/trace_exporter/__init__.py", line 139, in _export
+    resp = self._session.post(
+           ^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/requests/sessions.py", line 712, in post
+    return self.request("POST", url, data=data, json=json, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/requests/sessions.py", line 651, in request
+    resp = self.send(prep, **send_kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/requests/sessions.py", line 784, in send
+    r = adapter.send(request, **kwargs)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/requests/adapters.py", line 742, in send
+    raise ReadTimeout(e, request=request)
+requests.exceptions.ReadTimeout: HTTPConnectionPool(host='localhost', port=13000): Read timed out. (read timeout=5)
+[2026-08-07 09:22:43,511: ERROR/MainProcess] Timed out waiting for UP message from <ForkProcess(ForkPoolWorker-10, started daemon)>
+[2026-08-07 09:22:43,624: ERROR/MainProcess] Process 'ForkPoolWorker-10' pid:378292 exited with 'signal 9 (SIGKILL)'
+[2026-08-07 09:22:47,715: ERROR/MainProcess] Timed out waiting for UP message from <ForkProcess(ForkPoolWorker-11, started daemon)>
+[2026-08-07 09:22:47,727: ERROR/MainProcess] Process 'ForkPoolWorker-11' pid:378451 exited with 'signal 9 (SIGKILL)'
+[2026-08-07 09:22:51,807: ERROR/MainProcess] Timed out waiting for UP message from <ForkProcess(ForkPoolWorker-12, started daemon)>
+[2026-08-07 09:22:51,901: ERROR/MainProcess] Process 'ForkPoolWorker-12' pid:378678 exited with 'signal 9 (SIGKILL)'
+[2026-08-07 09:22:55,995: ERROR/MainProcess] Timed out waiting for UP message from <ForkProcess(ForkPoolWorker-13, started daemon)>
+[2026-08-07 09:22:56,339: ERROR/MainProcess] Process 'ForkPoolWorker-13' pid:378837 exited with 'signal 9 (SIGKILL)'
+[2026-08-07 09:23:00,423: ERROR/MainProcess] Timed out waiting for UP message from <ForkProcess(ForkPoolWorker-14, started daemon)>
+[2026-08-07 09:23:00,464: ERROR/MainProcess] Process 'ForkPoolWorker-14' pid:378998 exited with 'signal 9 (SIGKILL)'
+[2026-08-07 09:23:04,548: ERROR/MainProcess] Timed out waiting for UP message from <ForkProcess(ForkPoolWorker-15, started daemon)>
+[2026-08-07 09:23:04,602: ERROR/MainProcess] Process 'ForkPoolWorker-15' pid:379301 exited with 'signal 9 (SIGKILL)'
+[2026-08-07 09:23:08,682: ERROR/MainProcess] Timed out waiting for UP message from <ForkProcess(ForkPoolWorker-16, started daemon)>
+[2026-08-07 09:23:08,687: ERROR/MainProcess] Process 'ForkPoolWorker-16' pid:379424 exited with 'signal 9 (SIGKILL)'
+[2026-08-07 09:23:16,134: INFO/ForkPoolWorker-2] Running component embedder
+[2026-08-07 09:23:29,723: INFO/ForkPoolWorker-2] Running component perm_enricher
+[2026-08-07 09:23:29,853: INFO/ForkPoolWorker-2] Running component writer
+[2026-08-07 09:23:29,859: WARNING/ForkPoolWorker-2] 2026-08-07 09:23:29,859 [WARNING][_recover]: Connection recovery failed (connection_manager.py:676)
+Traceback (most recent call last):
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 250, in _wait_for_channel_ready
+    target_final_channel, target_stub = self._setup_identifier_interceptor(
+                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 443, in _setup_identifier_interceptor
+    else self._internal_register(user, host, stub=target_stub, timeout=timeout)
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 3113, in _internal_register
+    response = target_stub.Connect(request=req, timeout=kwargs.get("timeout"))
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/grpc/_channel.py", line 1181, in __call__
+    return _end_unary_response_blocking(state, call, False, None)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/grpc/_channel.py", line 1006, in _end_unary_response_blocking
+    raise _InactiveRpcError(state)  # pytype: disable=not-instantiable
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+grpc._channel._InactiveRpcError: <_InactiveRpcError of RPC that terminated with:
+	status = StatusCode.UNAVAILABLE
+	details = "failed to connect to all addresses; last error: UNKNOWN: ipv4:127.0.0.1:19530: Failed to connect to remote host: connect: Connection refused (111)"
+	debug_error_string = "UNKNOWN:Error received from peer  {created_time:"2026-08-07T09:23:29.859236756+08:00", grpc_status:14, grpc_message:"failed to connect to all addresses; last error: UNKNOWN: ipv4:127.0.0.1:19530: Failed to connect to remote host: connect: Connection refused (111)"}"
+>
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/connection_manager.py", line 672, in _recover
+    managed.handler.reconnect(address=new_address, timeout=managed.connect_timeout)
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 311, in reconnect
+    new_final_channel, new_stub = self._wait_for_channel_ready(
+                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 257, in _wait_for_channel_ready
+    raise MilvusException(
+pymilvus.exceptions.MilvusException: <MilvusException: (code=2, message=Fail connecting to server on localhost:19530, illegal connection params or server unavailable)>
+[2026-08-07 09:23:30,123: WARNING/ForkPoolWorker-2] Failed to serialize the inputs of the current pipeline state. Haystack will omit only the non-serializable fields when possible. Error: 'dict' object has no attribute 'to_dict'
+[2026-08-07 09:23:30,256: WARNING/ForkPoolWorker-2] Failed to serialize the 'writer' field of the inputs of the current pipeline state. The field will be omitted from the snapshot. Error: 'dict' object has no attribute 'to_dict'
+[2026-08-07 09:23:30,262: ERROR/ForkPoolWorker-2] {'mount_id': 'd6effc95-4a93-4079-953b-6a50a742bfee', 'error': "The following component failed to run:\nComponent name: 'writer'\nComponent type: 'MilvusDocumentStoreWriter'\nError: <MilvusException: (code=2, message=Fail connecting to server on localhost:19530, illegal connection params or server unavailable)>", 'event': 'ingest_failed', 'level': 'error', 'timestamp': '2026-08-07T01:23:30.262861Z'}
+[2026-08-07 09:23:30,264: INFO/MainProcess] Task src.ingest.service.ingest_document_task[b1228339-54d1-4295-8061-9bf8643be7ad] received
+[2026-08-07 09:23:30,265: INFO/ForkPoolWorker-2] Task src.ingest.service.ingest_document_task[b1228339-54d1-4295-8061-9bf8643be7ad] retry: Retry in 30s: PipelineRuntimeError("The following component failed to run:\nComponent name: 'writer'\nComponent type: 'MilvusDocumentStoreWriter'\nError: <MilvusException: (code=2, message=Fail connecting to server on localhost:19530, illegal connection params or server unavailable)>")
+[2026-08-07 09:23:30,801: INFO/ForkPoolWorker-2] Running component splitter
+[2026-08-07 09:23:49,196: INFO/ForkPoolWorker-2] Running component embedder
+[2026-08-07 09:24:09,198: INFO/ForkPoolWorker-2] Running component perm_enricher
+[2026-08-07 09:24:09,333: INFO/ForkPoolWorker-2] Running component writer
+[2026-08-07 09:24:09,335: WARNING/ForkPoolWorker-2] 2026-08-07 09:24:09,335 [WARNING][_recover]: Connection recovery failed (connection_manager.py:676)
+Traceback (most recent call last):
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 250, in _wait_for_channel_ready
+    target_final_channel, target_stub = self._setup_identifier_interceptor(
+                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 443, in _setup_identifier_interceptor
+    else self._internal_register(user, host, stub=target_stub, timeout=timeout)
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 3113, in _internal_register
+    response = target_stub.Connect(request=req, timeout=kwargs.get("timeout"))
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/grpc/_channel.py", line 1181, in __call__
+    return _end_unary_response_blocking(state, call, False, None)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/grpc/_channel.py", line 1006, in _end_unary_response_blocking
+    raise _InactiveRpcError(state)  # pytype: disable=not-instantiable
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+grpc._channel._InactiveRpcError: <_InactiveRpcError of RPC that terminated with:
+	status = StatusCode.UNAVAILABLE
+	details = "failed to connect to all addresses; last error: UNAVAILABLE: ipv4:127.0.0.1:19530: recvmsg:Connection reset by peer"
+	debug_error_string = "UNKNOWN:Error received from peer  {grpc_message:"failed to connect to all addresses; last error: UNAVAILABLE: ipv4:127.0.0.1:19530: recvmsg:Connection reset by peer", grpc_status:14, created_time:"2026-08-07T09:24:09.335131952+08:00"}"
+>
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/connection_manager.py", line 672, in _recover
+    managed.handler.reconnect(address=new_address, timeout=managed.connect_timeout)
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 311, in reconnect
+    new_final_channel, new_stub = self._wait_for_channel_ready(
+                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 257, in _wait_for_channel_ready
+    raise MilvusException(
+pymilvus.exceptions.MilvusException: <MilvusException: (code=2, message=Fail connecting to server on localhost:19530, illegal connection params or server unavailable)>
+[2026-08-07 09:24:09,592: WARNING/ForkPoolWorker-2] Failed to serialize the inputs of the current pipeline state. Haystack will omit only the non-serializable fields when possible. Error: 'dict' object has no attribute 'to_dict'
+[2026-08-07 09:24:09,726: WARNING/ForkPoolWorker-2] Failed to serialize the 'writer' field of the inputs of the current pipeline state. The field will be omitted from the snapshot. Error: 'dict' object has no attribute 'to_dict'
+[2026-08-07 09:24:09,732: ERROR/ForkPoolWorker-2] {'mount_id': 'b11067e6-ff40-4c58-9fbc-5761deb346eb', 'error': "The following component failed to run:\nComponent name: 'writer'\nComponent type: 'MilvusDocumentStoreWriter'\nError: <MilvusException: (code=2, message=Fail connecting to server on localhost:19530, illegal connection params or server unavailable)>", 'event': 'ingest_failed', 'level': 'error', 'timestamp': '2026-08-07T01:24:09.732431Z'}
+[2026-08-07 09:24:09,734: INFO/MainProcess] Task src.ingest.service.ingest_document_task[46592d7a-8c17-4aa3-b683-7e6ea4bf2358] received
+[2026-08-07 09:24:09,735: INFO/ForkPoolWorker-2] Task src.ingest.service.ingest_document_task[46592d7a-8c17-4aa3-b683-7e6ea4bf2358] retry: Retry in 30s: PipelineRuntimeError("The following component failed to run:\nComponent name: 'writer'\nComponent type: 'MilvusDocumentStoreWriter'\nError: <MilvusException: (code=2, message=Fail connecting to server on localhost:19530, illegal connection params or server unavailable)>")
+
+stamp 日志
+[2026-08-07 09:22:03,537: INFO/MainProcess] Task src.ingest.service.stamp_channel_task[c0fa120c-4aab-4e54-8a11-456af25637b7] received
+[2026-08-07 09:22:07,389: INFO/ForkPoolWorker-2] Task src.ingest.service.stamp_channel_task[243047f1-42f1-49d4-b942-35e135a105b0] retry: Retry in 60s: RuntimeError('Failed to get visibility for doc=88fb50c9-e14b-47a3-824c-b6b8056bfbd9 kb=a6a9f8c0-133a-4b2f-b3d8-8919b4fc187c: timed out')
+[2026-08-07 09:22:07,389: INFO/ForkPoolWorker-1] Task src.ingest.service.stamp_channel_task[c0fa120c-4aab-4e54-8a11-456af25637b7] retry: Retry in 60s: RuntimeError('Failed to get visibility for doc=df9d6795-802d-4409-88bf-70fe350740f9 kb=a6a9f8c0-133a-4b2f-b3d8-8919b4fc187c: timed out')
+[2026-08-07 09:22:13,028: ERROR/ForkPoolWorker-2] Exception while exporting Span batch.
+Traceback (most recent call last):
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/urllib3/connectionpool.py", line 534, in _make_request
+    response = conn.getresponse()
+               ^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/urllib3/connection.py", line 571, in getresponse
+    httplib_response = super().getresponse()
+                       ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/http/client.py", line 1415, in getresponse
+    response.begin()
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/http/client.py", line 330, in begin
+    version, status, reason = self._read_status()
+                              ^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/http/client.py", line 291, in _read_status
+    line = str(self.fp.readline(_MAXLINE + 1), "iso-8859-1")
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/socket.py", line 718, in readinto
+    return self._sock.recv_into(b)
+           ^^^^^^^^^^^^^^^^^^^^^^^
+TimeoutError: timed out
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/requests/adapters.py", line 696, in send
+    resp = conn.urlopen(
+           ^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/urllib3/connectionpool.py", line 842, in urlopen
+    retries = retries.increment(
+              ^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/urllib3/util/retry.py", line 498, in increment
+    raise reraise(type(error), error, _stacktrace)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/urllib3/util/util.py", line 39, in reraise
+    raise value
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/urllib3/connectionpool.py", line 788, in urlopen
+    response = self._make_request(
+               ^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/urllib3/connectionpool.py", line 536, in _make_request
+    self._raise_timeout(err=e, url=url, timeout_value=read_timeout)
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/urllib3/connectionpool.py", line 367, in _raise_timeout
+    raise ReadTimeoutError(
+urllib3.exceptions.ReadTimeoutError: HTTPConnectionPool(host='localhost', port=4318): Read timed out. (read timeout=10)
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/opentelemetry/sdk/trace/export/__init__.py", line 362, in _export_batch
+    self.span_exporter.export(self.spans_list[:idx])  # type: ignore
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/opentelemetry/exporter/otlp/proto/http/trace_exporter/__init__.py", line 204, in export
+    return self._export_serialized_spans(serialized_data)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/opentelemetry/exporter/otlp/proto/http/trace_exporter/__init__.py", line 174, in _export_serialized_spans
+    resp = self._export(serialized_data)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/opentelemetry/exporter/otlp/proto/http/trace_exporter/__init__.py", line 139, in _export
+    resp = self._session.post(
+           ^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/requests/sessions.py", line 712, in post
+    return self.request("POST", url, data=data, json=json, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/requests/sessions.py", line 651, in request
+    resp = self.send(prep, **send_kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/requests/sessions.py", line 784, in send
+    r = adapter.send(request, **kwargs)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/requests/adapters.py", line 742, in send
+    raise ReadTimeout(e, request=request)
+requests.exceptions.ReadTimeout: HTTPConnectionPool(host='localhost', port=4318): Read timed out. (read timeout=10)
+[2026-08-07 09:22:12,403: ERROR/ForkPoolWorker-1] Exception while exporting Span batch.
+Traceback (most recent call last):
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/urllib3/connectionpool.py", line 534, in _make_request
+    response = conn.getresponse()
+               ^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/urllib3/connection.py", line 571, in getresponse
+    httplib_response = super().getresponse()
+                       ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/http/client.py", line 1415, in getresponse
+    response.begin()
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/http/client.py", line 330, in begin
+    version, status, reason = self._read_status()
+                              ^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/http/client.py", line 291, in _read_status
+    line = str(self.fp.readline(_MAXLINE + 1), "iso-8859-1")
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/socket.py", line 718, in readinto
+    return self._sock.recv_into(b)
+           ^^^^^^^^^^^^^^^^^^^^^^^
+TimeoutError: timed out
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/requests/adapters.py", line 696, in send
+    resp = conn.urlopen(
+           ^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/urllib3/connectionpool.py", line 842, in urlopen
+    retries = retries.increment(
+              ^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/urllib3/util/retry.py", line 498, in increment
+    raise reraise(type(error), error, _stacktrace)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/urllib3/util/util.py", line 39, in reraise
+    raise value
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/urllib3/connectionpool.py", line 788, in urlopen
+    response = self._make_request(
+               ^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/urllib3/connectionpool.py", line 536, in _make_request
+    self._raise_timeout(err=e, url=url, timeout_value=read_timeout)
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/urllib3/connectionpool.py", line 367, in _raise_timeout
+    raise ReadTimeoutError(
+urllib3.exceptions.ReadTimeoutError: HTTPConnectionPool(host='localhost', port=4318): Read timed out. (read timeout=10)
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/opentelemetry/sdk/trace/export/__init__.py", line 362, in _export_batch
+    self.span_exporter.export(self.spans_list[:idx])  # type: ignore
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/opentelemetry/exporter/otlp/proto/http/trace_exporter/__init__.py", line 204, in export
+    return self._export_serialized_spans(serialized_data)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/opentelemetry/exporter/otlp/proto/http/trace_exporter/__init__.py", line 174, in _export_serialized_spans
+    resp = self._export(serialized_data)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/opentelemetry/exporter/otlp/proto/http/trace_exporter/__init__.py", line 139, in _export
+    resp = self._session.post(
+           ^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/requests/sessions.py", line 712, in post
+    return self.request("POST", url, data=data, json=json, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/requests/sessions.py", line 651, in request
+    resp = self.send(prep, **send_kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/requests/sessions.py", line 784, in send
+    r = adapter.send(request, **kwargs)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/requests/adapters.py", line 742, in send
+    raise ReadTimeout(e, request=request)
+requests.exceptions.ReadTimeout: HTTPConnectionPool(host='localhost', port=4318): Read timed out. (read timeout=10)
+[2026-08-07 09:22:27,348: INFO/ForkPoolWorker-2] HTTP Request: POST http://127.0.0.1:18080/v1/visibility "HTTP/1.1 200 OK"
+[2026-08-07 09:22:27,834: INFO/ForkPoolWorker-1] HTTP Request: POST http://127.0.0.1:18080/v1/visibility "HTTP/1.1 200 OK"
+[2026-08-07 09:22:30,681: WARNING/ForkPoolWorker-2] 2026-08-07 09:22:29,882 [WARNING][_recover]: Connection recovery failed (connection_manager.py:676)
+Traceback (most recent call last):
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 250, in _wait_for_channel_ready
+    target_final_channel, target_stub = self._setup_identifier_interceptor(
+                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 443, in _setup_identifier_interceptor
+    else self._internal_register(user, host, stub=target_stub, timeout=timeout)
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 3113, in _internal_register
+    response = target_stub.Connect(request=req, timeout=kwargs.get("timeout"))
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/grpc/_channel.py", line 1181, in __call__
+    return _end_unary_response_blocking(state, call, False, None)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/grpc/_channel.py", line 1006, in _end_unary_response_blocking
+    raise _InactiveRpcError(state)  # pytype: disable=not-instantiable
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+grpc._channel._InactiveRpcError: <_InactiveRpcError of RPC that terminated with:
+	status = StatusCode.UNAVAILABLE
+	details = "failed to connect to all addresses; last error: UNAVAILABLE: ipv4:127.0.0.1:19530: recvmsg:Connection reset by peer"
+	debug_error_string = "UNKNOWN:Error received from peer  {grpc_message:"failed to connect to all addresses; last error: UNAVAILABLE: ipv4:127.0.0.1:19530: recvmsg:Connection reset by peer", grpc_status:14, created_time:"2026-08-07T09:22:29.872595667+08:00"}"
+>
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/connection_manager.py", line 672, in _recover
+    managed.handler.reconnect(address=new_address, timeout=managed.connect_timeout)
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 311, in reconnect
+    new_final_channel, new_stub = self._wait_for_channel_ready(
+                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 257, in _wait_for_channel_ready
+    raise MilvusException(
+pymilvus.exceptions.MilvusException: <MilvusException: (code=2, message=Fail connecting to server on localhost:19530, illegal connection params or server unavailable)>
+[2026-08-07 09:22:30,681: WARNING/ForkPoolWorker-1] 2026-08-07 09:22:29,882 [WARNING][_recover]: Connection recovery failed (connection_manager.py:676)
+Traceback (most recent call last):
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 250, in _wait_for_channel_ready
+    target_final_channel, target_stub = self._setup_identifier_interceptor(
+                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 443, in _setup_identifier_interceptor
+    else self._internal_register(user, host, stub=target_stub, timeout=timeout)
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 3113, in _internal_register
+    response = target_stub.Connect(request=req, timeout=kwargs.get("timeout"))
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/grpc/_channel.py", line 1181, in __call__
+    return _end_unary_response_blocking(state, call, False, None)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/grpc/_channel.py", line 1006, in _end_unary_response_blocking
+    raise _InactiveRpcError(state)  # pytype: disable=not-instantiable
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+grpc._channel._InactiveRpcError: <_InactiveRpcError of RPC that terminated with:
+	status = StatusCode.UNAVAILABLE
+	details = "failed to connect to all addresses; last error: UNAVAILABLE: ipv4:127.0.0.1:19530: recvmsg:Connection reset by peer"
+	debug_error_string = "UNKNOWN:Error received from peer  {created_time:"2026-08-07T09:22:29.872573813+08:00", grpc_status:14, grpc_message:"failed to connect to all addresses; last error: UNAVAILABLE: ipv4:127.0.0.1:19530: recvmsg:Connection reset by peer"}"
+>
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/connection_manager.py", line 672, in _recover
+    managed.handler.reconnect(address=new_address, timeout=managed.connect_timeout)
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 311, in reconnect
+    new_final_channel, new_stub = self._wait_for_channel_ready(
+                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 257, in _wait_for_channel_ready
+    raise MilvusException(
+pymilvus.exceptions.MilvusException: <MilvusException: (code=2, message=Fail connecting to server on localhost:19530, illegal connection params or server unavailable)>
+[2026-08-07 09:22:30,683: WARNING/ForkPoolWorker-1] 2026-08-07 09:22:30,683 [WARNING][_recover]: Connection recovery failed (connection_manager.py:676)
+Traceback (most recent call last):
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 250, in _wait_for_channel_ready
+    target_final_channel, target_stub = self._setup_identifier_interceptor(
+                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 443, in _setup_identifier_interceptor
+    else self._internal_register(user, host, stub=target_stub, timeout=timeout)
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 3113, in _internal_register
+    response = target_stub.Connect(request=req, timeout=kwargs.get("timeout"))
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/grpc/_channel.py", line 1181, in __call__
+    return _end_unary_response_blocking(state, call, False, None)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/grpc/_channel.py", line 1006, in _end_unary_response_blocking
+    raise _InactiveRpcError(state)  # pytype: disable=not-instantiable
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+grpc._channel._InactiveRpcError: <_InactiveRpcError of RPC that terminated with:
+	status = StatusCode.UNAVAILABLE
+	details = "failed to connect to all addresses; last error: UNAVAILABLE: ipv4:127.0.0.1:19530: Socket closed"
+	debug_error_string = "UNKNOWN:Error received from peer  {created_time:"2026-08-07T09:22:30.683186346+08:00", grpc_status:14, grpc_message:"failed to connect to all addresses; last error: UNAVAILABLE: ipv4:127.0.0.1:19530: Socket closed"}"
+>
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/connection_manager.py", line 672, in _recover
+    managed.handler.reconnect(address=new_address, timeout=managed.connect_timeout)
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 311, in reconnect
+    new_final_channel, new_stub = self._wait_for_channel_ready(
+                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 257, in _wait_for_channel_ready
+    raise MilvusException(
+pymilvus.exceptions.MilvusException: <MilvusException: (code=2, message=Fail connecting to server on localhost:19530, illegal connection params or server unavailable)>
+[2026-08-07 09:22:30,683: WARNING/ForkPoolWorker-2] 2026-08-07 09:22:30,683 [WARNING][_recover]: Connection recovery failed (connection_manager.py:676)
+Traceback (most recent call last):
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 250, in _wait_for_channel_ready
+    target_final_channel, target_stub = self._setup_identifier_interceptor(
+                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 443, in _setup_identifier_interceptor
+    else self._internal_register(user, host, stub=target_stub, timeout=timeout)
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 3113, in _internal_register
+    response = target_stub.Connect(request=req, timeout=kwargs.get("timeout"))
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/grpc/_channel.py", line 1181, in __call__
+    return _end_unary_response_blocking(state, call, False, None)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/grpc/_channel.py", line 1006, in _end_unary_response_blocking
+    raise _InactiveRpcError(state)  # pytype: disable=not-instantiable
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+grpc._channel._InactiveRpcError: <_InactiveRpcError of RPC that terminated with:
+	status = StatusCode.UNAVAILABLE
+	details = "failed to connect to all addresses; last error: UNAVAILABLE: ipv4:127.0.0.1:19530: Socket closed"
+	debug_error_string = "UNKNOWN:Error received from peer  {created_time:"2026-08-07T09:22:30.683188355+08:00", grpc_status:14, grpc_message:"failed to connect to all addresses; last error: UNAVAILABLE: ipv4:127.0.0.1:19530: Socket closed"}"
+>
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/connection_manager.py", line 672, in _recover
+    managed.handler.reconnect(address=new_address, timeout=managed.connect_timeout)
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 311, in reconnect
+    new_final_channel, new_stub = self._wait_for_channel_ready(
+                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 257, in _wait_for_channel_ready
+    raise MilvusException(
+pymilvus.exceptions.MilvusException: <MilvusException: (code=2, message=Fail connecting to server on localhost:19530, illegal connection params or server unavailable)>
+[2026-08-07 09:22:30,683: WARNING/ForkPoolWorker-1] {'doc_id': '5b869800-fae6-4f24-b37e-6deecbbd305e', 'kb_id': 'a6a9f8c0-133a-4b2f-b3d8-8919b4fc187c', 'error': '<MilvusException: (code=2, message=Fail connecting to server on localhost:19530, illegal connection params or server unavailable)>', 'event': 'stamp_failed_retrying', 'level': 'warning', 'timestamp': '2026-08-07T01:22:30.683730Z'}
+[2026-08-07 09:22:30,683: WARNING/ForkPoolWorker-2] {'doc_id': 'b1111245-a900-4a58-bbb5-7b81e7ae94ab', 'kb_id': 'a6a9f8c0-133a-4b2f-b3d8-8919b4fc187c', 'error': '<MilvusException: (code=2, message=Fail connecting to server on localhost:19530, illegal connection params or server unavailable)>', 'event': 'stamp_failed_retrying', 'level': 'warning', 'timestamp': '2026-08-07T01:22:30.683751Z'}
+[2026-08-07 09:22:30,683: ERROR/ForkPoolWorker-1] {'doc_id': '5b869800-fae6-4f24-b37e-6deecbbd305e', 'kb_id': 'a6a9f8c0-133a-4b2f-b3d8-8919b4fc187c', 'retries': 5, 'event': 'stamp_dead_letter', 'level': 'error', 'timestamp': '2026-08-07T01:22:30.683796Z'}
+[2026-08-07 09:22:30,683: ERROR/ForkPoolWorker-2] {'doc_id': 'b1111245-a900-4a58-bbb5-7b81e7ae94ab', 'kb_id': 'a6a9f8c0-133a-4b2f-b3d8-8919b4fc187c', 'retries': 5, 'event': 'stamp_dead_letter', 'level': 'error', 'timestamp': '2026-08-07T01:22:30.683814Z'}
+[2026-08-07 09:22:30,684: INFO/ForkPoolWorker-1] Task src.ingest.service.stamp_channel_task[ab6bb98e-8085-4494-aa51-83f273d675d6] succeeded in 2.8788691669997206s: {'status': 'dead_letter', 'doc_id': '5b869800-fae6-4f24-b37e-6deecbbd305e', 'kb_id': 'a6a9f8c0-133a-4b2f-b3d8-8919b4fc187c'}
+[2026-08-07 09:22:30,684: INFO/ForkPoolWorker-2] Task src.ingest.service.stamp_channel_task[db29d820-6c58-44c5-b7d7-62008d2d693b] succeeded in 3.3526686929999414s: {'status': 'dead_letter', 'doc_id': 'b1111245-a900-4a58-bbb5-7b81e7ae94ab', 'kb_id': 'a6a9f8c0-133a-4b2f-b3d8-8919b4fc187c'}
+[2026-08-07 09:22:30,693: INFO/ForkPoolWorker-1] HTTP Request: POST http://127.0.0.1:18080/v1/visibility "HTTP/1.1 200 OK"
+[2026-08-07 09:22:30,693: INFO/ForkPoolWorker-2] HTTP Request: POST http://127.0.0.1:18080/v1/visibility "HTTP/1.1 200 OK"
+[2026-08-07 09:22:30,695: WARNING/ForkPoolWorker-1] 2026-08-07 09:22:30,695 [WARNING][_recover]: Connection recovery failed (connection_manager.py:676)
+Traceback (most recent call last):
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 250, in _wait_for_channel_ready
+    target_final_channel, target_stub = self._setup_identifier_interceptor(
+                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 443, in _setup_identifier_interceptor
+    else self._internal_register(user, host, stub=target_stub, timeout=timeout)
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 3113, in _internal_register
+    response = target_stub.Connect(request=req, timeout=kwargs.get("timeout"))
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/grpc/_channel.py", line 1181, in __call__
+    return _end_unary_response_blocking(state, call, False, None)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/grpc/_channel.py", line 1006, in _end_unary_response_blocking
+    raise _InactiveRpcError(state)  # pytype: disable=not-instantiable
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+grpc._channel._InactiveRpcError: <_InactiveRpcError of RPC that terminated with:
+	status = StatusCode.UNAVAILABLE
+	details = "failed to connect to all addresses; last error: UNAVAILABLE: ipv4:127.0.0.1:19530: recvmsg:Connection reset by peer"
+	debug_error_string = "UNKNOWN:Error received from peer  {grpc_message:"failed to connect to all addresses; last error: UNAVAILABLE: ipv4:127.0.0.1:19530: recvmsg:Connection reset by peer", grpc_status:14, created_time:"2026-08-07T09:22:30.695251503+08:00"}"
+>
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/connection_manager.py", line 672, in _recover
+    managed.handler.reconnect(address=new_address, timeout=managed.connect_timeout)
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 311, in reconnect
+    new_final_channel, new_stub = self._wait_for_channel_ready(
+                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 257, in _wait_for_channel_ready
+    raise MilvusException(
+pymilvus.exceptions.MilvusException: <MilvusException: (code=2, message=Fail connecting to server on localhost:19530, illegal connection params or server unavailable)>
+[2026-08-07 09:22:30,695: WARNING/ForkPoolWorker-2] 2026-08-07 09:22:30,695 [WARNING][_recover]: Connection recovery failed (connection_manager.py:676)
+Traceback (most recent call last):
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 250, in _wait_for_channel_ready
+    target_final_channel, target_stub = self._setup_identifier_interceptor(
+                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 443, in _setup_identifier_interceptor
+    else self._internal_register(user, host, stub=target_stub, timeout=timeout)
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 3113, in _internal_register
+    response = target_stub.Connect(request=req, timeout=kwargs.get("timeout"))
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/grpc/_channel.py", line 1181, in __call__
+    return _end_unary_response_blocking(state, call, False, None)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/grpc/_channel.py", line 1006, in _end_unary_response_blocking
+    raise _InactiveRpcError(state)  # pytype: disable=not-instantiable
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+grpc._channel._InactiveRpcError: <_InactiveRpcError of RPC that terminated with:
+	status = StatusCode.UNAVAILABLE
+	details = "failed to connect to all addresses; last error: UNAVAILABLE: ipv4:127.0.0.1:19530: recvmsg:Connection reset by peer"
+	debug_error_string = "UNKNOWN:Error received from peer  {created_time:"2026-08-07T09:22:30.695332564+08:00", grpc_status:14, grpc_message:"failed to connect to all addresses; last error: UNAVAILABLE: ipv4:127.0.0.1:19530: recvmsg:Connection reset by peer"}"
+>
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/connection_manager.py", line 672, in _recover
+    managed.handler.reconnect(address=new_address, timeout=managed.connect_timeout)
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 311, in reconnect
+    new_final_channel, new_stub = self._wait_for_channel_ready(
+                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 257, in _wait_for_channel_ready
+    raise MilvusException(
+pymilvus.exceptions.MilvusException: <MilvusException: (code=2, message=Fail connecting to server on localhost:19530, illegal connection params or server unavailable)>
+[2026-08-07 09:22:30,697: WARNING/ForkPoolWorker-2] 2026-08-07 09:22:30,697 [WARNING][_recover]: Connection recovery failed (connection_manager.py:676)
+Traceback (most recent call last):
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 250, in _wait_for_channel_ready
+    target_final_channel, target_stub = self._setup_identifier_interceptor(
+                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 443, in _setup_identifier_interceptor
+    else self._internal_register(user, host, stub=target_stub, timeout=timeout)
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 3113, in _internal_register
+    response = target_stub.Connect(request=req, timeout=kwargs.get("timeout"))
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/grpc/_channel.py", line 1181, in __call__
+    return _end_unary_response_blocking(state, call, False, None)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/grpc/_channel.py", line 1006, in _end_unary_response_blocking
+    raise _InactiveRpcError(state)  # pytype: disable=not-instantiable
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+grpc._channel._InactiveRpcError: <_InactiveRpcError of RPC that terminated with:
+	status = StatusCode.UNAVAILABLE
+	details = "failed to connect to all addresses; last error: UNAVAILABLE: ipv4:127.0.0.1:19530: Socket closed"
+	debug_error_string = "UNKNOWN:Error received from peer  {grpc_message:"failed to connect to all addresses; last error: UNAVAILABLE: ipv4:127.0.0.1:19530: Socket closed", grpc_status:14, created_time:"2026-08-07T09:22:30.696918294+08:00"}"
+>
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/connection_manager.py", line 672, in _recover
+    managed.handler.reconnect(address=new_address, timeout=managed.connect_timeout)
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 311, in reconnect
+    new_final_channel, new_stub = self._wait_for_channel_ready(
+                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 257, in _wait_for_channel_ready
+    raise MilvusException(
+pymilvus.exceptions.MilvusException: <MilvusException: (code=2, message=Fail connecting to server on localhost:19530, illegal connection params or server unavailable)>
+[2026-08-07 09:22:30,697: WARNING/ForkPoolWorker-2] {'doc_id': 'ed98c37f-ef2c-4f5f-ab82-f4d5fce42b06', 'kb_id': 'a6a9f8c0-133a-4b2f-b3d8-8919b4fc187c', 'error': '<MilvusException: (code=2, message=Fail connecting to server on localhost:19530, illegal connection params or server unavailable)>', 'event': 'stamp_failed_retrying', 'level': 'warning', 'timestamp': '2026-08-07T01:22:30.697404Z'}
+[2026-08-07 09:22:30,697: ERROR/ForkPoolWorker-2] {'doc_id': 'ed98c37f-ef2c-4f5f-ab82-f4d5fce42b06', 'kb_id': 'a6a9f8c0-133a-4b2f-b3d8-8919b4fc187c', 'retries': 5, 'event': 'stamp_dead_letter', 'level': 'error', 'timestamp': '2026-08-07T01:22:30.697470Z'}
+[2026-08-07 09:22:30,697: INFO/ForkPoolWorker-2] Task src.ingest.service.stamp_channel_task[f7ceb4c1-20af-4ad5-864a-30b1e1e392ef] succeeded in 0.012958160000380303s: {'status': 'dead_letter', 'doc_id': 'ed98c37f-ef2c-4f5f-ab82-f4d5fce42b06', 'kb_id': 'a6a9f8c0-133a-4b2f-b3d8-8919b4fc187c'}
+[2026-08-07 09:22:30,704: INFO/ForkPoolWorker-2] HTTP Request: POST http://127.0.0.1:18080/v1/visibility "HTTP/1.1 200 OK"
+[2026-08-07 09:22:30,706: WARNING/ForkPoolWorker-2] 2026-08-07 09:22:30,706 [WARNING][_recover]: Connection recovery failed (connection_manager.py:676)
+Traceback (most recent call last):
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 250, in _wait_for_channel_ready
+    target_final_channel, target_stub = self._setup_identifier_interceptor(
+                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 443, in _setup_identifier_interceptor
+    else self._internal_register(user, host, stub=target_stub, timeout=timeout)
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 3113, in _internal_register
+    response = target_stub.Connect(request=req, timeout=kwargs.get("timeout"))
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/grpc/_channel.py", line 1181, in __call__
+    return _end_unary_response_blocking(state, call, False, None)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/grpc/_channel.py", line 1006, in _end_unary_response_blocking
+    raise _InactiveRpcError(state)  # pytype: disable=not-instantiable
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+grpc._channel._InactiveRpcError: <_InactiveRpcError of RPC that terminated with:
+	status = StatusCode.UNAVAILABLE
+	details = "failed to connect to all addresses; last error: UNAVAILABLE: ipv4:127.0.0.1:19530: recvmsg:Connection reset by peer"
+	debug_error_string = "UNKNOWN:Error received from peer  {created_time:"2026-08-07T09:22:30.705914355+08:00", grpc_status:14, grpc_message:"failed to connect to all addresses; last error: UNAVAILABLE: ipv4:127.0.0.1:19530: recvmsg:Connection reset by peer"}"
+>
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/connection_manager.py", line 672, in _recover
+    managed.handler.reconnect(address=new_address, timeout=managed.connect_timeout)
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 311, in reconnect
+    new_final_channel, new_stub = self._wait_for_channel_ready(
+                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 257, in _wait_for_channel_ready
+    raise MilvusException(
+pymilvus.exceptions.MilvusException: <MilvusException: (code=2, message=Fail connecting to server on localhost:19530, illegal connection params or server unavailable)>
+[2026-08-07 09:22:30,707: WARNING/ForkPoolWorker-2] 2026-08-07 09:22:30,707 [WARNING][_recover]: Connection recovery failed (connection_manager.py:676)
+Traceback (most recent call last):
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 250, in _wait_for_channel_ready
+    target_final_channel, target_stub = self._setup_identifier_interceptor(
+                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 443, in _setup_identifier_interceptor
+    else self._internal_register(user, host, stub=target_stub, timeout=timeout)
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 3113, in _internal_register
+    response = target_stub.Connect(request=req, timeout=kwargs.get("timeout"))
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/grpc/_channel.py", line 1181, in __call__
+    return _end_unary_response_blocking(state, call, False, None)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/grpc/_channel.py", line 1006, in _end_unary_response_blocking
+    raise _InactiveRpcError(state)  # pytype: disable=not-instantiable
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+grpc._channel._InactiveRpcError: <_InactiveRpcError of RPC that terminated with:
+	status = StatusCode.UNAVAILABLE
+	details = "failed to connect to all addresses; last error: UNAVAILABLE: ipv4:127.0.0.1:19530: recvmsg:Connection reset by peer"
+	debug_error_string = "UNKNOWN:Error received from peer  {grpc_message:"failed to connect to all addresses; last error: UNAVAILABLE: ipv4:127.0.0.1:19530: recvmsg:Connection reset by peer", grpc_status:14, created_time:"2026-08-07T09:22:30.707482143+08:00"}"
+>
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/connection_manager.py", line 672, in _recover
+    managed.handler.reconnect(address=new_address, timeout=managed.connect_timeout)
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 311, in reconnect
+    new_final_channel, new_stub = self._wait_for_channel_ready(
+                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 257, in _wait_for_channel_ready
+    raise MilvusException(
+pymilvus.exceptions.MilvusException: <MilvusException: (code=2, message=Fail connecting to server on localhost:19530, illegal connection params or server unavailable)>
+[2026-08-07 09:22:30,707: WARNING/ForkPoolWorker-2] {'doc_id': '75566d72-6b7d-40af-b586-b649a6802575', 'kb_id': 'a6a9f8c0-133a-4b2f-b3d8-8919b4fc187c', 'error': '<MilvusException: (code=2, message=Fail connecting to server on localhost:19530, illegal connection params or server unavailable)>', 'event': 'stamp_failed_retrying', 'level': 'warning', 'timestamp': '2026-08-07T01:22:30.707947Z'}
+[2026-08-07 09:22:30,708: ERROR/ForkPoolWorker-2] {'doc_id': '75566d72-6b7d-40af-b586-b649a6802575', 'kb_id': 'a6a9f8c0-133a-4b2f-b3d8-8919b4fc187c', 'retries': 5, 'event': 'stamp_dead_letter', 'level': 'error', 'timestamp': '2026-08-07T01:22:30.708011Z'}
+[2026-08-07 09:22:30,708: INFO/ForkPoolWorker-2] Task src.ingest.service.stamp_channel_task[f86e0f33-a756-4d7d-b2fd-12b256c7c2e5] succeeded in 0.009891620999951556s: {'status': 'dead_letter', 'doc_id': '75566d72-6b7d-40af-b586-b649a6802575', 'kb_id': 'a6a9f8c0-133a-4b2f-b3d8-8919b4fc187c'}
+[2026-08-07 09:22:31,257: INFO/ForkPoolWorker-2] HTTP Request: POST http://127.0.0.1:18080/v1/visibility "HTTP/1.1 200 OK"
+[2026-08-07 09:22:31,260: WARNING/ForkPoolWorker-2] 2026-08-07 09:22:31,260 [WARNING][_recover]: Connection recovery failed (connection_manager.py:676)
+Traceback (most recent call last):
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 250, in _wait_for_channel_ready
+    target_final_channel, target_stub = self._setup_identifier_interceptor(
+                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 443, in _setup_identifier_interceptor
+    else self._internal_register(user, host, stub=target_stub, timeout=timeout)
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 3113, in _internal_register
+    response = target_stub.Connect(request=req, timeout=kwargs.get("timeout"))
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/grpc/_channel.py", line 1181, in __call__
+    return _end_unary_response_blocking(state, call, False, None)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/grpc/_channel.py", line 1006, in _end_unary_response_blocking
+    raise _InactiveRpcError(state)  # pytype: disable=not-instantiable
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+grpc._channel._InactiveRpcError: <_InactiveRpcError of RPC that terminated with:
+	status = StatusCode.UNAVAILABLE
+	details = "failed to connect to all addresses; last error: UNAVAILABLE: ipv4:127.0.0.1:19530: recvmsg:Connection reset by peer"
+	debug_error_string = "UNKNOWN:Error received from peer  {created_time:"2026-08-07T09:22:31.260030038+08:00", grpc_status:14, grpc_message:"failed to connect to all addresses; last error: UNAVAILABLE: ipv4:127.0.0.1:19530: recvmsg:Connection reset by peer"}"
+>
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/connection_manager.py", line 672, in _recover
+    managed.handler.reconnect(address=new_address, timeout=managed.connect_timeout)
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 311, in reconnect
+    new_final_channel, new_stub = self._wait_for_channel_ready(
+                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 257, in _wait_for_channel_ready
+    raise MilvusException(
+pymilvus.exceptions.MilvusException: <MilvusException: (code=2, message=Fail connecting to server on localhost:19530, illegal connection params or server unavailable)>
+[2026-08-07 09:22:31,262: WARNING/ForkPoolWorker-2] 2026-08-07 09:22:31,261 [WARNING][_recover]: Connection recovery failed (connection_manager.py:676)
+Traceback (most recent call last):
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 250, in _wait_for_channel_ready
+    target_final_channel, target_stub = self._setup_identifier_interceptor(
+                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 443, in _setup_identifier_interceptor
+    else self._internal_register(user, host, stub=target_stub, timeout=timeout)
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 3113, in _internal_register
+    response = target_stub.Connect(request=req, timeout=kwargs.get("timeout"))
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/grpc/_channel.py", line 1181, in __call__
+    return _end_unary_response_blocking(state, call, False, None)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/grpc/_channel.py", line 1006, in _end_unary_response_blocking
+    raise _InactiveRpcError(state)  # pytype: disable=not-instantiable
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+grpc._channel._InactiveRpcError: <_InactiveRpcError of RPC that terminated with:
+	status = StatusCode.UNAVAILABLE
+	details = "failed to connect to all addresses; last error: UNAVAILABLE: ipv4:127.0.0.1:19530: recvmsg:Connection reset by peer"
+	debug_error_string = "UNKNOWN:Error received from peer  {created_time:"2026-08-07T09:22:31.261851928+08:00", grpc_status:14, grpc_message:"failed to connect to all addresses; last error: UNAVAILABLE: ipv4:127.0.0.1:19530: recvmsg:Connection reset by peer"}"
+>
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/connection_manager.py", line 672, in _recover
+    managed.handler.reconnect(address=new_address, timeout=managed.connect_timeout)
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 311, in reconnect
+    new_final_channel, new_stub = self._wait_for_channel_ready(
+                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 257, in _wait_for_channel_ready
+    raise MilvusException(
+pymilvus.exceptions.MilvusException: <MilvusException: (code=2, message=Fail connecting to server on localhost:19530, illegal connection params or server unavailable)>
+[2026-08-07 09:22:31,262: WARNING/ForkPoolWorker-2] {'doc_id': 'a32fb569-f73d-463f-9e45-f0108cd78d1f', 'kb_id': 'a6a9f8c0-133a-4b2f-b3d8-8919b4fc187c', 'error': '<MilvusException: (code=2, message=Fail connecting to server on localhost:19530, illegal connection params or server unavailable)>', 'event': 'stamp_failed_retrying', 'level': 'warning', 'timestamp': '2026-08-07T01:22:31.262400Z'}
+[2026-08-07 09:22:31,262: ERROR/ForkPoolWorker-2] {'doc_id': 'a32fb569-f73d-463f-9e45-f0108cd78d1f', 'kb_id': 'a6a9f8c0-133a-4b2f-b3d8-8919b4fc187c', 'retries': 5, 'event': 'stamp_dead_letter', 'level': 'error', 'timestamp': '2026-08-07T01:22:31.262470Z'}
+[2026-08-07 09:22:31,263: INFO/ForkPoolWorker-2] Task src.ingest.service.stamp_channel_task[a73ebc07-d629-42ef-8932-808e4ffa96ee] succeeded in 0.011508661999869219s: {'status': 'dead_letter', 'doc_id': 'a32fb569-f73d-463f-9e45-f0108cd78d1f', 'kb_id': 'a6a9f8c0-133a-4b2f-b3d8-8919b4fc187c'}
+[2026-08-07 09:22:31,773: INFO/ForkPoolWorker-2] HTTP Request: POST http://127.0.0.1:18080/v1/visibility "HTTP/1.1 200 OK"
+[2026-08-07 09:22:31,776: WARNING/ForkPoolWorker-2] 2026-08-07 09:22:31,775 [WARNING][_recover]: Connection recovery failed (connection_manager.py:676)
+Traceback (most recent call last):
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 250, in _wait_for_channel_ready
+    target_final_channel, target_stub = self._setup_identifier_interceptor(
+                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 443, in _setup_identifier_interceptor
+    else self._internal_register(user, host, stub=target_stub, timeout=timeout)
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 3113, in _internal_register
+    response = target_stub.Connect(request=req, timeout=kwargs.get("timeout"))
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/grpc/_channel.py", line 1181, in __call__
+    return _end_unary_response_blocking(state, call, False, None)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/grpc/_channel.py", line 1006, in _end_unary_response_blocking
+    raise _InactiveRpcError(state)  # pytype: disable=not-instantiable
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+grpc._channel._InactiveRpcError: <_InactiveRpcError of RPC that terminated with:
+	status = StatusCode.UNAVAILABLE
+	details = "failed to connect to all addresses; last error: UNAVAILABLE: ipv4:127.0.0.1:19530: recvmsg:Connection reset by peer"
+	debug_error_string = "UNKNOWN:Error received from peer  {grpc_message:"failed to connect to all addresses; last error: UNAVAILABLE: ipv4:127.0.0.1:19530: recvmsg:Connection reset by peer", grpc_status:14, created_time:"2026-08-07T09:22:31.775530426+08:00"}"
+>
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/connection_manager.py", line 672, in _recover
+    managed.handler.reconnect(address=new_address, timeout=managed.connect_timeout)
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 311, in reconnect
+    new_final_channel, new_stub = self._wait_for_channel_ready(
+                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 257, in _wait_for_channel_ready
+    raise MilvusException(
+pymilvus.exceptions.MilvusException: <MilvusException: (code=2, message=Fail connecting to server on localhost:19530, illegal connection params or server unavailable)>
+[2026-08-07 09:22:31,777: WARNING/ForkPoolWorker-2] 2026-08-07 09:22:31,777 [WARNING][_recover]: Connection recovery failed (connection_manager.py:676)
+Traceback (most recent call last):
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 250, in _wait_for_channel_ready
+    target_final_channel, target_stub = self._setup_identifier_interceptor(
+                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 443, in _setup_identifier_interceptor
+    else self._internal_register(user, host, stub=target_stub, timeout=timeout)
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 3113, in _internal_register
+    response = target_stub.Connect(request=req, timeout=kwargs.get("timeout"))
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/grpc/_channel.py", line 1181, in __call__
+    return _end_unary_response_blocking(state, call, False, None)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/grpc/_channel.py", line 1006, in _end_unary_response_blocking
+    raise _InactiveRpcError(state)  # pytype: disable=not-instantiable
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+grpc._channel._InactiveRpcError: <_InactiveRpcError of RPC that terminated with:
+	status = StatusCode.UNAVAILABLE
+	details = "failed to connect to all addresses; last error: UNAVAILABLE: ipv4:127.0.0.1:19530: recvmsg:Connection reset by peer"
+	debug_error_string = "UNKNOWN:Error received from peer  {created_time:"2026-08-07T09:22:31.777133896+08:00", grpc_status:14, grpc_message:"failed to connect to all addresses; last error: UNAVAILABLE: ipv4:127.0.0.1:19530: recvmsg:Connection reset by peer"}"
+>
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/connection_manager.py", line 672, in _recover
+    managed.handler.reconnect(address=new_address, timeout=managed.connect_timeout)
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 311, in reconnect
+    new_final_channel, new_stub = self._wait_for_channel_ready(
+                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 257, in _wait_for_channel_ready
+    raise MilvusException(
+pymilvus.exceptions.MilvusException: <MilvusException: (code=2, message=Fail connecting to server on localhost:19530, illegal connection params or server unavailable)>
+[2026-08-07 09:22:31,777: WARNING/ForkPoolWorker-2] {'doc_id': 'd2acf7fa-47d7-41ac-bf9a-f598a33e9b24', 'kb_id': 'a6a9f8c0-133a-4b2f-b3d8-8919b4fc187c', 'error': '<MilvusException: (code=2, message=Fail connecting to server on localhost:19530, illegal connection params or server unavailable)>', 'event': 'stamp_failed_retrying', 'level': 'warning', 'timestamp': '2026-08-07T01:22:31.777587Z'}
+[2026-08-07 09:22:31,777: ERROR/ForkPoolWorker-2] {'doc_id': 'd2acf7fa-47d7-41ac-bf9a-f598a33e9b24', 'kb_id': 'a6a9f8c0-133a-4b2f-b3d8-8919b4fc187c', 'retries': 5, 'event': 'stamp_dead_letter', 'level': 'error', 'timestamp': '2026-08-07T01:22:31.777657Z'}
+[2026-08-07 09:22:31,778: INFO/ForkPoolWorker-2] Task src.ingest.service.stamp_channel_task[793cd4a6-99ab-4513-8400-a8982e03b0a3] succeeded in 0.029177040000831767s: {'status': 'dead_letter', 'doc_id': 'd2acf7fa-47d7-41ac-bf9a-f598a33e9b24', 'kb_id': 'a6a9f8c0-133a-4b2f-b3d8-8919b4fc187c'}
+[2026-08-07 09:22:32,061: INFO/ForkPoolWorker-2] HTTP Request: POST http://127.0.0.1:18080/v1/visibility "HTTP/1.1 200 OK"
+[2026-08-07 09:22:32,063: WARNING/ForkPoolWorker-2] 2026-08-07 09:22:32,063 [WARNING][_recover]: Connection recovery failed (connection_manager.py:676)
+Traceback (most recent call last):
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 250, in _wait_for_channel_ready
+    target_final_channel, target_stub = self._setup_identifier_interceptor(
+                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 443, in _setup_identifier_interceptor
+    else self._internal_register(user, host, stub=target_stub, timeout=timeout)
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 3113, in _internal_register
+    response = target_stub.Connect(request=req, timeout=kwargs.get("timeout"))
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/grpc/_channel.py", line 1181, in __call__
+    return _end_unary_response_blocking(state, call, False, None)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/grpc/_channel.py", line 1006, in _end_unary_response_blocking
+    raise _InactiveRpcError(state)  # pytype: disable=not-instantiable
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+grpc._channel._InactiveRpcError: <_InactiveRpcError of RPC that terminated with:
+	status = StatusCode.UNAVAILABLE
+	details = "failed to connect to all addresses; last error: UNAVAILABLE: ipv4:127.0.0.1:19530: Socket closed"
+	debug_error_string = "UNKNOWN:Error received from peer  {grpc_message:"failed to connect to all addresses; last error: UNAVAILABLE: ipv4:127.0.0.1:19530: Socket closed", grpc_status:14, created_time:"2026-08-07T09:22:32.063034822+08:00"}"
+>
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/connection_manager.py", line 672, in _recover
+    managed.handler.reconnect(address=new_address, timeout=managed.connect_timeout)
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 311, in reconnect
+    new_final_channel, new_stub = self._wait_for_channel_ready(
+                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 257, in _wait_for_channel_ready
+    raise MilvusException(
+pymilvus.exceptions.MilvusException: <MilvusException: (code=2, message=Fail connecting to server on localhost:19530, illegal connection params or server unavailable)>
+[2026-08-07 09:22:32,065: WARNING/ForkPoolWorker-2] 2026-08-07 09:22:32,064 [WARNING][_recover]: Connection recovery failed (connection_manager.py:676)
+Traceback (most recent call last):
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 250, in _wait_for_channel_ready
+    target_final_channel, target_stub = self._setup_identifier_interceptor(
+                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 443, in _setup_identifier_interceptor
+    else self._internal_register(user, host, stub=target_stub, timeout=timeout)
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 3113, in _internal_register
+    response = target_stub.Connect(request=req, timeout=kwargs.get("timeout"))
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/grpc/_channel.py", line 1181, in __call__
+    return _end_unary_response_blocking(state, call, False, None)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/grpc/_channel.py", line 1006, in _end_unary_response_blocking
+    raise _InactiveRpcError(state)  # pytype: disable=not-instantiable
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+grpc._channel._InactiveRpcError: <_InactiveRpcError of RPC that terminated with:
+	status = StatusCode.UNAVAILABLE
+	details = "failed to connect to all addresses; last error: UNAVAILABLE: ipv4:127.0.0.1:19530: recvmsg:Connection reset by peer"
+	debug_error_string = "UNKNOWN:Error received from peer  {created_time:"2026-08-07T09:22:32.064627409+08:00", grpc_status:14, grpc_message:"failed to connect to all addresses; last error: UNAVAILABLE: ipv4:127.0.0.1:19530: recvmsg:Connection reset by peer"}"
+>
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/connection_manager.py", line 672, in _recover
+    managed.handler.reconnect(address=new_address, timeout=managed.connect_timeout)
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 311, in reconnect
+    new_final_channel, new_stub = self._wait_for_channel_ready(
+                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 257, in _wait_for_channel_ready
+    raise MilvusException(
+pymilvus.exceptions.MilvusException: <MilvusException: (code=2, message=Fail connecting to server on localhost:19530, illegal connection params or server unavailable)>
+[2026-08-07 09:22:32,065: WARNING/ForkPoolWorker-2] {'doc_id': 'fd9cb055-7dfb-4158-862d-ce149b2a190f', 'kb_id': 'a6a9f8c0-133a-4b2f-b3d8-8919b4fc187c', 'error': '<MilvusException: (code=2, message=Fail connecting to server on localhost:19530, illegal connection params or server unavailable)>', 'event': 'stamp_failed_retrying', 'level': 'warning', 'timestamp': '2026-08-07T01:22:32.065084Z'}
+[2026-08-07 09:22:32,065: ERROR/ForkPoolWorker-2] {'doc_id': 'fd9cb055-7dfb-4158-862d-ce149b2a190f', 'kb_id': 'a6a9f8c0-133a-4b2f-b3d8-8919b4fc187c', 'retries': 5, 'event': 'stamp_dead_letter', 'level': 'error', 'timestamp': '2026-08-07T01:22:32.065152Z'}
+[2026-08-07 09:22:32,065: INFO/ForkPoolWorker-2] Task src.ingest.service.stamp_channel_task[fb65311f-5f71-4d58-93f6-674015828dd3] succeeded in 0.02839495900025213s: {'status': 'dead_letter', 'doc_id': 'fd9cb055-7dfb-4158-862d-ce149b2a190f', 'kb_id': 'a6a9f8c0-133a-4b2f-b3d8-8919b4fc187c'}
+[2026-08-07 09:22:35,196: WARNING/ForkPoolWorker-1] 2026-08-07 09:22:35,195 [WARNING][_recover]: Connection recovery failed (connection_manager.py:676)
+Traceback (most recent call last):
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 250, in _wait_for_channel_ready
+    target_final_channel, target_stub = self._setup_identifier_interceptor(
+                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 443, in _setup_identifier_interceptor
+    else self._internal_register(user, host, stub=target_stub, timeout=timeout)
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 3113, in _internal_register
+    response = target_stub.Connect(request=req, timeout=kwargs.get("timeout"))
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/grpc/_channel.py", line 1181, in __call__
+    return _end_unary_response_blocking(state, call, False, None)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/grpc/_channel.py", line 1006, in _end_unary_response_blocking
+    raise _InactiveRpcError(state)  # pytype: disable=not-instantiable
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+grpc._channel._InactiveRpcError: <_InactiveRpcError of RPC that terminated with:
+	status = StatusCode.UNAVAILABLE
+	details = "failed to connect to all addresses; last error: UNAVAILABLE: ipv4:127.0.0.1:19530: recvmsg:Connection reset by peer"
+	debug_error_string = "UNKNOWN:Error received from peer  {created_time:"2026-08-07T09:22:35.195842212+08:00", grpc_status:14, grpc_message:"failed to connect to all addresses; last error: UNAVAILABLE: ipv4:127.0.0.1:19530: recvmsg:Connection reset by peer"}"
+>
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/connection_manager.py", line 672, in _recover
+    managed.handler.reconnect(address=new_address, timeout=managed.connect_timeout)
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 311, in reconnect
+    new_final_channel, new_stub = self._wait_for_channel_ready(
+                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 257, in _wait_for_channel_ready
+    raise MilvusException(
+pymilvus.exceptions.MilvusException: <MilvusException: (code=2, message=Fail connecting to server on localhost:19530, illegal connection params or server unavailable)>
+[2026-08-07 09:22:35,196: WARNING/ForkPoolWorker-1] {'doc_id': '5e1b424b-aa74-431e-9a35-9246b8cd8f1b', 'kb_id': 'a6a9f8c0-133a-4b2f-b3d8-8919b4fc187c', 'error': '<MilvusException: (code=2, message=Fail connecting to server on localhost:19530, illegal connection params or server unavailable)>', 'event': 'stamp_failed_retrying', 'level': 'warning', 'timestamp': '2026-08-07T01:22:35.196357Z'}
+[2026-08-07 09:22:35,196: ERROR/ForkPoolWorker-1] {'doc_id': '5e1b424b-aa74-431e-9a35-9246b8cd8f1b', 'kb_id': 'a6a9f8c0-133a-4b2f-b3d8-8919b4fc187c', 'retries': 5, 'event': 'stamp_dead_letter', 'level': 'error', 'timestamp': '2026-08-07T01:22:35.196418Z'}
+[2026-08-07 09:22:35,196: INFO/ForkPoolWorker-1] Task src.ingest.service.stamp_channel_task[e5c5c36d-9541-4d8f-9ecb-6c41b20852ff] succeeded in 4.511946646999604s: {'status': 'dead_letter', 'doc_id': '5e1b424b-aa74-431e-9a35-9246b8cd8f1b', 'kb_id': 'a6a9f8c0-133a-4b2f-b3d8-8919b4fc187c'}
+[2026-08-07 09:22:59,359: INFO/ForkPoolWorker-1] HTTP Request: POST http://127.0.0.1:18080/v1/visibility "HTTP/1.1 200 OK"
+[2026-08-07 09:22:59,360: INFO/ForkPoolWorker-2] HTTP Request: POST http://127.0.0.1:18080/v1/visibility "HTTP/1.1 200 OK"
+[2026-08-07 09:22:59,361: WARNING/ForkPoolWorker-1] 2026-08-07 09:22:59,361 [WARNING][_recover]: Connection recovery failed (connection_manager.py:676)
+Traceback (most recent call last):
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 250, in _wait_for_channel_ready
+    target_final_channel, target_stub = self._setup_identifier_interceptor(
+                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 443, in _setup_identifier_interceptor
+    else self._internal_register(user, host, stub=target_stub, timeout=timeout)
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 3113, in _internal_register
+    response = target_stub.Connect(request=req, timeout=kwargs.get("timeout"))
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/grpc/_channel.py", line 1181, in __call__
+    return _end_unary_response_blocking(state, call, False, None)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/grpc/_channel.py", line 1006, in _end_unary_response_blocking
+    raise _InactiveRpcError(state)  # pytype: disable=not-instantiable
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+grpc._channel._InactiveRpcError: <_InactiveRpcError of RPC that terminated with:
+	status = StatusCode.UNAVAILABLE
+	details = "failed to connect to all addresses; last error: UNKNOWN: ipv4:127.0.0.1:19530: Failed to connect to remote host: connect: Connection refused (111)"
+	debug_error_string = "UNKNOWN:Error received from peer  {created_time:"2026-08-07T09:22:59.361232703+08:00", grpc_status:14, grpc_message:"failed to connect to all addresses; last error: UNKNOWN: ipv4:127.0.0.1:19530: Failed to connect to remote host: connect: Connection refused (111)"}"
+>
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/connection_manager.py", line 672, in _recover
+    managed.handler.reconnect(address=new_address, timeout=managed.connect_timeout)
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 311, in reconnect
+    new_final_channel, new_stub = self._wait_for_channel_ready(
+                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 257, in _wait_for_channel_ready
+    raise MilvusException(
+pymilvus.exceptions.MilvusException: <MilvusException: (code=2, message=Fail connecting to server on localhost:19530, illegal connection params or server unavailable)>
+[2026-08-07 09:22:59,361: WARNING/ForkPoolWorker-2] 2026-08-07 09:22:59,361 [WARNING][_recover]: Connection recovery failed (connection_manager.py:676)
+Traceback (most recent call last):
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 250, in _wait_for_channel_ready
+    target_final_channel, target_stub = self._setup_identifier_interceptor(
+                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 443, in _setup_identifier_interceptor
+    else self._internal_register(user, host, stub=target_stub, timeout=timeout)
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 3113, in _internal_register
+    response = target_stub.Connect(request=req, timeout=kwargs.get("timeout"))
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/grpc/_channel.py", line 1181, in __call__
+    return _end_unary_response_blocking(state, call, False, None)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/grpc/_channel.py", line 1006, in _end_unary_response_blocking
+    raise _InactiveRpcError(state)  # pytype: disable=not-instantiable
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+grpc._channel._InactiveRpcError: <_InactiveRpcError of RPC that terminated with:
+	status = StatusCode.UNAVAILABLE
+	details = "failed to connect to all addresses; last error: UNKNOWN: ipv4:127.0.0.1:19530: Failed to connect to remote host: connect: Connection refused (111)"
+	debug_error_string = "UNKNOWN:Error received from peer  {grpc_message:"failed to connect to all addresses; last error: UNKNOWN: ipv4:127.0.0.1:19530: Failed to connect to remote host: connect: Connection refused (111)", grpc_status:14, created_time:"2026-08-07T09:22:59.361342893+08:00"}"
+>
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/connection_manager.py", line 672, in _recover
+    managed.handler.reconnect(address=new_address, timeout=managed.connect_timeout)
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 311, in reconnect
+    new_final_channel, new_stub = self._wait_for_channel_ready(
+                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 257, in _wait_for_channel_ready
+    raise MilvusException(
+pymilvus.exceptions.MilvusException: <MilvusException: (code=2, message=Fail connecting to server on localhost:19530, illegal connection params or server unavailable)>
+[2026-08-07 09:22:59,363: WARNING/ForkPoolWorker-1] 2026-08-07 09:22:59,362 [WARNING][_recover]: Connection recovery failed (connection_manager.py:676)
+Traceback (most recent call last):
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 250, in _wait_for_channel_ready
+    target_final_channel, target_stub = self._setup_identifier_interceptor(
+                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 443, in _setup_identifier_interceptor
+    else self._internal_register(user, host, stub=target_stub, timeout=timeout)
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 3113, in _internal_register
+    response = target_stub.Connect(request=req, timeout=kwargs.get("timeout"))
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/grpc/_channel.py", line 1181, in __call__
+    return _end_unary_response_blocking(state, call, False, None)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/grpc/_channel.py", line 1006, in _end_unary_response_blocking
+    raise _InactiveRpcError(state)  # pytype: disable=not-instantiable
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+grpc._channel._InactiveRpcError: <_InactiveRpcError of RPC that terminated with:
+	status = StatusCode.UNAVAILABLE
+	details = "failed to connect to all addresses; last error: UNKNOWN: ipv4:127.0.0.1:19530: Failed to connect to remote host: connect: Connection refused (111)"
+	debug_error_string = "UNKNOWN:Error received from peer  {created_time:"2026-08-07T09:22:59.36270246+08:00", grpc_status:14, grpc_message:"failed to connect to all addresses; last error: UNKNOWN: ipv4:127.0.0.1:19530: Failed to connect to remote host: connect: Connection refused (111)"}"
+>
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/connection_manager.py", line 672, in _recover
+    managed.handler.reconnect(address=new_address, timeout=managed.connect_timeout)
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 311, in reconnect
+    new_final_channel, new_stub = self._wait_for_channel_ready(
+                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 257, in _wait_for_channel_ready
+    raise MilvusException(
+pymilvus.exceptions.MilvusException: <MilvusException: (code=2, message=Fail connecting to server on localhost:19530, illegal connection params or server unavailable)>
+[2026-08-07 09:22:59,363: WARNING/ForkPoolWorker-1] {'doc_id': '88fb50c9-e14b-47a3-824c-b6b8056bfbd9', 'kb_id': 'a6a9f8c0-133a-4b2f-b3d8-8919b4fc187c', 'error': '<MilvusException: (code=2, message=Fail connecting to server on localhost:19530, illegal connection params or server unavailable)>', 'event': 'stamp_failed_retrying', 'level': 'warning', 'timestamp': '2026-08-07T01:22:59.363167Z'}
+[2026-08-07 09:22:59,363: WARNING/ForkPoolWorker-2] 2026-08-07 09:22:59,362 [WARNING][_recover]: Connection recovery failed (connection_manager.py:676)
+Traceback (most recent call last):
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 250, in _wait_for_channel_ready
+    target_final_channel, target_stub = self._setup_identifier_interceptor(
+                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 443, in _setup_identifier_interceptor
+    else self._internal_register(user, host, stub=target_stub, timeout=timeout)
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 3113, in _internal_register
+    response = target_stub.Connect(request=req, timeout=kwargs.get("timeout"))
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/grpc/_channel.py", line 1181, in __call__
+    return _end_unary_response_blocking(state, call, False, None)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/grpc/_channel.py", line 1006, in _end_unary_response_blocking
+    raise _InactiveRpcError(state)  # pytype: disable=not-instantiable
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+grpc._channel._InactiveRpcError: <_InactiveRpcError of RPC that terminated with:
+	status = StatusCode.UNAVAILABLE
+	details = "failed to connect to all addresses; last error: UNKNOWN: ipv4:127.0.0.1:19530: Failed to connect to remote host: connect: Connection refused (111)"
+	debug_error_string = "UNKNOWN:Error received from peer  {created_time:"2026-08-07T09:22:59.362820369+08:00", grpc_status:14, grpc_message:"failed to connect to all addresses; last error: UNKNOWN: ipv4:127.0.0.1:19530: Failed to connect to remote host: connect: Connection refused (111)"}"
+>
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/connection_manager.py", line 672, in _recover
+    managed.handler.reconnect(address=new_address, timeout=managed.connect_timeout)
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 311, in reconnect
+    new_final_channel, new_stub = self._wait_for_channel_ready(
+                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/mfkcel/miniconda3/envs/rag_dev_v14/lib/python3.11/site-packages/pymilvus/client/grpc_handler.py", line 257, in _wait_for_channel_ready
+    raise MilvusException(
+pymilvus.exceptions.MilvusException: <MilvusException: (code=2, message=Fail connecting to server on localhost:19530, illegal connection params or server unavailable)>
+[2026-08-07 09:22:59,363: ERROR/ForkPoolWorker-1] {'doc_id': '88fb50c9-e14b-47a3-824c-b6b8056bfbd9', 'kb_id': 'a6a9f8c0-133a-4b2f-b3d8-8919b4fc187c', 'retries': 5, 'event': 'stamp_dead_letter', 'level': 'error', 'timestamp': '2026-08-07T01:22:59.363229Z'}
+[2026-08-07 09:22:59,363: WARNING/ForkPoolWorker-2] {'doc_id': 'df9d6795-802d-4409-88bf-70fe350740f9', 'kb_id': 'a6a9f8c0-133a-4b2f-b3d8-8919b4fc187c', 'error': '<MilvusException: (code=2, message=Fail connecting to server on localhost:19530, illegal connection params or server unavailable)>', 'event': 'stamp_failed_retrying', 'level': 'warning', 'timestamp': '2026-08-07T01:22:59.363276Z'}
+[2026-08-07 09:22:59,363: ERROR/ForkPoolWorker-2] {'doc_id': 'df9d6795-802d-4409-88bf-70fe350740f9', 'kb_id': 'a6a9f8c0-133a-4b2f-b3d8-8919b4fc187c', 'retries': 5, 'event': 'stamp_dead_letter', 'level': 'error', 'timestamp': '2026-08-07T01:22:59.363338Z'}
+[2026-08-07 09:22:59,363: INFO/ForkPoolWorker-1] Task src.ingest.service.stamp_channel_task[243047f1-42f1-49d4-b942-35e135a105b0] succeeded in 0.012121671999921091s: {'status': 'dead_letter', 'doc_id': '88fb50c9-e14b-47a3-824c-b6b8056bfbd9', 'kb_id': 'a6a9f8c0-133a-4b2f-b3d8-8919b4fc187c'}
+[2026-08-07 09:22:59,363: INFO/ForkPoolWorker-2] Task src.ingest.service.stamp_channel_task[c0fa120c-4aab-4e54-8a11-456af25637b7] succeeded in 0.012170195000180684s: {'status': 'dead_letter', 'doc_id': 'df9d6795-802d-4409-88bf-70fe350740f9', 'kb_id': 'a6a9f8c0-133a-4b2f-b3d8-8919b4fc187c'}
+[2026-08-07 09:25:32,663: INFO/MainProcess] Task src.ingest.service.stamp_channel_task[2ba6d8b8-0797-48dc-b9c7-9da534bff4b6] received
+[2026-08-07 09:25:32,669: INFO/ForkPoolWorker-2] HTTP Request: POST http://127.0.0.1:18080/v1/visibility "HTTP/1.1 200 OK"
+[2026-08-07 09:25:32,877: INFO/MainProcess] Task src.ingest.service.stamp_channel_task[6948d18e-6896-4ba0-bd1a-ce7dcea4a90c] received
+[2026-08-07 09:25:32,883: INFO/ForkPoolWorker-1] HTTP Request: POST http://127.0.0.1:18080/v1/visibility "HTTP/1.1 200 OK"
+[2026-08-07 09:25:32,892: WARNING/ForkPoolWorker-2] {'doc_id': 'b1111245-a900-4a58-bbb5-7b81e7ae94ab', 'kb_id': 'a6a9f8c0-133a-4b2f-b3d8-8919b4fc187c', 'error': 'No chunks found for doc=b1111245-a900-4a58-bbb5-7b81e7ae94ab kb=a6a9f8c0-133a-4b2f-b3d8-8919b4fc187c — stamp cannot be applied. Chunks may not have been ingested yet. Retrying with backoff.', 'event': 'stamp_failed_retrying', 'level': 'warning', 'timestamp': '2026-08-07T01:25:32.892204Z'}
+[2026-08-07 09:25:32,899: WARNING/ForkPoolWorker-1] {'doc_id': 'ed98c37f-ef2c-4f5f-ab82-f4d5fce42b06', 'kb_id': 'a6a9f8c0-133a-4b2f-b3d8-8919b4fc187c', 'error': 'No chunks found for doc=ed98c37f-ef2c-4f5f-ab82-f4d5fce42b06 kb=a6a9f8c0-133a-4b2f-b3d8-8919b4fc187c — stamp cannot be applied. Chunks may not have been ingested yet. Retrying with backoff.', 'event': 'stamp_failed_retrying', 'level': 'warning', 'timestamp': '2026-08-07T01:25:32.899237Z'}
+[2026-08-07 09:25:32,912: WARNING/ForkPoolWorker-2] {'doc_id': 'b1111245-a900-4a58-bbb5-7b81e7ae94ab', 'kb_id': 'a6a9f8c0-133a-4b2f-b3d8-8919b4fc187c', 'parse_status': 'completed', 'mount_id': '6b096338-1e9a-4119-a090-9b05a1cd08c6', 'event': 'stamp_no_chunks_ingest_status', 'level': 'warning', 'timestamp': '2026-08-07T01:25:32.912490Z'}
+[2026-08-07 09:25:32,915: INFO/MainProcess] Task src.ingest.service.stamp_channel_task[2ba6d8b8-0797-48dc-b9c7-9da534bff4b6] received
+[2026-08-07 09:25:32,916: INFO/ForkPoolWorker-2] Task src.ingest.service.stamp_channel_task[2ba6d8b8-0797-48dc-b9c7-9da534bff4b6] retry: Retry in 5s: RuntimeError('No chunks found for doc=b1111245-a900-4a58-bbb5-7b81e7ae94ab kb=a6a9f8c0-133a-4b2f-b3d8-8919b4fc187c — stamp cannot be applied. Chunks may not have been ingested yet. Retrying with backoff.')
+[2026-08-07 09:25:32,919: WARNING/ForkPoolWorker-1] {'doc_id': 'ed98c37f-ef2c-4f5f-ab82-f4d5fce42b06', 'kb_id': 'a6a9f8c0-133a-4b2f-b3d8-8919b4fc187c', 'parse_status': 'completed', 'mount_id': 'c5937cd3-1837-40be-a63b-9835337d2b63', 'event': 'stamp_no_chunks_ingest_status', 'level': 'warning', 'timestamp': '2026-08-07T01:25:32.919483Z'}
+[2026-08-07 09:25:32,922: INFO/MainProcess] Task src.ingest.service.stamp_channel_task[6948d18e-6896-4ba0-bd1a-ce7dcea4a90c] received
+[2026-08-07 09:25:32,923: INFO/ForkPoolWorker-1] Task src.ingest.service.stamp_channel_task[6948d18e-6896-4ba0-bd1a-ce7dcea4a90c] retry: Retry in 5s: RuntimeError('No chunks found for doc=ed98c37f-ef2c-4f5f-ab82-f4d5fce42b06 kb=a6a9f8c0-133a-4b2f-b3d8-8919b4fc187c — stamp cannot be applied. Chunks may not have been ingested yet. Retrying with backoff.')
+[2026-08-07 09:25:37,922: INFO/ForkPoolWorker-2] HTTP Request: POST http://127.0.0.1:18080/v1/visibility "HTTP/1.1 200 OK"
+[2026-08-07 09:25:37,928: INFO/ForkPoolWorker-1] HTTP Request: POST http://127.0.0.1:18080/v1/visibility "HTTP/1.1 200 OK"
+[2026-08-07 09:25:38,259: INFO/ForkPoolWorker-2] Task src.ingest.service.stamp_channel_task[2ba6d8b8-0797-48dc-b9c7-9da534bff4b6] succeeded in 0.3427883250005834s: {'status': 'completed', 'version': 1491}
+[2026-08-07 09:25:38,267: INFO/ForkPoolWorker-1] Task src.ingest.service.stamp_channel_task[6948d18e-6896-4ba0-bd1a-ce7dcea4a90c] succeeded in 0.3445103249996464s: {'status': 'completed', 'version': 1491}
+[2026-08-07 09:26:11,470: INFO/MainProcess] Task src.ingest.service.stamp_channel_task[0ba44110-fb5c-4fe0-b86f-ddd7ca6a84f3] received
+[2026-08-07 09:26:11,476: INFO/ForkPoolWorker-2] HTTP Request: POST http://127.0.0.1:18080/v1/visibility "HTTP/1.1 200 OK"
+[2026-08-07 09:26:11,489: WARNING/ForkPoolWorker-2] {'doc_id': '88fb50c9-e14b-47a3-824c-b6b8056bfbd9', 'kb_id': 'a6a9f8c0-133a-4b2f-b3d8-8919b4fc187c', 'error': 'No chunks found for doc=88fb50c9-e14b-47a3-824c-b6b8056bfbd9 kb=a6a9f8c0-133a-4b2f-b3d8-8919b4fc187c — stamp cannot be applied. Chunks may not have been ingested yet. Retrying with backoff.', 'event': 'stamp_failed_retrying', 'level': 'warning', 'timestamp': '2026-08-07T01:26:11.489712Z'}
+[2026-08-07 09:26:11,509: WARNING/ForkPoolWorker-2] {'doc_id': '88fb50c9-e14b-47a3-824c-b6b8056bfbd9', 'kb_id': 'a6a9f8c0-133a-4b2f-b3d8-8919b4fc187c', 'parse_status': 'processing', 'mount_id': '0136b7a6-a387-4ac5-8e6f-c680cac5dc9f', 'event': 'stamp_no_chunks_ingest_status', 'level': 'warning', 'timestamp': '2026-08-07T01:26:11.508991Z'}
+[2026-08-07 09:26:11,512: INFO/MainProcess] Task src.ingest.service.stamp_channel_task[0ba44110-fb5c-4fe0-b86f-ddd7ca6a84f3] received
+[2026-08-07 09:26:11,513: INFO/ForkPoolWorker-2] Task src.ingest.service.stamp_channel_task[0ba44110-fb5c-4fe0-b86f-ddd7ca6a84f3] retry: Retry in 30s: RuntimeError('No chunks found for doc=88fb50c9-e14b-47a3-824c-b6b8056bfbd9 kb=a6a9f8c0-133a-4b2f-b3d8-8919b4fc187c — stamp cannot be applied. Chunks may not have been ingested yet. Retrying with backoff.')
+[2026-08-07 09:26:41,517: INFO/ForkPoolWorker-2] HTTP Request: POST http://127.0.0.1:18080/v1/visibility "HTTP/1.1 200 OK"
+[2026-08-07 09:26:41,699: INFO/ForkPoolWorker-2] Task src.ingest.service.stamp_channel_task[0ba44110-fb5c-4fe0-b86f-ddd7ca6a84f3] succeeded in 0.18783029599944712s: {'status': 'completed', 'version': 1491}
+[2026-08-07 09:26:49,759: INFO/MainProcess] Task src.ingest.service.stamp_channel_task[f67636ca-7c50-4079-b2d1-0eed7a11bc82] received
+[2026-08-07 09:26:49,765: INFO/ForkPoolWorker-2] HTTP Request: POST http://127.0.0.1:18080/v1/visibility "HTTP/1.1 200 OK"
+[2026-08-07 09:26:49,778: WARNING/ForkPoolWorker-2] {'doc_id': '75566d72-6b7d-40af-b586-b649a6802575', 'kb_id': 'a6a9f8c0-133a-4b2f-b3d8-8919b4fc187c', 'error': 'No chunks found for doc=75566d72-6b7d-40af-b586-b649a6802575 kb=a6a9f8c0-133a-4b2f-b3d8-8919b4fc187c — stamp cannot be applied. Chunks may not have been ingested yet. Retrying with backoff.', 'event': 'stamp_failed_retrying', 'level': 'warning', 'timestamp': '2026-08-07T01:26:49.778382Z'}
+[2026-08-07 09:26:49,798: WARNING/ForkPoolWorker-2] {'doc_id': '75566d72-6b7d-40af-b586-b649a6802575', 'kb_id': 'a6a9f8c0-133a-4b2f-b3d8-8919b4fc187c', 'parse_status': 'processing', 'mount_id': '60607a3c-1f1b-4f44-b144-32018fc940a7', 'event': 'stamp_no_chunks_ingest_status', 'level': 'warning', 'timestamp': '2026-08-07T01:26:49.798023Z'}
+[2026-08-07 09:26:49,801: INFO/MainProcess] Task src.ingest.service.stamp_channel_task[f67636ca-7c50-4079-b2d1-0eed7a11bc82] received
+[2026-08-07 09:26:49,801: INFO/ForkPoolWorker-2] Task src.ingest.service.stamp_channel_task[f67636ca-7c50-4079-b2d1-0eed7a11bc82] retry: Retry in 30s: RuntimeError('No chunks found for doc=75566d72-6b7d-40af-b586-b649a6802575 kb=a6a9f8c0-133a-4b2f-b3d8-8919b4fc187c — stamp cannot be applied. Chunks may not have been ingested yet. Retrying with backoff.')
+[2026-08-07 09:27:19,807: INFO/ForkPoolWorker-2] HTTP Request: POST http://127.0.0.1:18080/v1/visibility "HTTP/1.1 200 OK"
+[2026-08-07 09:27:20,088: INFO/ForkPoolWorker-2] Task src.ingest.service.stamp_channel_task[f67636ca-7c50-4079-b2d1-0eed7a11bc82] succeeded in 0.28716891200019745s: {'status': 'completed', 'version': 1491}
+[2026-08-07 09:27:26,214: INFO/MainProcess] Task src.ingest.service.stamp_channel_task[acc56229-aba0-4d2e-a975-aba30bb9f42f] received
+[2026-08-07 09:27:26,221: INFO/ForkPoolWorker-2] HTTP Request: POST http://127.0.0.1:18080/v1/visibility "HTTP/1.1 200 OK"
+[2026-08-07 09:27:26,234: WARNING/ForkPoolWorker-2] {'doc_id': 'a32fb569-f73d-463f-9e45-f0108cd78d1f', 'kb_id': 'a6a9f8c0-133a-4b2f-b3d8-8919b4fc187c', 'error': 'No chunks found for doc=a32fb569-f73d-463f-9e45-f0108cd78d1f kb=a6a9f8c0-133a-4b2f-b3d8-8919b4fc187c — stamp cannot be applied. Chunks may not have been ingested yet. Retrying with backoff.', 'event': 'stamp_failed_retrying', 'level': 'warning', 'timestamp': '2026-08-07T01:27:26.233978Z'}
+[2026-08-07 09:27:26,253: WARNING/ForkPoolWorker-2] {'doc_id': 'a32fb569-f73d-463f-9e45-f0108cd78d1f', 'kb_id': 'a6a9f8c0-133a-4b2f-b3d8-8919b4fc187c', 'parse_status': 'completed', 'mount_id': '168e29d3-e811-4aa7-bed6-9419bed01bcc', 'event': 'stamp_no_chunks_ingest_status', 'level': 'warning', 'timestamp': '2026-08-07T01:27:26.253460Z'}
+[2026-08-07 09:27:26,256: INFO/MainProcess] Task src.ingest.service.stamp_channel_task[acc56229-aba0-4d2e-a975-aba30bb9f42f] received
+[2026-08-07 09:27:26,257: INFO/ForkPoolWorker-2] Task src.ingest.service.stamp_channel_task[acc56229-aba0-4d2e-a975-aba30bb9f42f] retry: Retry in 5s: RuntimeError('No chunks found for doc=a32fb569-f73d-463f-9e45-f0108cd78d1f kb=a6a9f8c0-133a-4b2f-b3d8-8919b4fc187c — stamp cannot be applied. Chunks may not have been ingested yet. Retrying with backoff.')
+[2026-08-07 09:27:31,263: INFO/ForkPoolWorker-2] HTTP Request: POST http://127.0.0.1:18080/v1/visibility "HTTP/1.1 200 OK"
+[2026-08-07 09:27:31,554: INFO/ForkPoolWorker-2] Task src.ingest.service.stamp_channel_task[acc56229-aba0-4d2e-a975-aba30bb9f42f] succeeded in 0.2977312660004827s: {'status': 'completed', 'version': 1491}
+[2026-08-07 09:27:57,338: INFO/MainProcess] Task src.ingest.service.stamp_channel_task[81035348-68d8-42e3-b615-d27d7f4c9aa5] received
+[2026-08-07 09:27:57,345: INFO/ForkPoolWorker-2] HTTP Request: POST http://127.0.0.1:18080/v1/visibility "HTTP/1.1 200 OK"
+[2026-08-07 09:27:57,359: WARNING/ForkPoolWorker-2] {'doc_id': '5e1b424b-aa74-431e-9a35-9246b8cd8f1b', 'kb_id': 'a6a9f8c0-133a-4b2f-b3d8-8919b4fc187c', 'error': 'No chunks found for doc=5e1b424b-aa74-431e-9a35-9246b8cd8f1b kb=a6a9f8c0-133a-4b2f-b3d8-8919b4fc187c — stamp cannot be applied. Chunks may not have been ingested yet. Retrying with backoff.', 'event': 'stamp_failed_retrying', 'level': 'warning', 'timestamp': '2026-08-07T01:27:57.359639Z'}
+[2026-08-07 09:27:57,379: WARNING/ForkPoolWorker-2] {'doc_id': '5e1b424b-aa74-431e-9a35-9246b8cd8f1b', 'kb_id': 'a6a9f8c0-133a-4b2f-b3d8-8919b4fc187c', 'parse_status': 'completed', 'mount_id': 'd6effc95-4a93-4079-953b-6a50a742bfee', 'event': 'stamp_no_chunks_ingest_status', 'level': 'warning', 'timestamp': '2026-08-07T01:27:57.379107Z'}
+[2026-08-07 09:27:57,382: INFO/MainProcess] Task src.ingest.service.stamp_channel_task[81035348-68d8-42e3-b615-d27d7f4c9aa5] received
+[2026-08-07 09:27:57,382: INFO/ForkPoolWorker-2] Task src.ingest.service.stamp_channel_task[81035348-68d8-42e3-b615-d27d7f4c9aa5] retry: Retry in 5s: RuntimeError('No chunks found for doc=5e1b424b-aa74-431e-9a35-9246b8cd8f1b kb=a6a9f8c0-133a-4b2f-b3d8-8919b4fc187c — stamp cannot be applied. Chunks may not have been ingested yet. Retrying with backoff.')
+[2026-08-07 09:28:02,389: INFO/ForkPoolWorker-2] HTTP Request: POST http://127.0.0.1:18080/v1/visibility "HTTP/1.1 200 OK"
+[2026-08-07 09:28:02,664: INFO/ForkPoolWorker-2] Task src.ingest.service.stamp_channel_task[81035348-68d8-42e3-b615-d27d7f4c9aa5] succeeded in 0.2811642449996725s: {'status': 'completed', 'version': 1491}
+[2026-08-07 09:28:17,789: INFO/MainProcess] Task src.ingest.service.stamp_channel_task[24e185bd-b2c0-4ba8-92ad-5a58fc282459] received
+[2026-08-07 09:28:17,796: INFO/ForkPoolWorker-2] HTTP Request: POST http://127.0.0.1:18080/v1/visibility "HTTP/1.1 200 OK"
+[2026-08-07 09:28:17,811: WARNING/ForkPoolWorker-2] {'doc_id': '5b869800-fae6-4f24-b37e-6deecbbd305e', 'kb_id': 'a6a9f8c0-133a-4b2f-b3d8-8919b4fc187c', 'error': 'No chunks found for doc=5b869800-fae6-4f24-b37e-6deecbbd305e kb=a6a9f8c0-133a-4b2f-b3d8-8919b4fc187c — stamp cannot be applied. Chunks may not have been ingested yet. Retrying with backoff.', 'event': 'stamp_failed_retrying', 'level': 'warning', 'timestamp': '2026-08-07T01:28:17.811273Z'}
+[2026-08-07 09:28:17,830: WARNING/ForkPoolWorker-2] {'doc_id': '5b869800-fae6-4f24-b37e-6deecbbd305e', 'kb_id': 'a6a9f8c0-133a-4b2f-b3d8-8919b4fc187c', 'parse_status': 'completed', 'mount_id': 'b11067e6-ff40-4c58-9fbc-5761deb346eb', 'event': 'stamp_no_chunks_ingest_status', 'level': 'warning', 'timestamp': '2026-08-07T01:28:17.830422Z'}
+[2026-08-07 09:28:17,833: INFO/MainProcess] Task src.ingest.service.stamp_channel_task[24e185bd-b2c0-4ba8-92ad-5a58fc282459] received
+[2026-08-07 09:28:17,834: INFO/ForkPoolWorker-2] Task src.ingest.service.stamp_channel_task[24e185bd-b2c0-4ba8-92ad-5a58fc282459] retry: Retry in 5s: RuntimeError('No chunks found for doc=5b869800-fae6-4f24-b37e-6deecbbd305e kb=a6a9f8c0-133a-4b2f-b3d8-8919b4fc187c — stamp cannot be applied. Chunks may not have been ingested yet. Retrying with backoff.')
+[2026-08-07 09:28:22,861: INFO/ForkPoolWorker-2] HTTP Request: POST http://127.0.0.1:18080/v1/visibility "HTTP/1.1 200 OK"
+[2026-08-07 09:28:23,186: INFO/ForkPoolWorker-2] Task src.ingest.service.stamp_channel_task[24e185bd-b2c0-4ba8-92ad-5a58fc282459] succeeded in 0.3522372989991709s: {'status': 'completed', 'version': 1491}
+对上面的日志进行系统性分析，找到实质原因，然后进行修复
+在代码优化修复过程中，不能出现这样的操作：为了让项目跑通的妥协、绕过逻辑的代码；为了让代码路通引入硬编码、mock代码；为了让代码跑通不按照系统架构设计来
+在代码优化修复过程中，要注意权限系统的调用逻辑，不因代码的优化修复造成破坏
+在代码优化修复过程中，要注意可观测系统的完整性、有效性，不因代码修复而造成破坏
+涉及到需要联调运行测试时，要进行真实联调测试，不要skip或者mock、绕过，联调测试就要根据生产实际情况来
+现有代码系统架构设计 docs/RAG系统设计v14.md，前端架构设计 docs/frontend-design.md，docs/外部系统设计.md，docs/权限管理系统架构设计.md
+rag python开发环境 conda activate rag_dev_v14 ,外部系统python开发环境 conda activate perm_service
+rag项目的基础服务是docker-compose.infra.yml，已在正常运行中。外部系统的使用 见 readme.md
+统一观测平台、langfuse这些都是docker compose部署，已在正常运行中
+可以通过 docker ps查看
+
+# query时前端显示不了结果
+在使用中发现一个问题，conversation中发出的查询前端始终看不到结果，而且前端结果显示部分每次刷新对话都会显示成查询时发出的信息
+在retrieve worker后台是有结果的
+系统性分析下前后端的这个信息交互是怎么回事儿？同时要保证前端的查询结果显示要交互友好
+根据系统性分析的结果，制定代码修复优化方案，然后开始代码优化修复
+在代码优化修复过程中，不能出现这样的操作：为了让项目跑通的妥协、绕过逻辑的代码；为了让代码路通引入硬编码、mock代码；为了让代码跑通不按照系统架构设计来
+在代码优化修复过程中，要注意权限系统的调用逻辑，不因代码的优化修复造成破坏
+在代码优化修复过程中，要注意可观测系统的完整性、有效性，不因代码修复而造成破坏
+涉及到需要联调运行测试时，要进行真实联调测试，不要skip或者mock、绕过，联调测试就要根据生产实际情况来
+现有代码系统架构设计 docs/RAG系统设计v14.md，前端架构设计 docs/frontend-design.md，docs/外部系统设计.md，docs/权限管理系统架构设计.md
+rag python开发环境 conda activate rag_dev_v14 ,外部系统python开发环境 conda activate perm_service
+rag项目的基础服务是docker-compose.infra.yml，已在正常运行中。外部系统的使用 见 readme.md
+统一观测平台、langfuse这些都是docker compose部署，已在正常运行中
+可以通过 docker ps查看
+
+
+现在conversation中能看到搜索结果了，但是使用中发现交互效果不好
+1.当后台长时间没有返回时，前端提示“回答生成中，请稍后刷新页面查看结果...”。这个方式的交互效果不好，谁知道什么时候好，而且还要刷新整个页面
+2.结果下面有很多的来源，当鼠标停留在来源上时会出现提示框，但鼠标移开后这个提示框并不自动消失。而是一定要你在其他空白处点下鼠标这个提示框才能消失掉，使用体验不好
+3.检索模式中的参数，现在这个参数设置特别别扭。每次你设置好后，只要一刷新页面，这时检索模式中的参数就会回到默认值，你又要重新来设置。
+  正常不是你设置后，在你下次更改之前不都应该一直是你最后设置的值吗？
+系统性分析下这些差劲的交互效果是什么原因造成的
+根据系统性分析的结果，制定代码修复优化方案，然后开始代码优化修复
+在代码优化修复过程中，不能出现这样的操作：为了让项目跑通的妥协、绕过逻辑的代码；为了让代码路通引入硬编码、mock代码；为了让代码跑通不按照系统架构设计来
+在代码优化修复过程中，要注意权限系统的调用逻辑，不因代码的优化修复造成破坏
+在代码优化修复过程中，要注意可观测系统的完整性、有效性，不因代码修复而造成破坏
+涉及到需要联调运行测试时，要进行真实联调测试，不要skip或者mock、绕过，联调测试就要根据生产实际情况来
+现有代码系统架构设计 docs/RAG系统设计v14.md，前端架构设计 docs/frontend-design.md，docs/外部系统设计.md，docs/权限管理系统架构设计.md
+rag python开发环境 conda activate rag_dev_v14 ,外部系统python开发环境 conda activate perm_service
+rag项目的基础服务是docker-compose.infra.yml，已在正常运行中。外部系统的使用 见 readme.md
+统一观测平台、langfuse这些都是docker compose部署，已在正常运行中
+可以通过 docker ps查看
+
+# 权限漏洞
+以user:mfkcel 密码是111 这个用户为例 角色是user但目前没有授予任何权限，user角色默认也是没有任何权限的
+在使用中发现一个没有任何权限的用户登录后，
+能在前端预览文档，前端预览文档不需要权限吗
+能跳转到外部系统，没有权限还能跳转到权限平台用 user:admin登录 /cerbos/langfuse/grafana
+还能在配置页面修改配置
+对上面存在的权限问题进行系统性分析，现在的权限控制有哪些应该进行权限控制但实际没有权限控制的，找到后制定优化修复方案对项目代码进行优化修复。
+在代码优化修复过程中，不能出现这样的操作：为了让项目跑通的妥协、绕过逻辑的代码；为了让代码路通引入硬编码、mock代码；为了让代码跑通不按照系统架构设计来
+在代码优化修复过程中，要注意权限系统的调用逻辑，不因代码的优化修复造成破坏
+在代码优化修复过程中，要注意可观测系统的完整性、有效性，不因代码修复而造成破坏
+涉及到需要联调运行测试时，要进行真实联调测试，不要skip或者mock、绕过，联调测试就要根据生产实际情况来
+现有代码系统架构设计 docs/RAG系统设计v14.md，前端架构设计 docs/frontend-design.md，docs/外部系统设计.md，docs/权限管理系统架构设计.md
+rag python开发环境 conda activate rag_dev_v14 ,外部系统python开发环境 conda activate perm_service
+rag项目的基础服务是docker-compose.infra.yml，已在正常运行中。外部系统的使用 见 readme.md
+统一观测平台、langfuse这些都是docker compose部署，已在正常运行中
+可以通过 docker ps查看
+
+# 权限异常
+权限平台--策略部署
+📡 策略部署状态
+刷新
+状态:
+⚠️ 降级
+策略数:
+0
+信息:
+Cerbos PDP returned HTTP 404
+
+按照上面的方案c，对项目代码进行优化修复
+在代码优化修复过程中，不能出现这样的操作：为了让项目跑通的妥协、绕过逻辑的代码；为了让代码路通引入硬编码、mock代码；为了让代码跑通不按照系统架构设计来
+在代码优化修复过程中，要注意权限系统的调用逻辑，不因代码的优化修复造成破坏
+在代码优化修复过程中，要注意可观测系统的完整性、有效性，不因代码修复而造成破坏
+涉及到需要联调运行测试时，要进行真实联调测试，不要skip或者mock、绕过，联调测试就要根据生产实际情况来
+现有代码系统架构设计 docs/RAG系统设计v14.md，前端架构设计 docs/frontend-design.md，docs/外部系统设计.md，docs/权限管理系统架构设计.md
+rag python开发环境 conda activate rag_dev_v14 ,外部系统python开发环境 conda activate perm_service
+rag项目的基础服务是docker-compose.infra.yml，已在正常运行中。外部系统的使用 见 readme.md
+统一观测平台、langfuse这些都是docker compose部署，已在正常运行中
+可以通过 docker ps查看
+
+
+
+对上面存在的问题进行系统性分析，然后制定优化方案进行优化修复。
+在代码优化修复过程中，不能出现这样的操作：为了让项目跑通的妥协、绕过逻辑的代码；为了让代码路通引入硬编码、mock代码；为了让代码跑通不按照系统架构设计来
+在代码优化修复过程中，要注意权限系统的调用逻辑，不因代码的优化修复造成破坏
+在代码优化修复过程中，要注意可观测系统的完整性、有效性，不因代码修复而造成破坏
+涉及到需要联调运行测试时，要进行真实联调测试，不要skip或者mock、绕过，联调测试就要根据生产实际情况来
+现有代码系统架构设计 docs/RAG系统设计v14.md，前端架构设计 docs/frontend-design.md，docs/外部系统设计.md，docs/权限管理系统架构设计.md
+rag python开发环境 conda activate rag_dev_v14 ,外部系统python开发环境 conda activate perm_service
+rag项目的基础服务是docker-compose.infra.yml，已在正常运行中。外部系统的使用 见 readme.md
+统一观测平台、langfuse这些都是docker compose部署，已在正常运行中
+可以通过 docker ps查看
+
+# 权限平台分析
+ 系统性分析下目前权限平台的权限两个来源：直接把acl给用户或角色，用户绑定的角色。这些权限变更最终落地到哪里的？是统一由cerbos解析，还是有的是cerbos规模解析，有的是权限平台自己的本地数据
+
+● 权限两来源的完整落地分析
+
+  结论先行
+
+  两个来源（ACL 直接授予、角色绑定）最终都统一由 Cerbos PDP 做最终判定。 权限服务不自己做任何判定——它只负责从本地 PostgreSQL 查询权限数据，编译成 Cerbos 能理解的 granted_actions 注入到 principal
+  属性中，然后由 Cerbos PDP 的派生角色 + 资源策略给出 ALLOW/DENY。
+
+  ---
+  权限判定完整链路
+
+  用真实数据跟踪 user:admin（有 admin 角色绑定）对 kb-test-1 执行 kb:manage 的判定过程：
+
+  ┌─────────────────────────────────────────────────────────────────┐
+  │  Tier 1: 权限服务后端 (PostgreSQL) — 数据聚合层                    │
+  ├─────────────────────────────────────────────────────────────────┤
+  │                                                                 │
+  │  JWT claims ──→ parse_principal()                               │
+  │    user_id="admin"                                              │
+  │    roles=["system_admin", "user"]     ← 来自 Keycloak            │
+  │    tenant_id="tenant-dev"                                       │
+  │                                                                 │
+  │  resolve_granted_actions_by_principal(principals, action, ...)  │
+  │    │                                                            │
+  │    ├─[源1] 查 acl_entries                                       │
+  │    │   SELECT principal, action WHERE principal IN (...)        │
+  │    │   → (无直接 ACL 命中 kb-test-1)                             │
+  │    │                                                            │
+  │    ├─[源2] 查 role_bindings                                     │
+  │    │   SELECT principal, role WHERE principal IN (...)          │
+  │    │   → user:admin 绑定 admin 角色 (全局范围)                    │
+  │    │   → ROLE_ACTIONS_MAP["admin"] = [                          │
+  │    │       kb:read, kb:write, kb:manage, kb:grant,              │
+  │    │       doc:view, doc:download, doc:retrieve,                │
+  │    │       doc:unmount, doc:purge, doc:share                    │
+  │    │     ]                                                      │
+  │    │                                                            │
+  │    └─ 合并 → granted_actions["kb-test-1"] =                     │
+  │         ["read", "write", "manage", "grant"]                    │
+  │                                                                 │
+  │  check_subject_ban() → 未封禁                                   │
+  │  get_resource_attr() → {retired: false, owner: "..."}          │
+  │                                                                 │
+  │  构造 Cerbos principal:                                         │
+  │    roles = ["system_admin", "user"]                             │
+  │    attr.granted_actions = {                                     │
+  │      "kb-test-1": ["read","write","manage","grant"]             │
+  │    }                                                            │
+  └──────────────────────────┬──────────────────────────────────────┘
+                             │ POST /api/check/resources
+                             ▼
+  ┌─────────────────────────────────────────────────────────────────┐
+  │  Tier 2: Cerbos PDP (策略引擎) — 最终决策层                        │
+  ├─────────────────────────────────────────────────────────────────┤
+  │                                                                 │
+  │  ① 评估派生角色 (rag_roles.yaml):                                │
+  │                                                                 │
+  │    admin:                                                        │
+  │      parentRoles: ["system_admin"]                              │
+  │      condition: true                                            │
+  │      → principal 有 system_admin 角色 → admin 激活 ✅            │
+  │                                                                 │
+  │  ② 匹配资源策略 (kb.yaml):                                       │
+  │                                                                 │
+  │    kb:manage:                                                    │
+  │      derivedRoles: ["kb_admin", "admin"]                        │
+  │      → admin 已激活 → 命中此规则                                  │
+  │                                                                 │
+  │  ③ 返回: EFFECT_ALLOW ✅                                         │
+  │                                                                 │
+  └─────────────────────────────────────────────────────────────────┘
+
+```
+  "两个来源"汇聚点
+
+  acl_entries 和 role_bindings 的数据流在 resolve_granted_actions_by_principal() 中汇聚，产物是同一个 granted_actions dict：
+
+  # acl_resolver.py 第 46-96 行
+  mapping: dict[str, list[str]] = {}
+
+  # 源1: ACL 直接授予 → action 直接添加
+  for row in acl_rows:
+      mapping[principal].append(action)          # e.g., "kb:read"
+
+  # 源2: 角色绑定 → ROLE_ACTIONS_MAP 展开 → 隐式 action
+  for row in role_rows:
+      implicit = ROLE_ACTIONS_MAP.get(role, [])  # e.g., admin → [kb:read,...]
+      mapping[principal].extend(implicit)
+
+  之后在 decision.py 中剥离前缀（kb:read → read），赋值到 granted_actions，注入 Cerbos principal。Cerbos 不知道也不需要知道某个 action 来自 ACL 还是角色绑定——它只看 granted_actions[kb_id] 中是否有对应的值。
+
+```
+
+  各个数据存放位置总览
+
+  ┌─────────────────────┬───────────────────────────────────┬───────────────┬────────────────────────────────────────────────────┐
+  │        数据         │             存放位置              │ Cerbos 可见？ │                        说明                        │
+  ├─────────────────────┼───────────────────────────────────┼───────────────┼────────────────────────────────────────────────────┤
+  │ ACL 直接授予        │ perm PostgreSQL acl_entries       │     间接      │ 编译进 granted_actions 后传给 Cerbos               │
+  ├─────────────────────┼───────────────────────────────────┼───────────────┼────────────────────────────────────────────────────┤
+  │ 角色绑定            │ perm PostgreSQL role_bindings     │     间接      │ 经 ROLE_ACTIONS_MAP 展开后注入 granted_actions     │
+  ├─────────────────────┼───────────────────────────────────┼───────────────┼────────────────────────────────────────────────────┤
+  │ 角色→动作映射       │ Python role_actions_config.py     │   同步依赖    │ 必须与 Cerbos YAML 一致，否则角色绑定行为不一致    │
+  ├─────────────────────┼───────────────────────────────────┼───────────────┼────────────────────────────────────────────────────┤
+  │ JWT 角色 (Keycloak) │ JWT claims                        │     直接      │ Cerbos derivedRoles.parentRoles 直接匹配 JWT roles │
+  ├─────────────────────┼───────────────────────────────────┼───────────────┼────────────────────────────────────────────────────┤
+  │ 派生角色逻辑        │ Cerbos rag_roles.yaml             │     直接      │ 判断何时激活 kb_reader/kb_writer/kb_admin/admin    │
+  ├─────────────────────┼───────────────────────────────────┼───────────────┼────────────────────────────────────────────────────┤
+  │ 资源策略规则        │ Cerbos kb.yaml document.yaml      │     直接      │ 哪个派生角色能执行哪个 action                      │
+  ├─────────────────────┼───────────────────────────────────┼───────────────┼────────────────────────────────────────────────────┤
+  │ 资源属性            │ perm PostgreSQL resource_registry │     间接      │ 注入 resource.attr（retired, is_enabled 等）       │
+  ├─────────────────────┼───────────────────────────────────┼───────────────┼────────────────────────────────────────────────────┤
+  │ 封禁/限制           │ perm PostgreSQL restrictions      │    不经过     │ 在调 Cerbos 之前由权限服务直接返回 deny            │
+  ├─────────────────────┼───────────────────────────────────┼───────────────┼────────────────────────────────────────────────────┤
+  │ 最终判定            │ Cerbos PDP                        │       —       │ 唯一权威，权限服务不做任何判定                     │
+  └─────────────────────┴───────────────────────────────────┴───────────────┴────────────────────────────────────────────────────┘
+
+  ---
+  关键风险点: ROLE_ACTIONS_MAP 是手动同步点
+
+  role_actions_config.py 中的 ROLE_ACTIONS_MAP 是对 Cerbos YAML 策略的 手工镜像。如果 Cerbos 策略变更时忘记同步更新此映射：
+
+  - 角色绑定的展开将与 Cerbos 实际判定的基础不一致
+  - 管理台的"有效权限计算"（/api/v1/acl/effective）显示的内容与实际判定结果脱节
+  - 但 不影响最终判定：Cerbos 只看 granted_actions 中实际存在的值，映射错误只会导致角色绑定"少给权限"或"多给权限"
+
+## 风险分析
+● 严重性评估: 中高
+
+  当前状态: 未发生
+
+  验证结果显示 ROLE_ACTIONS_MAP 与 Cerbos YAML 完全一致——目前已同步。风险在于未来变更时。
+
+  漏洞场景分析
+
+  三个渠道会触发 Cerbos 策略变更，各自对 ROLE_ACTIONS_MAP 的影响：
+
+  ┌──────────────────────┬────────────────────────────────┬───────────────────────────────┬─────────────────────────────────────────────────────────────────────────────────────────────────┐
+  │       变更渠道       │            触发方式            │ ROLE_ACTIONS_MAP 是否同步更新 │                                              后果                                               │
+  ├──────────────────────┼────────────────────────────────┼───────────────────────────────┼─────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ 管理台"编辑策略"按钮 │ PUT /api/v1/policies/{path}    │              否               │ 写入 YAML → Cerbos 热加载生效；ROLE_ACTIONS_MAP 未更新 → 角色绑定展开与策略判定脱节             │
+  ├──────────────────────┼────────────────────────────────┼───────────────────────────────┼─────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ 管理台"新建策略"按钮 │ PUT /api/v1/policies/{path}    │              否               │ 同上                                                                                            │
+  ├──────────────────────┼────────────────────────────────┼───────────────────────────────┼─────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ 管理台"创建角色"     │ POST /api/v1/roles/definitions │              是               │ _write_cerbos_yaml_for_role() 同时写 YAML + ROLE_ACTIONS_MAP 更新，但只对新角色，不更新已有角色 │
+  └──────────────────────┴────────────────────────────────┴───────────────────────────────┴─────────────────────────────────────────────────────────────────────────────────────────────────┘
+
+  最危险路径: 管理台策略编辑器。
+
+  管理员在策略页点"编辑" → 修改 YAML（例如给 kb_reader 加了 kb:write）→ 点"保存"。此时：
+
+  Cerbos YAML (权威):     kb_reader → [kb:read, kb:write]     ← 管理员改了
+  ROLE_ACTIONS_MAP (镜像): kb_reader → [kb:read]              ← 未同步！
+
+  后果:
+    角色绑定 → ROLE_ACTIONS_MAP 展开 → 只给 "read"
+    Cerbos 判定 → granted_actions 中无 "write" → kb_writer 派生角色不激活
+    → 管理员以为改了但角色绑定不走此路径 → 权限实际未生效
+
+  反向更严重——如果 ROLE_ACTIONS_MAP 多给了 action（旧值残留），Cerbos 会激活不该激活的派生角色，造成提权。
+
+  为什么不是"严重"
+
+  1. 直接 ACL 授予完全不受影响——绕过整个 ROLE_ACTIONS_MAP，不经过角色展开
+  2. Cerbos PDP 是最终裁决者——即使 ROLE_ACTIONS_MAP 多给了 action，Cerbos 的资源策略规则还有第二道门（retired == false、is_enabled == true、派生角色必须匹配 parentRoles）
+  3. 变更频率低——角色-权限矩阵是系统的基础定义，不会频繁修改
+  4. 当前状态健康——已验证匹配
+
+  为什么不是"低"
+
+  1. 无自动检测机制——系统不会在策略 YAML 变更后警告"ROLE_ACTIONS_MAP 可能不同步"
+  2. 管理台策略编辑器是直写 YAML 的——这是最直接的变更入口，没有任何同步提醒
+  3. 错误是静默的——不会有报错，权限判定结果悄悄偏离预期
+
+
+## 风险修复
+制定一个最优修复方案，要保证的效果是修复后，在进行策略文件更新后  ROLE_ACTIONS_MAP 也是随之更新的。或者说这个 ROLE_ACTIONS_MAP还需要吗？直接使用策略文件？
+对上面存在的问题进行系统性分析，然后制定优化方案进行优化修复。
+在代码优化修复过程中，不能出现这样的操作：为了让项目跑通的妥协、绕过逻辑的代码；为了让代码路通引入硬编码、mock代码；为了让代码跑通不按照系统架构设计来
+在代码优化修复过程中，要注意权限系统的调用逻辑，不因代码的优化修复造成破坏
+在代码优化修复过程中，要注意可观测系统的完整性、有效性，不因代码修复而造成破坏
+涉及到需要联调运行测试时，要进行真实联调测试，不要skip或者mock、绕过，联调测试就要根据生产实际情况来
+现有代码系统架构设计 docs/RAG系统设计v14.md，前端架构设计 docs/frontend-design.md，docs/外部系统设计.md，docs/权限管理系统架构设计.md
+rag python开发环境 conda activate rag_dev_v14 ,外部系统python开发环境 conda activate perm_service
+rag项目的基础服务是docker-compose.infra.yml，已在正常运行中。外部系统的使用 见 readme.md
+统一观测平台、langfuse这些都是docker compose部署，已在正常运行中
+可以通过 docker ps查看
+
+
+# 权限平台独立性分析
+系统性分析下目前的权限平台能否成为一个独立的权限平台，当有其他项目需要时上传相关的策略文件就行？是否还有什么缺失模块？
+但我发现有个问题，每个项目需要注册一个自己在权限平台独立的api调用接口吗？
+涉及到需要联调运行测试时，要进行真实联调测试，不要skip或者mock、绕过，联调测试就要根据生产实际情况来
+现有代码系统架构设计 docs/RAG系统设计v14.md，前端架构设计 docs/frontend-design.md，docs/外部系统设计.md，docs/权限管理系统架构设计.md
+rag python开发环境 conda activate rag_dev_v14 ,外部系统python开发环境 conda activate perm_service
+rag项目的基础服务是docker-compose.infra.yml，已在正常运行中。外部系统的使用 见 readme.md
+统一观测平台、langfuse这些都是docker compose部署，已在正常运行中
+可以通过 docker ps查看
