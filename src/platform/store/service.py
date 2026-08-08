@@ -35,7 +35,9 @@ def read_file(storage_path: str) -> Optional[str]:
             if len(parts) >= 4:
                 key = parts[3]
         content_bytes = backend.get(key)
-        return content_bytes.decode("utf-8", errors="replace")
+        from src.platform.store.encoding import detect_and_decode
+        text, _ = detect_and_decode(content_bytes)
+        return text
     except Exception:
         return None
 

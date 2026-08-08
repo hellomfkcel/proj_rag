@@ -12,6 +12,7 @@
 import asyncio
 import asyncpg
 import hashlib
+import mimetypes
 import os
 import uuid
 from datetime import datetime, timezone
@@ -25,6 +26,19 @@ from src.doc.events import document_mounted_event
 from src.platform.store.backend import StorageBackend
 from src.permission.context import RequestContext
 from src.permission.authz import register_resource, link_resource, unlink_resource, retire_resource
+
+
+def _cleanup_mount_chunks_sync(mount_id: str, doc_id: str, kb_id: str) -> None:
+    """后台线程入口：同步清理 Milvus chunk。
+
+    delete_document_from_kb 调用此函数（在 daemon 线程中），
+    确保 chunk 清理不依赖 outbox relay。
+    """
+    try:
+        from src.ingest.service import cleanup_mount_chunks
+        cleanup_mount_chunks(mount_id, doc_id, kb_id)
+    except Exception:
+        pass
 
 
 def _build_ctx(user_id: str, tenant_id: str, request_id: str = "", credential: str = "") -> RequestContext:
@@ -105,7 +119,11 @@ def submit_ingest_task(
             if not doc_id:
                 doc_id = str(uuid.uuid4())
                 s3_key = f"docs/{tenant_id}/{doc_id}/{filename}"
-                storage_path = store.put(s3_key, file_content, "application/octet-stream")
+                # 根据文件扩展名推断 MIME 类型
+                mime_type, _ = mimetypes.guess_type(filename)
+                if not mime_type:
+                    mime_type = "application/octet-stream"
+                storage_path = store.put(s3_key, file_content, mime_type)
                 ctx = _build_ctx(user_id, tenant_id, request_id, credential)
                 register_resource(ctx, "document", doc_id, f"user:{user_id}", name=filename)
                 await conn.execute(
@@ -113,7 +131,7 @@ def submit_ingest_task(
                        storage_path, file_size, mime_type, uploaded_by)
                        VALUES ($1,$2,$3,$4,$5,$6,$7,$8)""",
                     doc_id, tenant_id, filename, fingerprint,
-                    storage_path, len(file_content), "", user_id,
+                    storage_path, len(file_content), mime_type, user_id,
                 )
 
             mount_row = await conn.fetchrow(
@@ -368,6 +386,16 @@ def delete_document_from_kb(
                 payload["tenant_id"], payload["trace_id"],
                 payload["status"], datetime.now(timezone.utc),
             )
+
+            # 同步清理 Milvus chunk（不依赖 outbox relay）
+            # 在后台线程执行，避免阻塞 API 响应
+            if mount_id:
+                import threading
+                threading.Thread(
+                    target=_cleanup_mount_chunks_sync,
+                    args=(mount_id, doc_id, kb_id),
+                    daemon=True,
+                ).start()
 
             return {"status": "deleted", "doc_id": doc_id, "kb_id": kb_id}
         finally:

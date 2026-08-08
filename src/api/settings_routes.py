@@ -28,6 +28,9 @@ class RetrievalConfigModel(BaseModel):
     oversample_factor: float = 1.5; min_results: int = 3
     refetch_max_rounds: int = 2; haystack_pipeline_name: str = "query_v1"
     dense_weight: float = 0.5; sparse_weight: float = 0.5
+    min_score: float = 0.0
+    refine_batch_size: int = 2; max_answer_length: int = 3000
+    compress_target_length: int = 1000; doc_preview_max_chars: int = 1000
 
 class RetrievalConfigPatch(BaseModel):
     top_k: Optional[int] = None; retrieval_mode: Optional[str] = None
@@ -37,6 +40,9 @@ class RetrievalConfigPatch(BaseModel):
     min_results: Optional[int] = None; refetch_max_rounds: Optional[int] = None
     haystack_pipeline_name: Optional[str] = None
     dense_weight: Optional[float] = None; sparse_weight: Optional[float] = None
+    min_score: Optional[float] = None
+    refine_batch_size: Optional[int] = None; max_answer_length: Optional[int] = None
+    compress_target_length: Optional[int] = None; doc_preview_max_chars: Optional[int] = None
 
 class PromptItem(BaseModel):
     id: str; prompt_id: str; version: str; template_text: str; description: str; is_active: bool
@@ -106,7 +112,10 @@ async def get_retrieval_config(kb_id: str, ctx: RequestContext = Depends(get_req
         min_results=rc.min_results, refetch_max_rounds=rc.refetch_max_rounds,
         haystack_pipeline_name=rc.haystack_pipeline_name,
         dense_weight=rc.dense_weight,
-        sparse_weight=rc.sparse_weight)
+        sparse_weight=rc.sparse_weight,
+        min_score=rc.min_score,
+        refine_batch_size=rc.refine_batch_size, max_answer_length=rc.max_answer_length,
+        compress_target_length=rc.compress_target_length, doc_preview_max_chars=rc.doc_preview_max_chars)
 
 
 @router.patch("/configs/retrieval", response_model=RetrievalConfigModel)
@@ -130,7 +139,9 @@ async def update_retrieval_config(kb_id: str, body: RetrievalConfigPatch,
             for f in ["top_k","retrieval_mode","fusion_method","synthesis_mode",
                       "rerank_model_id","strict","oversample_factor","min_results",
                       "refetch_max_rounds","haystack_pipeline_name",
-                      "dense_weight","sparse_weight"]:
+                      "dense_weight","sparse_weight","min_score",
+                      "refine_batch_size","max_answer_length",
+                      "compress_target_length","doc_preview_max_chars"]:
                 v = getattr(body, f, None)
                 if v is not None:
                     updates.append(f"{f}=${i}"); vals.append(v); i += 1
@@ -156,9 +167,27 @@ async def update_retrieval_config(kb_id: str, body: RetrievalConfigPatch,
             rerank_model_id=rc.rerank_model_id,
             strict=rc.strict, oversample_factor=rc.oversample_factor,
             min_results=rc.min_results, refetch_max_rounds=rc.refetch_max_rounds,
-            haystack_pipeline_name=rc.haystack_pipeline_name)
+            haystack_pipeline_name=rc.haystack_pipeline_name,
+            dense_weight=rc.dense_weight, sparse_weight=rc.sparse_weight,
+            min_score=rc.min_score,
+            refine_batch_size=rc.refine_batch_size, max_answer_length=rc.max_answer_length,
+            compress_target_length=rc.compress_target_length, doc_preview_max_chars=rc.doc_preview_max_chars)
     finally:
         await conn.close()
+
+
+# ── 系统枚举 ──
+
+@router.get("/system/enums")
+async def get_system_enums():
+    """返回前端需要的所有枚举值列表。前后端枚举的单一权威来源。"""
+    from src.ingest.service import VALID_CHUNKING_STRATEGIES
+    return {
+        "chunking_strategies": VALID_CHUNKING_STRATEGIES,
+        "synthesis_modes": ["auto", "compact", "refine", "tree_summarize", "no_synthesis"],
+        "retrieval_modes": ["hybrid", "vector_only", "keyword_only"],
+        "fusion_methods": ["rrf", "weighted_sum"],
+    }
 
 
 # ── Prompt 模板列表 ──

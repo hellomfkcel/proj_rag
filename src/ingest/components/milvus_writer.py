@@ -13,6 +13,9 @@ from pymilvus import MilvusClient, DataType, CollectionSchema, FieldSchema
 # BGE-M3 embedding dimensions (dense=1024, sparse=250002)
 DENSE_DIM = 1024
 
+# Milvus 动态字段单值最大 65536 字节，content 超过 60000 字符时截断
+MAX_CONTENT_LENGTH = 60000
+
 
 def _ensure_indices(client: MilvusClient, collection_name: str) -> None:
     """幂等确保索引存在——并发安全的索引补齐。
@@ -42,6 +45,10 @@ def _ensure_indices(client: MilvusClient, collection_name: str) -> None:
             params=params,
         )
         client.create_index(collection_name, index_params)
+
+
+@component
+class MilvusDocumentStoreWriter:
     """Write Haystack Documents to Milvus via MilvusClient API.
 
     Uses the recommended MilvusClient API (pymilvus >= 2.6) instead of the
@@ -180,6 +187,28 @@ def _ensure_indices(client: MilvusClient, collection_name: str) -> None:
                 "vis_version": int(doc.meta.get("vis_version", 0)),
                 "retrievable": bool(doc.meta.get("retrievable", True)),
             }
+
+            # 安全网：Milvus 动态字段上限 65536 字节
+            content = row.get("content", "")
+            if len(content) > MAX_CONTENT_LENGTH:
+                original_len = len(content)
+                row["content"] = (
+                    content[:MAX_CONTENT_LENGTH]
+                    + f"\n\n[...文档过长已截断，原文: {original_len}字符]"
+                )
+                import logging
+                _log = logging.getLogger("MilvusDocumentStoreWriter")
+                _log.warning(
+                    "content_truncated_for_milvus",
+                    extra={
+                        "document_id": row.get("document_id"),
+                        "mount_id": row.get("mount_id"),
+                        "chunk_id": row.get("id"),
+                        "original_length": original_len,
+                        "truncated_length": MAX_CONTENT_LENGTH,
+                    },
+                )
+
             data.append(row)
 
         if data:

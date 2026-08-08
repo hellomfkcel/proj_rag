@@ -199,7 +199,7 @@ services:
     command: server --config=/config/.cerbos.yaml
     volumes:
       - ./cerbos/.cerbos.yaml:/config/.cerbos.yaml:ro
-      - ./cerbos/policies:/policies:ro
+      - /home/mfkcel/permission-system/cerbos/policies:/policies:ro
       - ./cerbos/schemas:/schemas:ro
       - cerbos_audit:/audit
     ports:

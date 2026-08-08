@@ -46,6 +46,10 @@ class Settings:
         "AUTHZ_EVENT_STREAM_REDIS_URL",
         "redis://:rag_dev_pwd_2026@localhost:16379/0",
     )
+    # RAG 系统所属的项目 ID，用于权限服务生命周期端点 (register/link/unlink/retire)
+    # 默认 "rag-v14" 对应权限服务启动时自动种子项目
+    authz_project_id: str = os.getenv("AUTHZ_PROJECT_ID", "rag-v14")
+
     # 服务间认证凭据 — 调用权限服务后端时作为 X-Api-Key 头发送
     # 生产环境必须配置，与权限服务侧 shared key 一致
     authz_client_credential: str = os.getenv("AUTHZ_CLIENT_CREDENTIAL", "")

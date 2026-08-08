@@ -14,7 +14,10 @@ import uuid
 from typing import Any, Dict, List, Optional
 
 from haystack import component, Document
-from haystack.components.preprocessors import DocumentSplitter
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+# CJK-aware separators matching RecursiveDocumentSplitter
+_CJK_SEPARATORS = ["\n\n", "\n", "。", "！", "？", "；", "，", "、", " ", ""]
 
 
 @component
@@ -34,8 +37,8 @@ class HierarchicalDocumentSplitter:
         parent_split_overlap: int = 128,
         child_split_length: int = 256,
         child_split_overlap: int = 32,
-        parent_split_by: str = "sentence",
-        child_split_by: str = "sentence",
+        parent_split_by: str = "word",
+        child_split_by: str = "word",
     ):
         self.parent_split_length = parent_split_length
         self.parent_split_overlap = parent_split_overlap
@@ -58,42 +61,40 @@ class HierarchicalDocumentSplitter:
                 continue
 
             # ── Level 0: Create parent chunks (coarse) ──
-            parent_splitter = DocumentSplitter(
-                split_by=self.parent_split_by,
-                split_length=self.parent_split_length,
-                split_overlap=self.parent_split_overlap,
+            parent_splitter = RecursiveCharacterTextSplitter(
+                chunk_size=self.parent_split_length,
+                chunk_overlap=self.parent_split_overlap,
+                separators=_CJK_SEPARATORS,
+                keep_separator=True,
             )
-            parent_docs = parent_splitter.run(
-                documents=[Document(content=text, meta=doc.meta)]
-            )["documents"]
+            parent_texts = parent_splitter.split_text(text)
 
-            for p_idx, parent in enumerate(parent_docs):
+            for p_idx, p_text in enumerate(parent_texts):
                 parent_id = f"{doc.id or uuid.uuid4().hex[:12]}_p{p_idx}"
+                parent = Document(content=p_text, meta=dict(doc.meta))
                 parent.meta["level"] = 0
                 parent.meta["parent_id"] = None
                 parent.meta["chunk_index"] = p_idx
                 parent.meta["split_strategy"] = "hierarchical"
-                # Store identifier for child reference
                 parent.meta["_hier_id"] = parent_id
                 all_parents.append(parent)
 
                 # ── Level 1: Create child chunks from each parent ──
                 if len(parent.content) > self.child_split_length:
-                    child_splitter = DocumentSplitter(
-                        split_by=self.child_split_by,
-                        split_length=self.child_split_length,
-                        split_overlap=self.child_split_overlap,
+                    child_splitter = RecursiveCharacterTextSplitter(
+                        chunk_size=self.child_split_length,
+                        chunk_overlap=self.child_split_overlap,
+                        separators=_CJK_SEPARATORS,
+                        keep_separator=True,
                     )
-                    child_docs = child_splitter.run(
-                        documents=[Document(content=parent.content, meta=parent.meta)]
-                    )["documents"]
+                    child_texts = child_splitter.split_text(parent.content)
 
-                    for c_idx, child in enumerate(child_docs):
+                    for c_idx, c_text in enumerate(child_texts):
+                        child = Document(content=c_text, meta=dict(parent.meta))
                         child.meta["level"] = 1
                         child.meta["parent_id"] = parent_id
                         child.meta["chunk_index"] = c_idx
                         child.meta["split_strategy"] = "hierarchical"
-                        # Inherit document-level metadata
                         child.meta["document_id"] = doc.meta.get("document_id", "")
                         child.meta["kb_id"] = doc.meta.get("kb_id", "")
                         child.meta["tenant_id"] = doc.meta.get("tenant_id", "")

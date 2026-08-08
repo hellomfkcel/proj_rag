@@ -118,8 +118,8 @@ async def create_kb(body: KBCreateRequest, ctx: RequestContext = Depends(get_req
             kb_id, ctx.tenant_id, body.name, body.description, ctx.user_id, "active", now,
         )
         # Validate chunking strategy
-        valid_strategies = {"sentence", "word", "passage", "semantic", "hierarchical"}
-        strategy = body.chunking_strategy if body.chunking_strategy in valid_strategies else "sentence"
+        from src.ingest.service import VALID_CHUNKING_STRATEGIES
+        strategy = body.chunking_strategy if body.chunking_strategy in VALID_CHUNKING_STRATEGIES else "sentence"
 
         # 种子配置
         await conn.execute(
@@ -253,7 +253,7 @@ async def update_chunking_config(kb_id: str, body: ChunkingConfigPatch, ctx: Req
     if decision.get("decision") != "allow":
         raise HTTPException(status_code=403, detail="auth:forbidden — 您没有修改此知识库切分配置的权限（需要 kb:manage）")
 
-    valid_strategies = {"sentence", "word", "passage", "semantic", "hierarchical"}
+    from src.ingest.service import VALID_CHUNKING_STRATEGIES
     conn = await asyncpg.connect(_dsn())
     try:
         # Check KB exists
@@ -268,7 +268,7 @@ async def update_chunking_config(kb_id: str, body: ChunkingConfigPatch, ctx: Req
         )
 
         new_strategy = body.haystack_strategy or (current["haystack_strategy"] if current else "sentence")
-        if new_strategy not in valid_strategies:
+        if new_strategy not in VALID_CHUNKING_STRATEGIES:
             new_strategy = "sentence"
 
         new_length = body.split_length if body.split_length is not None else (current["split_length"] if current else 256)
