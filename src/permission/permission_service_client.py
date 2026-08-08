@@ -356,17 +356,20 @@ class PermissionServiceClient:
         owner: str,
         tenant_id: str = "",
         name: str | None = None,
+        project_id: str = "rag-v14",
     ) -> str:
         """注册资源 → POST /v1/resources/register。
 
         tenant_id 来自 ctx.tenant_id，由调用方 (P-AUTHC authz.py) 传入。
         name: 资源名称（KB 名称 / 文档文件名），供管理台展示。
+        project_id: 所属项目 ID，必填（权限服务 v2 新增要求）。
         """
         body: dict = {
             "resource_type": resource_type,
             "resource_id": resource_id,
             "owner": owner,
             "tenant_id": tenant_id,
+            "project_id": project_id,
             "idempotency_key": (
                 f"rag-register-{tenant_id}-{resource_id}-v1"
             ),
@@ -402,10 +405,12 @@ class PermissionServiceClient:
         doc_id: str,
         kb_id: str,
         tenant_id: str = "",
+        project_id: str = "rag-v14",
     ) -> str:
         """建立挂载 → POST /v1/resources/link。
 
         tenant_id 来自 ctx.tenant_id，由调用方传入。
+        project_id: 所属项目 ID，必填（权限服务 v2 新增要求）。
         """
         try:
             resp = self._client.post(
@@ -416,6 +421,7 @@ class PermissionServiceClient:
                     "owner": "system",
                     "tenant_id": tenant_id,
                     "kb_id": kb_id,
+                    "project_id": project_id,
                     "idempotency_key": (
                         f"rag-link-{tenant_id}-{doc_id}-{kb_id}-v1"
                     ),
@@ -443,10 +449,12 @@ class PermissionServiceClient:
         doc_id: str,
         kb_id: str,
         tenant_id: str = "",
+        project_id: str = "rag-v14",
     ) -> str:
         """解除挂载 → POST /v1/resources/unlink。
 
         tenant_id 来自 ctx.tenant_id，由调用方传入。
+        project_id: 所属项目 ID，必填（权限服务 v2 新增要求）。
         """
         try:
             resp = self._client.post(
@@ -457,6 +465,7 @@ class PermissionServiceClient:
                     "owner": "system",
                     "tenant_id": tenant_id,
                     "kb_id": kb_id,
+                    "project_id": project_id,
                     "idempotency_key": (
                         f"rag-unlink-{tenant_id}-{doc_id}-{kb_id}-v1"
                     ),
@@ -484,10 +493,12 @@ class PermissionServiceClient:
         resource_type: str,
         resource_id: str,
         tenant_id: str = "",
+        project_id: str = "rag-v14",
     ) -> str:
         """退役资源 → POST /v1/resources/retire。
 
         tenant_id 来自 ctx.tenant_id，由调用方传入。
+        project_id: 所属项目 ID，必填（权限服务 v2 新增要求）。
         """
         try:
             resp = self._client.post(
@@ -497,6 +508,7 @@ class PermissionServiceClient:
                     "resource_id": resource_id,
                     "owner": "system",
                     "tenant_id": tenant_id,
+                    "project_id": project_id,
                     "idempotency_key": (
                         f"rag-retire-{tenant_id}-{resource_type}-{resource_id}-v1"
                     ),

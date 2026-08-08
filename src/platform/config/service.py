@@ -27,6 +27,13 @@ class RetrievalConfig:
     haystack_pipeline_name: str = "query_v1"
     dense_weight: float = 0.5
     sparse_weight: float = 0.5
+    min_score: float = 0.0
+    # ── 合成参数 ──
+    refine_batch_size: int = 2            # 每批 2 chunk（质量-速度平衡）
+    tree_summarize_batch_size: int = 5
+    max_answer_length: int = 3000         # 答案超此长度则压缩
+    compress_target_length: int = 1000    # 压缩目标字数
+    doc_preview_max_chars: int = 1000     # 文档片段截断长度
 
 
 @dataclass
@@ -71,7 +78,11 @@ def resolve_retrieval_config(
                     for f in ("top_k", "retrieval_mode", "fusion_method",
                               "synthesis_mode", "rerank_model_id", "strict",
                               "oversample_factor", "min_results",
-                              "refetch_max_rounds", "haystack_pipeline_name"):
+                              "refetch_max_rounds", "haystack_pipeline_name",
+                              "dense_weight", "sparse_weight", "min_score",
+                              "refine_batch_size", "tree_summarize_batch_size",
+                              "max_answer_length", "compress_target_length",
+                              "doc_preview_max_chars"):
                         val = row.get(f)
                         if val is not None:
                             merged[f] = val

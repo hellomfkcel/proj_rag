@@ -20,6 +20,8 @@ export interface QueryOverrides {
   oversample_factor?: number;
   min_results?: number;
   refetch_max_rounds?: number;
+  refine_batch_size?: number;
+  doc_preview_max_chars?: number;
 }
 
 export interface QueryResult {
@@ -65,6 +67,8 @@ export async function query(question: string, kbIds: string[], convId?: string, 
     oversample_factor: overrides?.oversample_factor,
     min_results: overrides?.min_results,
     refetch_max_rounds: overrides?.refetch_max_rounds,
+    refine_batch_size: overrides?.refine_batch_size,
+    doc_preview_max_chars: overrides?.doc_preview_max_chars,
   });
   return data;
 }

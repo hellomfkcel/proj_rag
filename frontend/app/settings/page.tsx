@@ -12,7 +12,7 @@ import { isAdmin } from "@/lib/permissions";
 
 interface Model { model_id:string;model_type:string;provider:string;model_name:string;base_url:string;is_default:boolean; }
 interface Prompt { id:string;prompt_id:string;version:string;template_text:string;description:string;is_active:boolean; }
-interface RConfig { top_k:number;retrieval_mode:string;fusion_method:string;synthesis_mode:string;rerank_model_id:string;strict:boolean;oversample_factor:number;min_results:number;refetch_max_rounds:number;haystack_pipeline_name:string;dense_weight?:number;sparse_weight?:number; }
+interface RConfig { top_k:number;retrieval_mode:string;fusion_method:string;synthesis_mode:string;rerank_model_id:string;strict:boolean;oversample_factor:number;min_results:number;refetch_max_rounds:number;haystack_pipeline_name:string;dense_weight?:number;sparse_weight?:number;min_score?:number;refine_batch_size?:number;tree_summarize_batch_size?:number;max_answer_length?:number;compress_target_length?:number;doc_preview_max_chars?:number; }
 interface ChunkCfg { kb_id:string;version:string;haystack_strategy:string;split_length:number;split_overlap:number;advanced_params?:Record<string,any>; }
 
 const MODEL_TYPE_LABELS: Record<string, string> = { embedder: "📊 嵌入模型", generator: "🤖 生成模型", reranker: "🔍 重排模型" };
@@ -247,6 +247,19 @@ export default function SettingsPage() {
             <button onClick={()=>saveConfig({strict:!config.strict})} className={`px-3 py-1 rounded-full text-xs font-medium transition ${config.strict?"bg-green-100 text-green-700":"bg-gray-200 text-gray-500"}`}>
               {config.strict?"🟢 开启":"⚪ 关闭"}
             </button>
+          </div>
+          {/* ── 合成参数 ── */}
+          <div className="pt-3 border-t border-gray-100">
+            <p className="text-sm font-medium text-gray-700 mb-2">🎯 合成参数（Refine / Tree Summarize / Compact 共用）</p>
+            {[["refine_batch_size","Refine 每批 Chunk 数",1,5,1],["tree_summarize_batch_size","Tree Summarize 每批数",2,10,1],["doc_preview_max_chars","Chunk 截断长度(通用)",500,3000,100],["max_answer_length","Refine 答案压缩阈值",1000,5000,500],["compress_target_length","Refine 压缩目标长度",300,2000,100]].map(([key,label,min,max,step])=>(
+              <div key={key as string} className="flex items-center justify-between py-1">
+                <span className="text-xs text-gray-500">{label as string}: <b>{(config as any)[key] ?? {refine_batch_size:2,doc_preview_max_chars:1000,max_answer_length:3000,compress_target_length:1000}[key as string]}</b></span>
+                <input type="range" min={min as number} max={max as number} step={step as number}
+                  value={(config as any)[key] ?? {refine_batch_size:2,doc_preview_max_chars:1000,max_answer_length:3000,compress_target_length:1000}[key as string]}
+                  onChange={e => saveConfig({[key]:parseFloat(e.target.value)})}
+                  className="w-32" />
+              </div>
+            ))}
           </div>
         </div>
         {saved&&<p className="text-xs text-green-600 mt-2">✅ 已保存</p>}

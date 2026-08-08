@@ -1,10 +1,9 @@
 components:
   splitter:
-    type: haystack.components.preprocessors.document_splitter.DocumentSplitter
+    type: src.ingest.components.recursive_splitter.RecursiveDocumentSplitter
     init_parameters:
-      split_by: word
-      split_length: ${CHUNK_SPLIT_LENGTH}
-      split_overlap: ${CHUNK_SPLIT_OVERLAP}
+      chunk_size: ${CHUNK_SPLIT_LENGTH}
+      chunk_overlap: ${CHUNK_SPLIT_OVERLAP}
   embedder:
     type: src.ingest.components.bge_m3_embedder.BGE_M3DocumentEmbedder
     init_parameters:

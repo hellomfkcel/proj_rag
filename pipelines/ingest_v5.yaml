@@ -6,8 +6,6 @@ components:
       parent_split_overlap: 128
       child_split_length: ${CHUNK_CHILD_LENGTH}
       child_split_overlap: 32
-      parent_split_by: sentence
-      child_split_by: sentence
   embedder:
     type: src.ingest.components.bge_m3_embedder.BGE_M3DocumentEmbedder
     init_parameters:

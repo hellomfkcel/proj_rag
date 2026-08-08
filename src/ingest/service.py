@@ -46,6 +46,9 @@ _STRATEGY_PIPELINE_MAP = {
     "hierarchical":  "ingest_v5",
 }
 
+# 权威的切分策略枚举列表（供 kb_routes.py 等模块引用）
+VALID_CHUNKING_STRATEGIES = list(_STRATEGY_PIPELINE_MAP.keys())
+
 
 def _pipeline_for_strategy(strategy: str) -> str:
     """根据 haystack_strategy 返回对应的摄入 Pipeline 名称。
@@ -208,7 +211,9 @@ def ingest_document_task(
 
         try:
             raw_bytes = store.get(storage_path)
-            raw_text = raw_bytes.decode("utf-8", errors="replace")
+            from src.platform.store.encoding import detect_and_decode
+            raw_text, detected_enc = detect_and_decode(raw_bytes)
+            log.info("encoding_detected", encoding=detected_enc, storage_path=storage_path)
         except Exception as e:
             log.error("file_not_found_in_storage", key=storage_path, error=str(e))
             raise RuntimeError(f"Failed to read document from object storage: {storage_path}") from e
@@ -216,6 +221,9 @@ def ingest_document_task(
         # 1b. Pipeline 执行前再次检查 epoch（阶段三栅栏）
         if should_abort(mount_id, execution_epoch):
             return {"status": "aborted", "reason": "epoch_mismatch_before_pipeline"}
+
+        # 1c. 清理该文档在此 KB 的旧 chunk（重传/重解析场景，避免重复数据）
+        _delete_document_chunks_in_kb(document_id, kb_id)
 
         # 2. 执行摄入 Pipeline（经 P-TASK run_pipeline_sync——唯一入口）
         from haystack.dataclasses import Document as HaystackDocument
@@ -656,9 +664,59 @@ def _update_execution_status(mount_id: str, status: str) -> None:
         pass
 
 
+def _get_execution_status(mount_id: str) -> str | None:
+    """查询当前 parse_status（同步）。"""
+    import asyncpg
+    import asyncio
+
+    async def _do():
+        s = Settings()
+        conn = await asyncpg.connect(
+            s.database_url.replace("postgresql+asyncpg://", "postgresql://")
+        )
+        try:
+            return await conn.fetchval(
+                "SELECT parse_status FROM ingest_executions WHERE mount_id=$1",
+                mount_id,
+            )
+        finally:
+            await conn.close()
+
+    try:
+        return asyncio.run(_do())
+    except Exception:
+        return None
+
+
 # ══════════════════════════════════════════════════════════════════
 # cleanup_mount_chunks（阶段三：卸载时清理 Milvus chunk）
 # ══════════════════════════════════════════════════════════════════
+
+def _delete_document_chunks_in_kb(doc_id: str, kb_id: str) -> int:
+    """删除指定文档在指定 KB 的全部 Milvus chunk。
+
+    用于重传/重解析前清理旧数据，避免 chunk 重复。
+    """
+    from pymilvus import MilvusClient
+
+    s = Settings()
+    deleted = 0
+    try:
+        client = MilvusClient(uri=f"http://{s.milvus_host}:{s.milvus_port}")
+        expr = f'document_id == "{doc_id}" && kb_id == "{kb_id}"'
+        delete_result = client.delete(
+            collection_name="rag_documents",
+            filter=expr,
+        )
+        deleted = delete_result.get("delete_count", 0) if isinstance(delete_result, dict) else 0
+        if deleted > 0:
+            log.info("pre_ingest_chunks_cleaned", doc_id=doc_id, kb_id=kb_id,
+                     deleted=deleted)
+    except Exception as exc:
+        log.warning("pre_ingest_chunks_cleanup_failed", doc_id=doc_id, kb_id=kb_id,
+                    error=str(exc))
+    return deleted
+
 
 def cleanup_mount_chunks(mount_id: str, doc_id: str, kb_id: str) -> int:
     """卸载时清理一个挂载的全部 Milvus chunk。
@@ -669,31 +727,27 @@ def cleanup_mount_chunks(mount_id: str, doc_id: str, kb_id: str) -> int:
     3. 确认退出后 → 清理该挂载的 chunk
     4. 置 parse_status = 'removed'
     """
-    from pymilvus import MilvusClient
-
     # 1. 置 cancelling
     _update_execution_status(mount_id, "cancelling")
 
-    # 2. 等待在途任务退出（简化：等待 5s，生产环境用更可靠的通知机制）
+    # 2. 轮询等待在途任务退出（最长 5s，每 0.5s 检查一次）
     import time
-    time.sleep(5)
+    max_wait = 5.0
+    interval = 0.5
+    waited = 0.0
+    while waited < max_wait:
+        time.sleep(interval)
+        waited += interval
+        # 检查状态是否已稳定（非 processing）
+        current = _get_execution_status(mount_id)
+        if current in ("cancelling", "failed", "completed", "removed", None):
+            break
 
-    # 3. 清理 Milvus chunk（使用 MilvusClient API，与摄入管线一致）
-    s = Settings()
-    deleted = 0
-    try:
-        client = MilvusClient(uri=f"http://{s.milvus_host}:{s.milvus_port}")
-        expr = f'document_id == "{doc_id}" && kb_id == "{kb_id}"'
-        # MilvusClient.delete() 返回 delete_count
-        delete_result = client.delete(
-            collection_name="rag_documents",
-            filter=expr,
-        )
-        deleted = delete_result.get("delete_count", 0) if isinstance(delete_result, dict) else 0
-        log.info("mount_chunks_cleaned", mount_id=mount_id, doc_id=doc_id, kb_id=kb_id,
-                 deleted=deleted)
-    except Exception as exc:
-        log.error("mount_chunks_cleanup_failed", mount_id=mount_id, error=str(exc))
+    # 3. 清理 Milvus chunk
+    deleted = _delete_document_chunks_in_kb(doc_id, kb_id)
+    if deleted > 0:
+        log.info("mount_chunks_cleaned", mount_id=mount_id, doc_id=doc_id,
+                 kb_id=kb_id, deleted=deleted)
 
     # 4. 置 removed
     _update_execution_status(mount_id, "removed")

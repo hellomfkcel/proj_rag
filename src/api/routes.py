@@ -47,6 +47,8 @@ class QueryRequest(BaseModel):
     oversample_factor: Optional[float] = None    # 过采样系数（默认 1.5）
     min_results: Optional[int] = None            # 最小结果数（补检索触发阈值，默认 3）
     refetch_max_rounds: Optional[int] = None     # 最大补检索轮数（默认 2）
+    refine_batch_size: Optional[int] = None       # Refine 每批 chunk 数
+    doc_preview_max_chars: Optional[int] = None   # Chunk 截断长度
 
 
 class QueryResponse(BaseModel):
@@ -190,6 +192,8 @@ async def query(request: QueryRequest, ctx: RequestContext = Depends(get_request
         oversample_factor=request.oversample_factor,
         min_results=request.min_results,
         refetch_max_rounds=request.refetch_max_rounds,
+        refine_batch_size=request.refine_batch_size,
+        doc_preview_max_chars=request.doc_preview_max_chars,
     )
 
     # 6. 立即返回 — answer 和 chunk_ids 由 worker 经 Redis Pub/Sub → SSE 推送

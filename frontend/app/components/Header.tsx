@@ -304,6 +304,8 @@ export default function Header() {
                 <option value="sentence">按句子 (sentence)</option>
                 <option value="word">按词 (word)</option>
                 <option value="passage">按段落 (passage)</option>
+                <option value="semantic">语义 (semantic)</option>
+                <option value="hierarchical">层级 (hierarchical)</option>
               </select>
               <p className="text-xs text-gray-400 mt-1">创建后可在设置页更新切分配置</p>
             </div>

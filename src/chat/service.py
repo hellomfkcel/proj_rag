@@ -45,6 +45,8 @@ def retrieve_and_generate_task(
     oversample_factor: Optional[float] = None,
     min_results: Optional[int] = None,
     refetch_max_rounds: Optional[int] = None,
+    refine_batch_size: Optional[int] = None,
+    doc_preview_max_chars: Optional[int] = None,
 ) -> Dict[str, Any]:
     """检索 + 生成 Celery 任务。
 
@@ -104,6 +106,7 @@ def retrieve_and_generate_task(
         oversample_factor=effective_oversample,
         min_results=effective_min_results,
         refetch_max_rounds=effective_refetch,
+        min_score=retrieval_cfg.min_score,
     )
 
     documents = ret.get("documents", [])
@@ -121,17 +124,29 @@ def retrieve_and_generate_task(
             if effective_synthesis and effective_synthesis != "auto":
                 mode = effective_synthesis
             else:
-                mode = resolve_synthesis_mode(doc_count)
+                mode = resolve_synthesis_mode(doc_count, documents)
+            # Per-query overrides
+            _batch = refine_batch_size or retrieval_cfg.refine_batch_size
+            _max_chars = doc_preview_max_chars or retrieval_cfg.doc_preview_max_chars
+
             if mode == "compact":
-                answer = _synthesize_compact(user_question, documents)
+                answer = _synthesize_compact(user_question, documents,
+                    max_chars=_max_chars)
             elif mode == "refine":
-                answer = _synthesize_refine(user_question, documents)
+                answer = _synthesize_refine(user_question, documents,
+                    batch_size=_batch,
+                    max_answer_len=retrieval_cfg.max_answer_length,
+                    compress_target=retrieval_cfg.compress_target_length,
+                    max_chars=_max_chars)
             elif mode == "tree_summarize":
-                answer = _synthesize_tree_summarize(user_question, documents)
+                answer = _synthesize_tree_summarize(user_question, documents,
+                    batch_size=retrieval_cfg.tree_summarize_batch_size,
+                    max_chars=_max_chars)
             elif mode == "no_synthesis":
                 answer = _synthesize_no_synthesis(user_question, documents)
             else:
-                answer = _synthesize_compact(user_question, documents)
+                answer = _synthesize_compact(user_question, documents,
+                    max_chars=retrieval_cfg.doc_preview_max_chars)
 
             # 阶段三：引用校验
             if chunk_ids:
@@ -452,25 +467,33 @@ _DEFAULT_MERGE_TEMPLATE = (
 )
 
 
-def resolve_synthesis_mode(doc_count: int) -> str:
-    """根据文档数量自动选择 synthesis 模式。
+def resolve_synthesis_mode(doc_count: int, documents: list | None = None) -> str:
+    """根据文档总内容长度自动选择 synthesis 模式。
 
-    - 0 篇: no_synthesis（直接返回空结果）
-    - ≤5 篇: compact（一次性填充，最快）
-    - 6-20 篇: refine（逐篇精炼，平衡质量与速度）
-    - >20 篇: tree_summarize（分批摘要再汇总，适合大量文档）
+    基于内容长度而非 chunk 数量，避免小 chunk 多数量时误入 refine。
+    - 无文档: no_synthesis
+    - 总内容 < 3000 字符: compact（一次填充，最快）
+    - 3000-8000 字符: refine（分批精炼）
+    - >8000 字符: tree_summarize（大量文档）
     """
     if doc_count == 0:
         return "no_synthesis"
-    elif doc_count <= 5:
+
+    # 基于总内容长度决策（比 doc_count 更准确）
+    total_chars = sum(
+        len(d.content) if hasattr(d, "content") else len(str(d))
+        for d in (documents or [])
+    )
+
+    if total_chars < 3000:
         return "compact"
-    elif doc_count <= 20:
+    elif total_chars <= 8000:
         return "refine"
     else:
         return "tree_summarize"
 
 
-def _prepare_doc_list(documents: list, max_chars: int = 500) -> list:
+def _prepare_doc_list(documents: list, max_chars: int = 1000) -> list:
     """将 Haystack Document 列表转为模板可用的 dict 列表。"""
     result = []
     for doc in documents:
@@ -479,7 +502,7 @@ def _prepare_doc_list(documents: list, max_chars: int = 500) -> list:
     return result
 
 
-def _synthesize_compact(question: str, documents: list) -> str:
+def _synthesize_compact(question: str, documents: list, max_chars: int = 1000) -> str:
     """Compact 模式：使用 PromptBuilder 风格模板 + invoke_llm。
 
     适合 ≤5 篇文档的场景，速度最快。
@@ -493,49 +516,80 @@ def _synthesize_compact(question: str, documents: list) -> str:
     template = resolve_prompt("compact", "v1") or _DEFAULT_COMPACT_TEMPLATE
 
     # 渲染 prompt（等价于 Haystack PromptBuilder）
-    docs = _prepare_doc_list(documents)
+    docs = _prepare_doc_list(documents, max_chars=max_chars)
     prompt = build_prompt(template, {"query": question, "documents": docs})
 
     return invoke_llm(prompt)
 
 
-def _synthesize_refine(question: str, documents: list) -> str:
-    """Refine 模式：使用 PromptBuilder 风格模板 + invoke_llm。
+def _synthesize_refine(question: str, documents: list, batch_size: int = 3,
+                       max_answer_len: int = 3000, compress_target: int = 1000,
+                       max_chars: int = 1000) -> str:
+    """Refine 模式：批量 refine + 答案压缩。
 
-    从第一篇文档生成初始答案，后续每篇文档 refine 一次。
-    适合 6-20 篇文档。
+    - 初始答案：一次调用处理 batch_size 个 chunk
+    - 后续每批 batch_size 个 chunk 一次 refine 调用
+    - 答案超过 max_answer_len 字符时自动压缩防 prompt 膨胀
+
+    11 chunks → 1 init(3) + 3 batch(3,3,2) = 4 calls（原 11 calls → 7min 降至 ~3min）
     """
     from src.platform.model.registry import invoke_llm, resolve_prompt, build_prompt
 
     if not documents:
         return "未找到足够信息。"
 
-    # 初始答案（第一篇文档）
-    first_doc = documents[0]
-    content = first_doc.content if hasattr(first_doc, "content") else str(first_doc)
+    def _get_content(doc) -> str:
+        return (doc.content if hasattr(doc, "content") else str(doc))[:max_chars]
+
+    def _compress_answer(answer: str) -> str:
+        """将过长答案压缩为摘要。"""
+        if len(answer) <= max_answer_len:
+            return answer
+        compress_prompt = (
+            "请将以下答案精简为不超过{target}字的摘要，保留所有关键信息点：\n\n"
+            "{answer}"
+        ).format(target=compress_target, answer=answer[:3000])
+        return invoke_llm(compress_prompt)
+
+    # ── 初始答案（前 batch_size 个 chunk 合并） ──
+    batch_docs = documents[:batch_size]
+    combined_docs = "\n\n---\n\n".join(
+        f"[文档 {i+1}]\n{_get_content(d)}" for i, d in enumerate(batch_docs)
+    )
 
     init_template = resolve_prompt("refine_init", "v1") or _DEFAULT_REFINE_INIT_TEMPLATE
     init_prompt = build_prompt(init_template, {
         "query": question,
-        "current_doc": content[:1000],
+        "current_doc": combined_docs,
     })
     answer = invoke_llm(init_prompt)
 
-    # 逐篇 refine
+    # ── 分批 refine ──
     refine_template = resolve_prompt("refine", "v1") or _DEFAULT_REFINE_TEMPLATE
-    for doc in documents[1:]:
-        content = doc.content if hasattr(doc, "content") else str(doc)
+    remaining = documents[batch_size:]
+
+    for batch_start in range(0, len(remaining), batch_size):
+        batch = remaining[batch_start:batch_start + batch_size]
+        combined = "\n\n---\n\n".join(
+            f"[新文档 {batch_start + i + 1}]\n{_get_content(d)}"
+            for i, d in enumerate(batch)
+        )
+
+        # 压缩已有答案，防止 prompt 线膨胀
+        answer = _compress_answer(answer)
+
         refine_prompt = build_prompt(refine_template, {
             "query": question,
             "existing_answer": answer,
-            "current_doc": content[:1000],
+            "current_doc": combined,
         })
         answer = invoke_llm(refine_prompt)
 
     return answer
 
 
-def _synthesize_tree_summarize(question: str, documents: list, batch_size: int = 5) -> str:
+def _synthesize_tree_summarize(question: str, documents: list, batch_size: int = 5,
+                               max_chars: int = 1000) -> str:
     """Tree Summarize 模式：分批摘要 + 汇总合成。
 
     1. 将 N 篇文档分成 batch_size 大小的批次
@@ -556,7 +610,7 @@ def _synthesize_tree_summarize(question: str, documents: list, batch_size: int =
     summaries = []
     for batch_idx in range(0, len(documents), batch_size):
         batch = documents[batch_idx:batch_idx + batch_size]
-        docs = _prepare_doc_list(batch)
+        docs = _prepare_doc_list(batch, max_chars=max_chars)
         try:
             summary_prompt = build_prompt(summarize_template, {
                 "query": question,

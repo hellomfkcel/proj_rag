@@ -18,6 +18,7 @@ from circuitbreaker import CircuitBreaker
 
 from src.permission.context import RequestContext
 from src.permission.cerbos_client import get_client
+from src.config import Settings
 from src.platform.obs.logger import get_logger
 from src.platform.obs.metrics import record_authz_decision, record_authz_call_failed
 
@@ -390,6 +391,7 @@ def register_resource(ctx: RequestContext, resource_type: str, resource_id: str,
         ctx.request_id, ctx.credential, resource_type, resource_id, owner,
         tenant_id=ctx.tenant_id,
         name=name,
+        project_id=Settings().authz_project_id,
     )
     # KB 注册后触发该 KB 下全部文档的盖戳刷新（新 KB 授权可能影响已有文档可见性）
     if resource_type == "kb":
@@ -405,6 +407,7 @@ def link_resource(ctx: RequestContext, doc_id: str, kb_id: str) -> str:
     result = get_client().link_resource(
         ctx.request_id, ctx.credential, doc_id, kb_id,
         tenant_id=ctx.tenant_id,
+        project_id=Settings().authz_project_id,
     )
     # 挂载建立后触发该文档的盖戳刷新（新挂载可能改变可见性）
     try:
@@ -419,6 +422,7 @@ def unlink_resource(ctx: RequestContext, doc_id: str, kb_id: str) -> str:
     result = get_client().unlink_resource(
         ctx.request_id, ctx.credential, doc_id, kb_id,
         tenant_id=ctx.tenant_id,
+        project_id=Settings().authz_project_id,
     )
     # 挂载解除后触发盖戳清空（文档从 KB 移除）
     try:
@@ -433,6 +437,7 @@ def retire_resource(ctx: RequestContext, resource_type: str, resource_id: str) -
     result = get_client().retire_resource(
         ctx.request_id, ctx.credential, resource_type, resource_id,
         tenant_id=ctx.tenant_id,
+        project_id=Settings().authz_project_id,
     )
     # 资源退役后触发相关文档的盖戳清空
     try:

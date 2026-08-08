@@ -30,6 +30,7 @@ def retrieve(
     fusion_method: str = "rrf",
     dense_weight: float = 0.5,
     sparse_weight: float = 0.5,
+    min_score: float = 0.0,
 ) -> Dict[str, Any]:
     """执行 Haystack 查询 Pipeline：dense + sparse 混合检索 + RRF/weighted_sum 融合 + rerank。
 
@@ -191,6 +192,16 @@ def retrieve(
         allowed_pairs = l3_filter(ctx, doc_kb_pairs)
         allowed_doc_ids = {doc_id for doc_id, _ in allowed_pairs}
         all_docs = [d for d in all_docs if d.meta.get("document_id", "") in allowed_doc_ids]
+
+    # ── Score filter: 丢弃 rerank 得分低的不相关文档 ──
+    if min_score > 0 and all_docs:
+        filtered = [d for d in all_docs
+                    if d.meta.get("rerank_score", 999) >= min_score]
+        dropped = len(all_docs) - len(filtered)
+        if dropped > 0:
+            log.info("rerank_score_filter_dropped", dropped=dropped,
+                     remaining=len(filtered), min_score=min_score)
+        all_docs = filtered
 
     # ── Truncate to top_k ──
     all_docs = all_docs[:top_k]

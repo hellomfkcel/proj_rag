@@ -42,6 +42,12 @@ const DEFAULTS = {
   oversampleFactor: 1.5,
   minResults: 3,
   refetchMaxRounds: 2,
+  minScore: 0.0,
+  refineBatchSize: 2,
+  treeSummarizeBatchSize: 5,
+  docPreviewMaxChars: 1000,
+  maxAnswerLength: 3000,
+  compressTargetLength: 1000,
 };
 
 /** 从 localStorage 读取指定 KB 的最后使用参数 */
@@ -74,6 +80,11 @@ export default function InputBar({ input, onInputChange, onSend, disabled, kbNam
   const [oversampleFactor, setOversampleFactor] = useState(DEFAULTS.oversampleFactor);
   const [minResults, setMinResults] = useState(DEFAULTS.minResults);
   const [refetchMaxRounds, setRefetchMaxRounds] = useState(DEFAULTS.refetchMaxRounds);
+  const [refineBatchSize, setRefineBatchSize] = useState(DEFAULTS.refineBatchSize);
+  const [docPreviewMaxChars, setDocPreviewMaxChars] = useState(DEFAULTS.docPreviewMaxChars);
+  const [treeSummarizeBatchSize, setTreeSummarizeBatchSize] = useState(DEFAULTS.treeSummarizeBatchSize);
+  const [maxAnswerLength, setMaxAnswerLength] = useState(DEFAULTS.maxAnswerLength);
+  const [compressTargetLength, setCompressTargetLength] = useState(DEFAULTS.compressTargetLength);
 
   // 加载参数：优先级 localStorage > DB 设置页配置 > 硬编码默认值
   useEffect(() => {
@@ -111,6 +122,21 @@ export default function InputBar({ input, onInputChange, onSend, disabled, kbNam
 
       if (saved?.refetchMaxRounds !== undefined) setRefetchMaxRounds(saved.refetchMaxRounds);
       else if (cfg.refetch_max_rounds !== undefined) setRefetchMaxRounds(cfg.refetch_max_rounds);
+
+      if (saved?.refineBatchSize !== undefined) setRefineBatchSize(saved.refineBatchSize);
+      else if (cfg.refine_batch_size !== undefined) setRefineBatchSize(cfg.refine_batch_size);
+
+      if (saved?.docPreviewMaxChars !== undefined) setDocPreviewMaxChars(saved.docPreviewMaxChars);
+      else if (cfg.doc_preview_max_chars !== undefined) setDocPreviewMaxChars(cfg.doc_preview_max_chars);
+
+      if (saved?.treeSummarizeBatchSize !== undefined) setTreeSummarizeBatchSize(saved.treeSummarizeBatchSize);
+      else if (cfg.tree_summarize_batch_size !== undefined) setTreeSummarizeBatchSize(cfg.tree_summarize_batch_size);
+
+      if (saved?.maxAnswerLength !== undefined) setMaxAnswerLength(saved.maxAnswerLength);
+      else if (cfg.max_answer_length !== undefined) setMaxAnswerLength(cfg.max_answer_length);
+
+      if (saved?.compressTargetLength !== undefined) setCompressTargetLength(saved.compressTargetLength);
+      else if (cfg.compress_target_length !== undefined) setCompressTargetLength(cfg.compress_target_length);
     }).catch(() => {
       // DB 不可达时使用 localStorage 值或默认值
       if (saved) {
@@ -158,6 +184,8 @@ export default function InputBar({ input, onInputChange, onSend, disabled, kbNam
         oversample_factor: oversampleFactor,
         min_results: minResults,
         refetch_max_rounds: refetchMaxRounds,
+        refine_batch_size: refineBatchSize,
+        doc_preview_max_chars: docPreviewMaxChars,
       });
     } else {
       onSend(undefined);
@@ -249,6 +277,28 @@ export default function InputBar({ input, onInputChange, onSend, disabled, kbNam
               {strict ? "🟢 Strict 复核" : "⚪ Strict 关闭"}
             </button>
           </div>
+
+          {/* 合成参数 — 与设置页完全一致 */}
+          {(synthesisMode === "refine" || synthesisMode === "tree_summarize") && (
+            <div className="col-span-2 pt-2 border-t border-gray-100">
+              <p className="text-xs text-gray-400 mb-1">🎯 合成调参</p>
+              <div className="grid grid-cols-2 gap-x-3 gap-y-1">
+                {[["refineBatchSize","Refine 批数",1,5,1,refineBatchSize,setRefineBatchSize],
+                  ["treeSummarizeBatchSize","Tree 批数",2,10,1,treeSummarizeBatchSize,setTreeSummarizeBatchSize],
+                  ["docPreviewMaxChars","截断长度",500,3000,100,docPreviewMaxChars,setDocPreviewMaxChars],
+                  ["maxAnswerLength","压缩阈值",1000,5000,500,maxAnswerLength,setMaxAnswerLength],
+                  ["compressTargetLength","压缩目标",300,2000,100,compressTargetLength,setCompressTargetLength],
+                ].map(([key,label,min,max,step,val,setter]:any)=>(
+                <div key={key}>
+                  <label className="text-[10px] text-gray-400 block">{label}: <b>{val}</b></label>
+                  <input type="range" min={min} max={max} step={step} value={val}
+                    onChange={(e) => persistAndSet(setter, key, parseInt(e.target.value))}
+                    className="w-full h-1 bg-gray-200 rounded accent-orange-500" />
+                </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       )}
 

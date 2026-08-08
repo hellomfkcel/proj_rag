@@ -120,16 +120,41 @@ export default function ChatPage() {
       const msgs: Message[] = [];
       for (const t of turns) {
         msgs.push({ role: "user", content: t.user_question });
-        // 优先使用持久化的 answer；历史轮次无 answer 时回退到提示文本
-        const displayAnswer = t.answer
-          || (t.chunk_ids?.length ? "回答已生成（请刷新查看完整内容）" : "正在生成回答...");
         msgs.push({
           role: "assistant",
-          content: displayAnswer,
+          content: t.answer || (t.chunk_ids?.length ? "回答已生成（请刷新查看完整内容）" : "正在生成回答..."),
+          streaming: !t.answer,
           sources: (t.chunk_ids || []).map((id: string) => ({ chunk_id: id, content: "" })),
         });
       }
       setMessages(msgs);
+
+      // 后台静默轮询未完成的 turn：非阻塞 setInterval，不卡 UI
+      const lastTurn = turns[turns.length - 1];
+      if (lastTurn && !lastTurn.answer && lastTurn.turn_index) {
+        const POLL_MS = 2000, MAX_MS = 60_000;
+        const start = Date.now();
+        const timer = setInterval(async () => {
+          try {
+            const fresh = await getTurns(conv.id);
+            const t = fresh.find((x: any) => x.turn_index === lastTurn.turn_index);
+            if (t?.answer) {
+              clearInterval(timer);
+              setMessages(prev => {
+                const next = [...prev];
+                const last = next[next.length - 1];
+                if (last?.role === "assistant") {
+                  last.content = t.answer;
+                  last.streaming = false;
+                  last.sources = (t.chunk_ids || []).map((id: string) => ({ chunk_id: id, content: "" }));
+                }
+                return [...next];
+              });
+            }
+          } catch {}
+          if (Date.now() - start > MAX_MS) clearInterval(timer);
+        }, POLL_MS);
+      }
     } catch {
       setMessages([]);
     }
