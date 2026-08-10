@@ -3,7 +3,7 @@
 // P1-5: Advanced Options panel for per-query retrieval parameter overrides
 // P2: 检索参数持久化到 localStorage（按 KB 隔离），刷新页面后保持用户最后设置的值
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { getRetrievalConfig } from "@/lib/settings";
 
 export interface QueryOverrides {
@@ -72,6 +72,17 @@ function saveParams(kbId: string, params: Record<string, unknown>) {
 
 export default function InputBar({ input, onInputChange, onSend, disabled, kbName, kbId }: Props) {
   const canSend = !disabled && input.trim().length > 0 && kbName !== "请选择知识库";
+
+  // 输入框自动增高：内容多时最多长到 4 倍单行高度，超出则内部滚动
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const INPUT_MAX_HEIGHT = 160; // ≈ 4 行
+  const autoResize = useCallback(() => {
+    const ta = textareaRef.current;
+    if (!ta) return;
+    ta.style.height = "auto";
+    ta.style.height = `${Math.min(ta.scrollHeight, INPUT_MAX_HEIGHT)}px`;
+  }, []);
+  useEffect(() => { autoResize(); }, [input, autoResize]);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [retrievalMode, setRetrievalMode] = useState(DEFAULTS.retrievalMode);
   const [fusionMethod, setFusionMethod] = useState(DEFAULTS.fusionMethod);
@@ -318,13 +329,14 @@ export default function InputBar({ input, onInputChange, onSend, disabled, kbNam
         </button>
 
         <textarea
+          ref={textareaRef}
           value={input}
           onChange={(e) => onInputChange(e.target.value)}
           onKeyDown={handleKeyDown}
           placeholder={kbName && kbName !== "请选择知识库" ? `向 ${kbName} 提问... (Shift+Enter 换行)` : "请先选择知识库"}
           disabled={disabled || kbName === "请选择知识库"}
           rows={1}
-          className="flex-1 px-4 py-2.5 border border-gray-300 rounded-xl outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:bg-gray-100 text-sm transition resize-none"
+          className="flex-1 px-4 py-2.5 border border-gray-300 rounded-xl outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:bg-gray-100 text-sm transition resize-none overflow-y-auto"
         />
         <button
           onClick={handleSend}
