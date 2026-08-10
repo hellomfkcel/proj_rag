@@ -114,8 +114,12 @@ def resolve_retrieval_config(
         finally:
             await conn.close()
 
+    # 用 run_async_safe 而非裸 asyncio.run：本函数可能被 async 调用方
+    # （config 端点 / query 端点）调用，裸 asyncio.run 会抛 RuntimeError 被吞，
+    # 导致静默返回默认值（hybrid+auto）而非 DB 真实配置（慢查询根因）。
     try:
-        return asyncio.run(_query())
+        from src.platform.async_utils import run_async_safe
+        return run_async_safe(_query())
     except Exception:
         return RetrievalConfig()
 
@@ -159,7 +163,8 @@ def resolve_chunking_config(kb_id: str, version: Optional[str] = None) -> Chunki
             await conn.close()
 
     try:
-        return asyncio.run(_query())
+        from src.platform.async_utils import run_async_safe
+        return run_async_safe(_query())
     except Exception:
         return ChunkingConfig(kb_id=kb_id, version=version or "v1")
 

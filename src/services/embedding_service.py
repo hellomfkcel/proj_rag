@@ -6,7 +6,8 @@
 设计依据：
 - RAG系统设计v14.md §11 P-MODEL 模块边界
 - Layer 1: GPU 显存检查 + CPU 降级 (_get_device)
-- Layer 2: 空闲超时自动卸载 (GPU_MODEL_IDLE_TIMEOUT)
+- ★ 模型常驻：加载后进程生命周期内不卸载（共享服务是唯一模型持有者，
+  worker 经 HTTP 调用，不重复加载 → 无资源争夺）
 
 启动方式:
   uvicorn src.services.embedding_service:app --host 0.0.0.0 --port 19500
@@ -107,7 +108,7 @@ async def lifespan(app: FastAPI):
     yield
     # 关闭时释放 GPU 资源
     try:
-        from src.ingest.components.bge_m3_embedder import _model, _model_last_used
+        from src.ingest.components.bge_m3_embedder import _model
         import torch
         if _model is not None:
             _model = None  # noqa: F841 (global clear via import side-effect)

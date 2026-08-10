@@ -103,12 +103,14 @@ def _get_db_dsn() -> str:
 
 
 def _run_async(coro):
-    try:
-        return asyncio.run(coro)
-    except RuntimeError:
-        import nest_asyncio
-        nest_asyncio.apply()
-        return asyncio.run(coro)
+    """统一委托 P-platform run_async_safe（兼容同步/异步调用方）。
+
+    替换原有的 nest_asyncio loop-patch 变通：裸 asyncio.run 在已有 event loop
+    上下文（FastAPI async 端点）会抛 RuntimeError，nest_asyncio 补丁属于
+    绕过逻辑；run_async_safe 在无 loop 时直接 run、有 loop 时线程池桥接。
+    """
+    from src.platform.async_utils import run_async_safe
+    return run_async_safe(coro)
 
 
 # ── resolve_model ───────────────────────────────────────────────
@@ -378,10 +380,7 @@ def invoke_llm(prompt: str, model_id: Optional[str] = None,
 # ── invoke_rerank ───────────────────────────────────────────────
 
 _reranker_cache: Dict[str, Any] = {}
-_reranker_last_used: Dict[str, float] = {}
 _DEFAULT_RERANK_MODEL_NAME = "BAAI/bge-reranker-v2-m3"
-# 空闲超时（秒），与 BGE-M3 共享同一环境变量控制
-_RERANKER_IDLE_TIMEOUT = int(os.getenv("GPU_MODEL_IDLE_TIMEOUT", "300"))
 
 
 def _resolve_local_model_path(model_id: str) -> str:
@@ -423,23 +422,14 @@ def _get_reranker(model_name: str = _DEFAULT_RERANK_MODEL_NAME):
     GPU 显存需求约 1500 MiB（fp16 权重 ~1.1 GB + 推理临时空间）。
     空闲显存不足时自动降级 CPU。
 
-    空闲超时：距离上次使用超过 _RERANKER_IDLE_TIMEOUT 秒后自动卸载。
+    ★ 模型常驻：加载后进程生命周期内不卸载（用户指令——共享 embedding-service
+    应常驻模型，避免每次查询重载 20-40s）。共享服务是唯一模型持有者，
+    worker 经 HTTP 调用，不重复加载 → 无资源争夺。
 
     模型加载：优先从本地 HF/ModelScope 缓存加载（local_files_only=True），
     避免首次调用时联网校验超时。
     """
-    global _reranker_cache, _reranker_last_used
-    now = _time.time()
-
-    # ── 空闲超时检查 ──
-    if model_name in _reranker_cache and model_name in _reranker_last_used:
-        if now - _reranker_last_used[model_name] > _RERANKER_IDLE_TIMEOUT:
-            try:
-                del _reranker_cache[model_name]
-                import torch
-                torch.cuda.empty_cache()
-            except Exception:
-                _reranker_cache.pop(model_name, None)
+    global _reranker_cache
 
     if model_name not in _reranker_cache:
         from FlagEmbedding import FlagReranker
@@ -451,8 +441,6 @@ def _get_reranker(model_name: str = _DEFAULT_RERANK_MODEL_NAME):
             devices=_get_device(required_mb=1500),
             local_files_only=(model_path != model_name),
         )
-
-    _reranker_last_used[model_name] = _time.time()
     return _reranker_cache[model_name]
 
 
