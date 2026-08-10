@@ -66,100 +66,106 @@ export default function MessageList({ messages, msgEndRef, streamError }: Props)
           </div>
         </div>
       )}
-      {messages.map((msg, i) => (
-        <div key={i} className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
-          <div
-            className={`group max-w-[80%] rounded-2xl px-4 py-3 ${
-              msg.role === "user"
-                ? "bg-blue-600 text-white"
-                : msg.errorCode
-                  ? "bg-red-50 text-red-800 border border-red-200"
-                  : "bg-gray-100 text-gray-800"
-            }`}
-          >
-            {msg.role === "user" ? (
-              <p className="text-sm whitespace-pre-wrap">{msg.content}</p>
-            ) : (
-              <div>
-                {/* Error badge */}
-                {msg.errorCode && (
-                  <div className="flex items-center gap-1.5 mb-2 text-xs text-red-600">
-                    <span>⚠️</span>
-                    <span>{msg.errorCode === "retrieve:insufficient_evidence" ? "未找到足够信息" : "生成出错"}</span>
-                  </div>
-                )}
-
-                {/* Content */}
-                {msg.content ? (
-                  <p className="text-sm whitespace-pre-wrap leading-relaxed">
-                    {msg.content}
-                    {msg.streaming && (
-                      <span className="inline-block w-1.5 h-4 bg-blue-500 ml-1 animate-pulse rounded-sm align-middle" />
-                    )}
-                  </p>
-                ) : msg.streaming ? (
-                  <div className="flex items-center gap-1.5 py-1">
-                    <span className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: "0ms" }} />
-                    <span className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: "150ms" }} />
-                    <span className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: "300ms" }} />
-                  </div>
-                ) : null}
-
-                {/* Sources — 标注化来源 chips（文档名，点击弹窗看详情） */}
-                {msg.sources && msg.sources.length > 0 && (
-                  <div className="mt-3 pt-2 border-t border-gray-200">
-                    <p className="text-xs text-gray-400 mb-1.5">
-                      📎 {msg.sources.filter(s => s.content).length > 0 ? `${msg.sources.filter(s => s.content).length} 个引用来源` : `${msg.sources.length} 个来源`}
-                    </p>
-                    <div className="flex flex-wrap gap-1.5">
-                      {msg.sources.map((s, j) => (
-                        <SourcesCard key={j} index={j} source={s} />
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                {/* Trace 链路（可复制 trace_id + 跳转 Grafana Tempo） */}
-                {msg.trace_id && (
-                  <div className="mt-3 pt-2 border-t border-gray-200 flex items-center gap-2 text-xs text-gray-400">
-                    <span title={msg.trace_id}>🛰️ {msg.trace_id.slice(0, 12)}</span>
-                    <button
-                      type="button"
-                      onClick={() => navigator.clipboard?.writeText(msg.trace_id!)}
-                      className="hover:text-gray-600 underline"
-                    >
-                      复制
-                    </button>
-                    {msg.trace_ui_url && (
-                      <a href={msg.trace_ui_url} target="_blank" rel="noreferrer" className="hover:text-gray-600 underline">
-                        查看链路
-                      </a>
-                    )}
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* 复制按钮 — 放在内容下方；query 的图标 hover 才显示 */}
-            {msg.content && (
-              <div className="mt-1.5 flex justify-end">
+      {messages.map((msg, i) =>
+        msg.role === "user" ? (
+          /* ── 用户消息：贴合内容的文字框 + 框外复制图标（hover 显示） ── */
+          <div key={i} className="flex justify-end">
+            <div className="group flex items-start gap-1.5">
+              {msg.content && (
                 <button
                   type="button"
                   onClick={() => copyContent(i, msg.content)}
                   title="复制内容"
-                  className={`rounded-md p-1.5 transition-opacity duration-150 ${
-                    msg.role === "user"
-                      ? "text-blue-200 hover:text-white hover:bg-white/15 opacity-0 group-hover:opacity-100"
-                      : "text-gray-400 hover:text-gray-700 hover:bg-gray-200"
-                  }`}
+                  className="mt-1 rounded-md p-1.5 text-blue-300 hover:text-white hover:bg-white/20 opacity-0 group-hover:opacity-100 transition-opacity duration-150"
                 >
                   {copiedId === i ? <CheckIcon /> : <CopyIcon />}
                 </button>
+              )}
+              <div className="max-w-[80%] rounded-2xl bg-blue-600 text-white px-3 py-2">
+                <p className="text-sm whitespace-pre-wrap leading-relaxed">{msg.content}</p>
               </div>
-            )}
+            </div>
           </div>
-        </div>
-      ))}
+        ) : (
+          /* ── 助手消息 ── */
+          <div key={i} className="flex justify-start">
+            <div className={`max-w-[80%] rounded-2xl px-4 py-3 ${
+              msg.errorCode ? "bg-red-50 text-red-800 border border-red-200" : "bg-gray-100 text-gray-800"
+            }`}>
+              {/* Error badge */}
+              {msg.errorCode && (
+                <div className="flex items-center gap-1.5 mb-2 text-xs text-red-600">
+                  <span>⚠️</span>
+                  <span>{msg.errorCode === "retrieve:insufficient_evidence" ? "未找到足够信息" : "生成出错"}</span>
+                </div>
+              )}
+
+              {/* Content */}
+              {msg.content ? (
+                <p className="text-sm whitespace-pre-wrap leading-relaxed">
+                  {msg.content}
+                  {msg.streaming && (
+                    <span className="inline-block w-1.5 h-4 bg-blue-500 ml-1 animate-pulse rounded-sm align-middle" />
+                  )}
+                </p>
+              ) : msg.streaming ? (
+                <div className="flex items-center gap-1.5 py-1">
+                  <span className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: "0ms" }} />
+                  <span className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: "150ms" }} />
+                  <span className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: "300ms" }} />
+                </div>
+              ) : null}
+
+              {/* Sources — 标注化来源 chips（文档名，点击弹窗看详情） */}
+              {msg.sources && msg.sources.length > 0 && (
+                <div className="mt-3 pt-2 border-t border-gray-200">
+                  <p className="text-xs text-gray-400 mb-1.5">
+                    📎 {msg.sources.filter(s => s.content).length > 0 ? `${msg.sources.filter(s => s.content).length} 个引用来源` : `${msg.sources.length} 个来源`}
+                  </p>
+                  <div className="flex flex-wrap gap-1.5">
+                    {msg.sources.map((s, j) => (
+                      <SourcesCard key={j} index={j} source={s} />
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Trace 链路（可复制 trace_id + 跳转 Grafana Tempo） */}
+              {msg.trace_id && (
+                <div className="mt-3 pt-2 border-t border-gray-200 flex items-center gap-2 text-xs text-gray-400">
+                  <span title={msg.trace_id}>🛰️ {msg.trace_id.slice(0, 12)}</span>
+                  <button
+                    type="button"
+                    onClick={() => navigator.clipboard?.writeText(msg.trace_id!)}
+                    className="hover:text-gray-600 underline"
+                  >
+                    复制
+                  </button>
+                  {msg.trace_ui_url && (
+                    <a href={msg.trace_ui_url} target="_blank" rel="noreferrer" className="hover:text-gray-600 underline">
+                      查看链路
+                    </a>
+                  )}
+                </div>
+              )}
+
+              {/* 复制按钮 — 放在内容下方 */}
+              {msg.content && (
+                <div className="mt-1.5 flex justify-end">
+                  <button
+                    type="button"
+                    onClick={() => copyContent(i, msg.content)}
+                    title="复制内容"
+                    className="rounded-md p-1.5 text-gray-400 hover:text-gray-700 hover:bg-gray-200 transition-colors"
+                  >
+                    {copiedId === i ? <CheckIcon /> : <CopyIcon />}
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+        )
+      )}
       <div ref={msgEndRef} />
     </div>
   );
