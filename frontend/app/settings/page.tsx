@@ -1,12 +1,12 @@
 "use client";
 // Settings Page — models, retrieval config, chunking config, prompts with preview
 
-import { useEffect, useState, useMemo } from "react";
+import { Fragment, useEffect, useState, useMemo } from "react";
 import { useAuthStore } from "@/stores/useAuthStore";
 import { useKBStore } from "@/stores/useKBStore";
 import Header from "@/app/components/Header";
 import { listModels, setDefaultModel, getRetrievalConfig, updateRetrievalConfig,
-         listPrompts, activatePrompt, getAppConfig } from "@/lib/settings";
+         listPrompts, activatePrompt, updatePrompt, getAppConfig } from "@/lib/settings";
 import { getChunkingConfig, updateChunkingConfig } from "@/lib/kb";
 import { isAdmin } from "@/lib/permissions";
 
@@ -34,6 +34,12 @@ export default function SettingsPage() {
   // Prompt selector state
   const [selectedPromptId, setSelectedPromptId] = useState<string | null>(null);
   const [expandedPrompt, setExpandedPrompt] = useState<string | null>(null);
+  // Prompt edit state
+  const [editingPromptId, setEditingPromptId] = useState<string | null>(null);
+  const [editText, setEditText] = useState("");
+  const [editDesc, setEditDesc] = useState("");
+  const [savingPrompt, setSavingPrompt] = useState(false);
+  const [promptError, setPromptError] = useState<string | null>(null);
 
   useEffect(()=>{if(!token)return;fetchModels();fetchPrompts();getAppConfig().then(setAppCfg).catch(()=>{});},[token]);
   useEffect(()=>{if(selectedKB){fetchConfig();fetchChunkConfig();}},[selectedKB]);
@@ -64,6 +70,33 @@ export default function SettingsPage() {
   const handleActivatePrompt = async (promptId: string) => {
     await activatePrompt(promptId);
     fetchPrompts();
+  };
+
+  const startEditPrompt = (p: Prompt) => {
+    setEditingPromptId(p.id);
+    setEditText(p.template_text);
+    setEditDesc(p.description || "");
+    setPromptError(null);
+  };
+
+  const cancelEditPrompt = () => {
+    setEditingPromptId(null);
+    setPromptError(null);
+  };
+
+  const handleUpdatePrompt = async () => {
+    if (!editingPromptId) return;
+    setSavingPrompt(true);
+    setPromptError(null);
+    try {
+      await updatePrompt(editingPromptId, { template_text: editText, description: editDesc || undefined });
+      setEditingPromptId(null);
+      await fetchPrompts();
+    } catch (e: any) {
+      setPromptError(e?.response?.data?.detail || "保存失败，请重试");
+    } finally {
+      setSavingPrompt(false);
+    }
   };
 
   // Group prompts by prompt_id
@@ -384,28 +417,72 @@ export default function SettingsPage() {
                     <div className="border-t border-gray-100 px-4 py-3 bg-white rounded-b-lg">
                       <div className="space-y-2">
                         {versions.sort((a,b) => b.version.localeCompare(a.version)).map(v => (
-                          <div key={v.id} className={`flex items-center justify-between px-3 py-2 rounded-lg text-sm transition ${
-                            v.is_active ? "bg-green-50 border border-green-200" : "bg-gray-50 border border-gray-100 hover:bg-gray-100"
-                          }`}>
-                            <div className="flex-1 min-w-0">
-                              <div className="flex items-center gap-2">
-                                <span className="font-medium text-gray-700">v{v.version}</span>
-                                {v.description && <span className="text-xs text-gray-400 truncate">— {v.description.slice(0, 60)}</span>}
+                          <Fragment key={v.id}>
+                            <div className={`flex items-center justify-between px-3 py-2 rounded-lg text-sm transition ${
+                              v.is_active ? "bg-green-50 border border-green-200" : "bg-gray-50 border border-gray-100 hover:bg-gray-100"
+                            }`}>
+                              <div className="flex-1 min-w-0">
+                                <div className="flex items-center gap-2">
+                                  <span className="font-medium text-gray-700">v{v.version}</span>
+                                  {v.description && <span className="text-xs text-gray-400 truncate">— {v.description.slice(0, 60)}</span>}
+                                </div>
+                                <p className="text-xs text-gray-500 mt-0.5 line-clamp-1 font-mono">{v.template_text.slice(0, 100)}</p>
                               </div>
-                              <p className="text-xs text-gray-500 mt-0.5 line-clamp-1 font-mono">{v.template_text.slice(0, 100)}</p>
-                            </div>
-                            <div className="shrink-0 ml-3">
-                              {v.is_active ? (
-                                <span className="text-xs text-green-600 font-medium bg-green-100 px-2 py-0.5 rounded-full">✓ 激活</span>
-                              ) : (
+                              <div className="shrink-0 ml-3 flex items-center gap-2">
                                 <button
-                                  onClick={(e) => { e.stopPropagation(); handleActivatePrompt(v.id); }}
-                                  className="text-xs bg-blue-600 text-white px-2.5 py-1 rounded-full hover:bg-blue-700 font-medium transition">
-                                  激活此版本
+                                  onClick={(e) => { e.stopPropagation(); startEditPrompt(v); }}
+                                  className="text-xs bg-gray-200 text-gray-700 px-2.5 py-1 rounded-full hover:bg-gray-300 font-medium transition">
+                                  ✏️ 编辑
                                 </button>
-                              )}
+                                {v.is_active ? (
+                                  <span className="text-xs text-green-600 font-medium bg-green-100 px-2 py-0.5 rounded-full">✓ 激活</span>
+                                ) : (
+                                  <button
+                                    onClick={(e) => { e.stopPropagation(); handleActivatePrompt(v.id); }}
+                                    className="text-xs bg-blue-600 text-white px-2.5 py-1 rounded-full hover:bg-blue-700 font-medium transition">
+                                    激活此版本
+                                  </button>
+                                )}
+                              </div>
                             </div>
-                          </div>
+                            {/* 内联编辑面板 */}
+                            {editingPromptId === v.id && (
+                              <div className="mt-2 p-3 bg-white border border-blue-200 rounded-lg space-y-2">
+                                <div>
+                                  <span className="text-xs text-gray-400 font-medium">模板内容（Jinja2）</span>
+                                  <textarea
+                                    value={editText}
+                                    onChange={(e) => setEditText(e.target.value)}
+                                    rows={6}
+                                    className="mt-1 w-full p-2 border border-gray-200 rounded-lg text-xs font-mono leading-relaxed focus:outline-none focus:ring-1 focus:ring-blue-400"
+                                  />
+                                </div>
+                                <div>
+                                  <span className="text-xs text-gray-400 font-medium">描述（可选）</span>
+                                  <input
+                                    value={editDesc}
+                                    onChange={(e) => setEditDesc(e.target.value)}
+                                    className="mt-1 w-full p-2 border border-gray-200 rounded-lg text-xs focus:outline-none focus:ring-1 focus:ring-blue-400"
+                                  />
+                                </div>
+                                {promptError && <p className="text-xs text-red-600">{promptError}</p>}
+                                <div className="flex justify-end gap-2">
+                                  <button
+                                    onClick={cancelEditPrompt}
+                                    disabled={savingPrompt}
+                                    className="text-xs bg-gray-100 text-gray-600 px-3 py-1.5 rounded-lg hover:bg-gray-200 font-medium">
+                                    取消
+                                  </button>
+                                  <button
+                                    onClick={handleUpdatePrompt}
+                                    disabled={savingPrompt || !editText.trim()}
+                                    className="text-xs bg-blue-600 text-white px-3 py-1.5 rounded-lg hover:bg-blue-700 font-medium disabled:opacity-50">
+                                    {savingPrompt ? "保存中…" : "保存修改"}
+                                  </button>
+                                </div>
+                              </div>
+                            )}
+                          </Fragment>
                         ))}
                       </div>
                     </div>
