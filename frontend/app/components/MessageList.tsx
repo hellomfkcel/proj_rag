@@ -103,7 +103,7 @@ export default function MessageList({ messages, msgEndRef, streamError }: Props)
                   type="button"
                   onClick={() => copyContent(i, msg.content)}
                   title="复制内容"
-                  className="absolute -bottom-3 right-0 rounded-full bg-white p-1.5 text-gray-500 shadow-md ring-1 ring-gray-200 hover:text-gray-800 hover:bg-gray-50 active:scale-90 transition-all duration-150 opacity-0 group-hover:opacity-100"
+                  className="absolute top-full mt-1.5 right-0 rounded-md bg-white p-1.5 text-gray-500 shadow-md ring-1 ring-gray-200 hover:text-gray-800 hover:bg-gray-50 active:scale-90 transition-all duration-150 opacity-0 group-hover:opacity-100"
                 >
                   {copiedId === i ? <CheckIcon /> : <CopyIcon />}
                 </button>
