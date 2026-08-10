@@ -166,6 +166,7 @@ celery_app.conf.update(
     task_routes={
         "src.ingest.service.ingest_document_task": {"queue": "ingestion_queue"},
         "src.chat.service.retrieve_and_generate_task": {"queue": "retrieval_queue"},
+        "src.chat.service.evaluate_query_task": {"queue": "retrieval_queue"},
         "src.ingest.service.stamp_channel_task": {"queue": "stamping_queue"},
         "src.platform.task.reconciliation.reconcile_mirror_beat": {"queue": "ingestion_queue"},
         "src.platform.task.reconciliation.reconcile_stamps_beat": {"queue": "stamping_queue"},
