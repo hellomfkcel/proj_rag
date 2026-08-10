@@ -48,24 +48,140 @@ def retrieve_and_generate_task(
     refine_batch_size: Optional[int] = None,
     doc_preview_max_chars: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """检索 + 生成 Celery 任务。
+    """检索 + 生成 Celery 任务（线上路径）。
 
-    在 retrieval-worker 中执行：
-    1. 从 ctx_token 重建 ctx
-    2. 调 B-RETRIEVE.retrieve 执行三层检索
-    3. 调 LLM 生成（查询 Pipeline 生成节点）
-    4. 结果通过 Redis Pub/Sub 流式回传
-    5. 写 conversation_turn
+    在 retrieval-worker 中执行。检索 + 生成核心逻辑在 _run_retrieve_generate
+    （与评测任务共用，保证线上/评测完全一致）；本任务额外负责副作用：
+    Redis Pub/Sub 流式回传 → 写 conversation_turn → 审计。
 
     阶段一：resolved_query = user_question（直接透传）
     阶段二：LLM 多轮改写
     P1-5: 支持 Per-Query 检索参数覆盖（retrieval_mode/fusion_method/strict/top_k）
     """
+    r = _run_retrieve_generate(
+        user_question=user_question,
+        kb_ids=kb_ids,
+        tenant_id=tenant_id,
+        ctx_token=ctx_token,
+        conversation_id=conversation_id,
+        turn_index=turn_index,
+        retrieval_mode=retrieval_mode,
+        fusion_method=fusion_method,
+        strict=strict,
+        top_k=top_k,
+        dense_weight=dense_weight,
+        sparse_weight=sparse_weight,
+        synthesis_mode=synthesis_mode,
+        oversample_factor=oversample_factor,
+        min_results=min_results,
+        refetch_max_rounds=refetch_max_rounds,
+        refine_batch_size=refine_batch_size,
+        doc_preview_max_chars=doc_preview_max_chars,
+    )
+    answer = r["answer"]
+    chunk_ids = r["chunk_ids"]
+    documents = r["documents"]
+    resolved_query = r["resolved_query"]
+    ctx = r["ctx"]
+    s = Settings()
+
+    # 3. Redis Pub/Sub 流式回传
+    try:
+        import redis
+        rr = redis.from_url(s.redis_url)
+        channel = f"query-stream:{conversation_id}:{turn_index}"
+
+        # 引用来源：带 chunk 原文前 200 字，供前端 HoverCard 展示
+        chunk_sources = []
+        for j, doc in enumerate(documents[:5]):
+            chunk_sources.append({
+                "chunk_id": doc.id if hasattr(doc, "id") else str(j),
+                "content": (doc.content[:200] if hasattr(doc, "content") else str(doc)[:200]),
+                "score": doc.meta.get("score", 0) if hasattr(doc, "meta") else 0,
+            } if hasattr(doc, "content") else {"chunk_id": str(j), "content": str(doc)[:200]})
+
+        rr.publish(channel, json.dumps({
+            "event": "retrieved",
+            "chunk_ids": chunk_ids,
+            "chunks": chunk_sources,
+        }, default=str))
+
+        rr.publish(channel, json.dumps({
+            "event": "token",
+            "content": answer,
+        }, default=str))
+
+        rr.publish(channel, json.dumps({"event": "done"}, default=str))
+
+        rr.close()
+    except Exception as exc:
+        log.warning("redis_publish_failed", error=str(exc))
+
+    # 4. 写 conversation_turn（含 LLM 生成的答案，供前端刷新时加载历史）
+    _save_turn(
+        conversation_id=conversation_id,
+        turn_index=turn_index,
+        user_question=user_question,
+        resolved_query=resolved_query,
+        chunk_ids=chunk_ids,
+        pipeline_yaml_version=yaml_version,
+        answer=answer,
+    )
+
+    # 5. 审计（request_id=ctx.request_id=OTel trace_id，供 audit↔Tempo 四方互跳，§7.3）
+    from src.platform.audit.service import emit_audit_event
+    try:
+        emit_audit_event(
+            event_type="KB_QUERY",
+            request_id=ctx.request_id,
+            user_id=ctx.user_id,
+            tenant_id=tenant_id,
+            action="kb:read",
+            resource_type="conversation",
+            resource_id=conversation_id,
+            allowed=True,
+            returned_count=len(chunk_ids),
+        )
+    except Exception:
+        pass
+
+    return {
+        "answer": answer,
+        "chunk_ids": chunk_ids,
+        "chunk_count": len(chunk_ids),
+    }
+
+
+def _run_retrieve_generate(
+    user_question: str,
+    kb_ids: List[str],
+    tenant_id: str,
+    ctx_token: str = "",
+    *,
+    conversation_id: str = "",
+    turn_index: int = 1,
+    retrieval_mode: Optional[str] = None,
+    fusion_method: Optional[str] = None,
+    strict: Optional[bool] = None,
+    top_k: Optional[int] = None,
+    dense_weight: float = 0.5,
+    sparse_weight: float = 0.5,
+    synthesis_mode: Optional[str] = None,
+    oversample_factor: Optional[float] = None,
+    min_results: Optional[int] = None,
+    refetch_max_rounds: Optional[int] = None,
+    refine_batch_size: Optional[int] = None,
+    doc_preview_max_chars: Optional[int] = None,
+) -> Dict[str, Any]:
+    """检索 + 生成共享核心（线上任务与评测任务共用，保证逻辑完全一致）。
+
+    返回完整中间结果，供线上任务做副作用、评测任务透出：
+    { query, resolved_query, answer, chunk_ids, is_answerable,
+      contexts, retrieved_chunks, documents, ctx }
+    """
     from src.retrieve.service import retrieve
     from src.permission.context import build_context, resolve_ctx_token
-    from src.platform.model.registry import invoke_llm, resolve_prompt
-
-    s = Settings()
+    from src.platform.config.service import resolve_retrieval_config
 
     # resolved_query（阶段二：LLM 多轮改写；阶段一为透传）
     resolved_query = _rewrite_query(conversation_id, user_question, turn_index)
@@ -77,8 +193,7 @@ def retrieve_and_generate_task(
     else:
         raise ValueError("ctx_token is required for retrieval tasks")
 
-    # 解析检索配置（P1-6/7: retrieval_mode + rerank_model_id 动态读取）
-    from src.platform.config.service import resolve_retrieval_config
+    # 2. 解析检索配置（P1-6/7: retrieval_mode + rerank_model_id 动态读取）
     kb_id = kb_ids[0] if kb_ids else ""
     retrieval_cfg = resolve_retrieval_config(kb_id=kb_id, tenant_id=tenant_id)
 
@@ -112,7 +227,7 @@ def retrieve_and_generate_task(
     documents = ret.get("documents", [])
     chunk_ids = ret.get("chunk_ids", [])
 
-    # 2. LLM 生成（选择 synthesis 模式）
+    # 3. LLM 生成（选择 synthesis 模式）
     if not documents:
         answer = "未找到足够信息。"
         chunk_ids = []
@@ -158,70 +273,67 @@ def retrieve_and_generate_task(
             log.error("llm_call_failed", error=str(exc))
             answer = "服务暂时不可用，请稍后重试。"
 
-    # 3. Redis Pub/Sub 流式回传
-    try:
-        import redis
-        r = redis.from_url(s.redis_url)
-        channel = f"query-stream:{conversation_id}:{turn_index}"
-
-        # 引用来源：带 chunk 原文前 200 字，供前端 HoverCard 展示
-        chunk_sources = []
-        for j, doc in enumerate(documents[:5]):
-            chunk_sources.append({
-                "chunk_id": doc.id if hasattr(doc, "id") else str(j),
-                "content": (doc.content[:200] if hasattr(doc, "content") else str(doc)[:200]),
-                "score": doc.meta.get("score", 0) if hasattr(doc, "meta") else 0,
-            } if hasattr(doc, "content") else {"chunk_id": str(j), "content": str(doc)[:200]})
-
-        r.publish(channel, json.dumps({
-            "event": "retrieved",
-            "chunk_ids": chunk_ids,
-            "chunks": chunk_sources,
-        }, default=str))
-
-        r.publish(channel, json.dumps({
-            "event": "token",
-            "content": answer,
-        }, default=str))
-
-        r.publish(channel, json.dumps({"event": "done"}, default=str))
-
-        r.close()
-    except Exception as exc:
-        log.warning("redis_publish_failed", error=str(exc))
-
-    # 4. 写 conversation_turn（含 LLM 生成的答案，供前端刷新时加载历史）
-    _save_turn(
-        conversation_id=conversation_id,
-        turn_index=turn_index,
-        user_question=user_question,
-        resolved_query=resolved_query,
-        chunk_ids=chunk_ids,
-        pipeline_yaml_version=yaml_version,
-        answer=answer,
-    )
-
-    # 5. 审计（request_id=ctx.request_id=OTel trace_id，供 audit↔Tempo 四方互跳，§7.3）
-    from src.platform.audit.service import emit_audit_event
-    try:
-        emit_audit_event(
-            event_type="KB_QUERY",
-            request_id=ctx.request_id,
-            user_id=ctx.user_id,
-            tenant_id=tenant_id,
-            action="kb:read",
-            resource_type="conversation",
-            resource_id=conversation_id,
-            allowed=True,
-            returned_count=len(chunk_ids),
-        )
-    except Exception:
-        pass
+    # 评测透出字段（实际喂给 LLM 的截断片段 + 检索到的 chunk）
+    max_chars = doc_preview_max_chars or retrieval_cfg.doc_preview_max_chars
+    contexts = [doc.content[:max_chars] if hasattr(doc, "content") else str(doc)[:max_chars]
+                for doc in documents]
+    retrieved_chunks = [
+        {
+            "chunk_id": doc.id if hasattr(doc, "id") else str(i),
+            "text": doc.content if hasattr(doc, "content") else str(doc),
+            "score": float(doc.meta.get("score", doc.meta.get("rerank_score", 0.0))
+                          if hasattr(doc, "meta") else 0.0),
+            "rank": i + 1,
+        }
+        for i, doc in enumerate(documents)
+    ]
 
     return {
+        "query": user_question,
+        "resolved_query": resolved_query,
         "answer": answer,
         "chunk_ids": chunk_ids,
-        "chunk_count": len(chunk_ids),
+        "is_answerable": bool(documents),
+        "contexts": contexts,
+        "retrieved_chunks": retrieved_chunks,
+        "documents": documents,
+        "ctx": ctx,
+    }
+
+
+@celery_app.task(
+    bind=True,
+    acks_late=True,
+    reject_on_worker_lost=True,
+    max_retries=0,
+    queue="retrieval_queue",
+)
+def evaluate_query_task(
+    self,
+    query: str,
+    kb_ids: List[str],
+    tenant_id: str,
+    ctx_token: str = "",
+) -> Dict[str, Any]:
+    """评测任务：复用线上同一套检索+生成核心，返回完整评测契约。
+
+    由 /query/eval 端点调度；无对话副作用（不写 turn、不发流、不审计，
+    与线上流量隔离）。检索/生成逻辑与线上 /query 完全一致（共用 _run_retrieve_generate）。
+    """
+    r = _run_retrieve_generate(
+        user_question=query,
+        kb_ids=kb_ids,
+        tenant_id=tenant_id,
+        ctx_token=ctx_token,
+        turn_index=1,
+        conversation_id="",
+    )
+    return {
+        "query": r["query"],
+        "answer": r["answer"],
+        "is_answerable": r["is_answerable"],
+        "contexts": r["contexts"],
+        "retrieved_chunks": r["retrieved_chunks"],
     }
 
 

@@ -106,6 +106,7 @@ from src.api.chat_routes import router as chat_router
 from src.api.dir_routes import router as dir_router
 from src.api.settings_routes import router as settings_router
 from src.api.dashboard_routes import router as dashboard_router
+from src.api.eval_routes import router as eval_router
 from src.permission.middleware import AuthMiddleware
 from src.config import Settings as _Settings
 
@@ -132,6 +133,7 @@ app.include_router(chat_router)
 app.include_router(dir_router)
 app.include_router(settings_router)
 app.include_router(dashboard_router)
+app.include_router(eval_router)
 
 
 @app.get("/healthz")
