@@ -7,6 +7,7 @@ export interface Conversation {
 }
 export interface Turn {
   id: string; turn_index: number; user_question: string; resolved_query: string; answer: string; chunk_ids: string[];
+  trace_id?: string;
 }
 
 export interface QueryOverrides {
@@ -27,6 +28,8 @@ export interface QueryOverrides {
 export interface QueryResult {
   answer: string; chunk_ids: string[]; conversation_id: string; turn_index: number;
   error_code?: string;
+  trace_id?: string;       // 本次查询的 OTel trace_id（跳 Tempo 查看链路）
+  trace_ui_url?: string;   // Grafana Tempo 查看链路深链
 }
 
 export async function listConversations() {

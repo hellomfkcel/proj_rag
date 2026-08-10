@@ -87,7 +87,7 @@ async def main():
         if model_count == 0:
             models = [
                 ("qwen3-8b", "llm", "ollama", "qwen3:8b", "http://localhost:11434", True),
-                ("deepseek-chat", "llm", "openai_compat", "deepseek-chat", "https://api.deepseek.com", False),
+                ("deepseek-chat", "llm", "deepseek", "deepseek-v4-flash", "https://api.deepseek.com/v1", False),
                 ("qwen3-embed", "embedding", "ollama", "qwen3-embedding:0.6b", "http://localhost:11434", True),
                 ("bge-m3", "embedding", "sentence_transformers", "BAAI/bge-m3", "", True),
                 ("bge-reranker-v2-m3", "reranker", "sentence_transformers", "BAAI/bge-reranker-v2-m3", "", True),

@@ -79,6 +79,10 @@ class Settings:
     # API Key（OpenAI / vLLM / DeepSeek 等需要；Ollama 不需要）
     llm_api_key: str = os.getenv("LLM_API_KEY", "ollama")
 
+    # LLM 生成参数（P-MODEL invoke_llm 默认值，env 可覆盖；推理类模型需预留 reasoning token 预算）
+    llm_max_tokens: int = int(os.getenv("LLM_MAX_TOKENS", "8192"))
+    llm_temperature: float = float(os.getenv("LLM_TEMPERATURE", "0.1"))
+
     # 向下兼容（registry.py / pipeline_runner 仍在用）
     @property
     def ollama_base_url(self) -> str: return self.llm_base_url
@@ -109,6 +113,8 @@ class Settings:
     # ── 前端外部链接（Dashboard / 设置页跳转） ──
     # 浏览器通过局域网 IP 访问这些服务，默认回退到后端连接地址
     grafana_url: str = os.getenv("GRAFANA_URL", "http://localhost:3000")
+    # Grafana Tempo 数据源 UID（前端 trace 深链跳转用；观测栈 provision 固定为 tempo-uid）
+    grafana_tempo_datasource_uid: str = os.getenv("GRAFANA_TEMPO_DATASOURCE_UID", "tempo-uid")
     langfuse_public_url: str = os.getenv("LANGFUSE_PUBLIC_URL", os.getenv("LANGFUSE_HOST", "http://localhost:13000"))
     cerbos_public_url: str = os.getenv("CERBOS_PUBLIC_URL", os.getenv("AUTHZ_BASE_URL", "http://localhost:13592"))
     admin_console_url: str = os.getenv("ADMIN_CONSOLE_URL", "")

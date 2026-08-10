@@ -142,6 +142,7 @@ class TurnResponse(BaseModel):
     resolved_query: str
     answer: str = ""
     chunk_ids: List[str] = []
+    trace_id: str = ""
     created_at: str
 
 
@@ -150,7 +151,7 @@ async def list_turns(conv_id: str, ctx: RequestContext = Depends(get_request_con
     conn = await asyncpg.connect(_dsn())
     try:
         rows = await conn.fetch(
-            "SELECT id, turn_index, user_question, resolved_query, answer, retrieved_chunk_ids, created_at "
+            "SELECT id, turn_index, user_question, resolved_query, answer, retrieved_chunk_ids, trace_id, created_at "
             "FROM conversation_turns WHERE conversation_id=$1 ORDER BY turn_index ASC",
             conv_id,
         )
@@ -159,6 +160,7 @@ async def list_turns(conv_id: str, ctx: RequestContext = Depends(get_request_con
                 id=str(r["id"]), turn_index=r["turn_index"],
                 user_question=r["user_question"], resolved_query=r["resolved_query"],
                 answer=r["answer"] or "", chunk_ids=r["retrieved_chunk_ids"] or [],
+                trace_id=r["trace_id"] or "",
                 created_at=r["created_at"].isoformat() if r["created_at"] else "",
             ) for r in rows
         ]

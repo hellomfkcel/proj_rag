@@ -86,6 +86,16 @@ class ModelConfig:
     model_type: str = "llm"
 
 
+class ModelOutputError(Exception):
+    """P-MODEL 生成的输出异常（如空输出）。
+
+    错误码语义：model:empty_output —— LLM 返回了空 content。
+    常见根因：推理类模型（如 deepseek 系列）的 reasoning_content
+    吃满 max_tokens 预算，导致最终 content 为空（finish_reason=length）。
+    该异常不携带任何 prompt / 生成内容 / credential。
+    """
+
+
 # ── DB helpers ──────────────────────────────────────────────────
 
 def _get_db_dsn() -> str:
@@ -260,18 +270,29 @@ def invoke_embedding(texts: List[str], mode: str = "document") -> List[List[floa
 
 # ── invoke_llm（已有 OpenAI SDK — 天然兼容所有 provider）────────
 
-def invoke_llm(prompt: str, model_id: Optional[str] = None) -> str:
+def invoke_llm(prompt: str, model_id: Optional[str] = None,
+               max_tokens: Optional[int] = None, temperature: Optional[float] = None) -> str:
     """调用 LLM 生成（OpenAI 兼容 API → Ollama / vLLM / DeepSeek / OpenAI）。
 
+    生成参数（max_tokens / temperature）缺省取 Settings（env 可覆盖），
+    支持按调用覆盖——所有生成调用必须经此门面（§0.2.3 红线 4）。
+
     自动产生 OTel span 上报到 Tempo + Langfuse observation（包围实际计算，非后置记录）。
+
+    空输出守卫：推理类模型（deepseek 等）reasoning_content 吃满 max_tokens 预算时
+    会返回空 content（finish_reason=length）。此时记录元数据日志（不落 prompt/生成内容，
+    符合 §11.3/§27.1）并抛 ModelOutputError，绝不静默返回空串。
     """
     from openai import OpenAI
     import time as _wall
 
+    s = Settings()
     if model_id is None:
-        model_id = Settings().llm_model
+        model_id = s.llm_model
+    effective_max_tokens = max_tokens or s.llm_max_tokens
+    effective_temperature = temperature if temperature is not None else s.llm_temperature
     cfg = resolve_model(model_id)
-    base = (cfg.base_url or Settings().llm_base_url).rstrip("/")
+    base = (cfg.base_url or s.llm_base_url).rstrip("/")
 
     # OTel span
     span = None
@@ -282,6 +303,7 @@ def invoke_llm(prompt: str, model_id: Optional[str] = None) -> str:
         span.set_attribute("model", cfg.model_name)
         span.set_attribute("model_id", model_id)
         span.set_attribute("provider", cfg.provider)
+        span.set_attribute("max_tokens", effective_max_tokens)
     except Exception:
         pass
 
@@ -293,24 +315,56 @@ def invoke_llm(prompt: str, model_id: Optional[str] = None) -> str:
         metadata={},
     )
 
-    client = OpenAI(base_url=base, api_key=cfg.api_key or Settings().llm_api_key, timeout=120.0)
+    client = OpenAI(base_url=base, api_key=cfg.api_key or s.llm_api_key, timeout=120.0)
 
     _start = _wall.time()
     answer = ""
+    finish_reason = ""
+    reasoning_tokens = None
     try:
         resp = client.chat.completions.create(
             model=cfg.model_name,
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=4096,
-            temperature=0.1,
+            max_tokens=effective_max_tokens,
+            temperature=effective_temperature,
         )
-        answer = (resp.choices[0].message.content or "").strip()
+        _choice = resp.choices[0]
+        finish_reason = _choice.finish_reason or ""
+        _msg = _choice.message
+        answer = (_msg.content or "").strip()
+        try:
+            reasoning_tokens = (resp.usage or None) and getattr(
+                resp.usage.completion_tokens_details, "reasoning_tokens", None)
+        except Exception:
+            reasoning_tokens = None
     finally:
         _elapsed = _wall.time() - _start
         _end_langfuse_observation(
             langfuse_obs,
             output_data=answer[:10000] if answer else "",
             metadata={"elapsed_ms": int(_elapsed * 1000)},
+        )
+
+    if not answer:
+        # 空输出守卫：只记元数据，绝不落 prompt / 生成内容 / credential（§11.3 / §27.1）
+        log.warning(
+            "llm_empty_output",
+            finish_reason=finish_reason,
+            reasoning_tokens=reasoning_tokens,
+            model=cfg.model_name,
+            model_id=model_id,
+            max_tokens=effective_max_tokens,
+            elapsed_ms=int(_elapsed * 1000),
+        )
+        if span:
+            span.set_attribute("elapsed_ms", int(_elapsed * 1000))
+            span.set_attribute("answer_len", 0)
+            span.set_attribute("finish_reason", finish_reason)
+            span.end()
+        raise ModelOutputError(
+            f"LLM returned empty content (model={cfg.model_name}, "
+            f"finish_reason={finish_reason!r}, max_tokens={effective_max_tokens}, "
+            f"reasoning_tokens={reasoning_tokens})"
         )
 
     if span:
@@ -700,16 +754,8 @@ def trace_generation(trace_name: str, prompt: str, completion: str, model: str,
 def _get_otel_trace_id() -> str:
     """从当前 OTel span context 获取 trace_id，格式化为 32 位十六进制字符串。
 
-    若当前无活跃 span（如非请求上下文中调用），回退到随机 UUID。
+    统一委托 P-OBS 门面（get_current_trace_id），避免可观测逻辑散落各模块。
+    无活跃 span 时返回空字符串（由 Langfuse 侧自行回退）。
     """
-    import uuid
-
-    try:
-        from opentelemetry import trace as _otel_trace
-        span_context = _otel_trace.get_current_span().get_span_context()
-        if span_context.is_valid:
-            return format(span_context.trace_id, "032x")
-    except Exception:
-        pass
-
-    return uuid.uuid4().hex
+    from src.platform.obs.tracing import get_current_trace_id
+    return get_current_trace_id()

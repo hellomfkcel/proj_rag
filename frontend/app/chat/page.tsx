@@ -20,6 +20,8 @@ interface Message {
   sources?: { chunk_id: string; content: string }[];
   streaming?: boolean;
   errorCode?: string;
+  trace_id?: string;
+  trace_ui_url?: string;
 }
 
 export default function ChatPage() {
@@ -125,6 +127,7 @@ export default function ChatPage() {
           content: t.answer || (t.chunk_ids?.length ? "回答已生成（请刷新查看完整内容）" : "正在生成回答..."),
           streaming: !t.answer,
           sources: (t.chunk_ids || []).map((id: string) => ({ chunk_id: id, content: "" })),
+          trace_id: t.trace_id || undefined,
         });
       }
       setMessages(msgs);
@@ -189,6 +192,19 @@ export default function ChatPage() {
       const activeConvIdNew = result.conversation_id || activeConvId;
       if (!activeConvId) setActiveConvId(activeConvIdNew);
       const turnIndex = result.turn_index || 1;
+
+      // 在助手消息上挂本次查询的链路 trace（跳 Grafana Tempo 查看）
+      if (result.trace_id) {
+        setMessages(prev => {
+          const next = [...prev];
+          const last = next[next.length - 1];
+          if (last?.role === "assistant") {
+            last.trace_id = result.trace_id;
+            last.trace_ui_url = result.trace_ui_url || "";
+          }
+          return [...next];
+        });
+      }
 
       // Handle typed error codes from the query response (#32, #33, #34)
       if (result.error_code) {

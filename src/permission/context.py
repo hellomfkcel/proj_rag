@@ -117,8 +117,16 @@ def build_context_from_claims(
     for r in roles:
         principals.append(f"role:{r}")
 
+    # request_id = OTel trace_id（§1.2/§4：request_id=trace_id，作 Envelope environment.request_id，
+    # 使 Grafana/Langfuse/audit_log/权限服务审计四方日志可互跳）。无活跃 span 时回退 jti（向后兼容）。
+    try:
+        from src.platform.obs.tracing import get_current_trace_id
+        request_id = get_current_trace_id() or claims.get("jti", "unknown")
+    except Exception:
+        request_id = claims.get("jti", "unknown")
+
     return RequestContext(
-        request_id=claims.get("jti", "unknown"),
+        request_id=request_id,
         user_id=user_id,
         tenant_id=tenant_id,
         credential=credential,

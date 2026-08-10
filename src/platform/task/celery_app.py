@@ -198,17 +198,9 @@ import src.platform.task.reconciliation  # noqa: F401 — reconcile_mirror_beat,
 
 
 # ══════════════════════════════════════════════════════════════════
-# Celery Trace Context 传播（模块级——确保 API 和 Worker 双侧生效）
+# Celery Trace Context 传播（自建 signal handlers，上文 52-146 行）
 # ══════════════════════════════════════════════════════════════════
-# CeleryInstrumentor 注入 traceparent 到任务消息头，使 API→Worker→
-# Pipeline 整条链路共享同一个 trace_id，在 Grafana Tempo 中形成一条完整 Trace。
-# instrument() 幂等，API 进程和 Worker 进程各自调用一次即可。
-
-def _instrument_celery_tracing() -> None:
-    try:
-        from opentelemetry.instrumentation.celery import CeleryInstrumentor
-        CeleryInstrumentor().instrument()
-    except Exception:
-        pass
-
-_instrument_celery_tracing()
+# 不使用 opentelemetry-instrumentation-celery 的 CeleryInstrumentor：
+# 它与自建 handlers 在同一批 signal（before_task_publish / task_prerun /
+# task_postrun）上重复注入 traceparent、重复创建 CONSUMER span，导致 Tempo
+# 里出现双份 span。trace 传播统一走自建三 handler（§8.2 单一出口原则）。
