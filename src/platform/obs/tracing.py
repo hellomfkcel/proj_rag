@@ -14,18 +14,27 @@ from opentelemetry.sdk.resources import Resource, SERVICE_NAME
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 
 _tracing_initialized = False
+_log_export_initialized = False
 
 
 def init_tracing(service_name: str = "rag-v14"):
-    """初始化 OpenTelemetry Tracing。
+    """初始化 OpenTelemetry Tracing + 日志导出。
 
-    在应用启动时调用一次。将全部 span 导出到 OTel Collector（HTTP 4318）。
-    ★ 同时启用 Haystack Pipeline 的 OpenTelemetry tracing，
-    使每个 Haystack Component 自动产生 span。
+    在应用启动时调用一次（API/worker/embedding-service 统一入口）。
+    将 span 导出到 OTel Collector（HTTP 4318），并启用 OTLP 日志导出（→Loki，
+    §8.2 应用→Collector→Tempo/Loki/Prometheus 单一出口）。
+    ★ 同时启用 Haystack Pipeline 的 OpenTelemetry tracing。
     """
     global _tracing_initialized
     if _tracing_initialized:
         return
+
+    # P-OBS 拥有结构化日志（§8.0）：opt out Haystack 的 structlog 接管，
+    # 须在 import haystack 之前设置，否则 Haystack 会覆盖 structlog 配置。
+    os.environ["HAYSTACK_LOGGING_IGNORE_STRUCTLOG"] = "true"
+    # 统一各进程（API/worker/embedding）的 structlog JSON + trace_id 配置
+    from src.platform.obs.logger import setup_logging
+    setup_logging()
 
     # Pre-import Haystack to resolve circular import with OTel
     try:
@@ -80,7 +89,70 @@ def init_tracing(service_name: str = "rag-v14"):
     # 注册进程退出时的优雅关闭（确保 BatchSpanProcessor 缓冲区中的 span 被 flush）
     _register_shutdown_hook()
 
+    # OTLP 日志导出（structlog JSON → Collector → Loki），fail-open
+    init_log_export(service_name)
+
     _tracing_initialized = True
+
+
+def init_log_export(service_name: str = "rag-v14") -> None:
+    """P-OBS：OTLP 日志导出（§8.2 应用→Collector→Loki）。
+
+    structlog 渲染后的 JSON（含 32hex trace_id）经 stdlib LoggingHandler
+    作为 OTLP LogRecord 导出；trace_id/span_id 由 OTel 上下文自动附加到
+    OTLP 记录结构。Loki 日志行内带 32hex trace_id，供 Grafana derivedField
+    提取并跳转 Tempo（§4 四方互跳）。
+
+    fail-open（§8.5 可观测 fail-open）：Collector 不可达不阻塞业务，
+    由 BatchLogRecordProcessor 缓冲/丢弃。
+    """
+    global _log_export_initialized
+    if _log_export_initialized:
+        return
+    _log_export_initialized = True
+
+    try:
+        import logging as _logging
+        from opentelemetry.sdk._logs import LoggerProvider, LoggingHandler
+        from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
+        from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
+        from opentelemetry._logs import set_logger_provider
+
+        from src.config import Settings
+        otel_endpoint = Settings().otel_endpoint
+
+        resource = Resource.create({SERVICE_NAME: service_name})
+        provider = LoggerProvider(resource=resource)
+        provider.add_log_record_processor(BatchLogRecordProcessor(
+            OTLPLogExporter(endpoint=f"{otel_endpoint}/v1/logs")))
+        set_logger_provider(provider)
+
+        # 防止 OTel SDK 自身日志进入导出环（export 失败告警不再回流到该 handler）
+        _logging.getLogger("opentelemetry").propagate = False
+        # 所有 stdlib 日志（含 structlog 渲染后的 JSON）导出到 Collector
+        _logging.getLogger().addHandler(LoggingHandler(level=_logging.NOTSET))
+
+        _register_log_shutdown()
+    except Exception:
+        pass  # fail-open：日志导出失败不影响业务
+
+
+def _register_log_shutdown():
+    """注册 atexit 处理器，确保进程退出时日志缓冲区被 flush。"""
+    import atexit
+
+    def _shutdown_logs():
+        try:
+            from opentelemetry._logs import get_logger_provider
+            provider = get_logger_provider()
+            if hasattr(provider, "force_flush"):
+                provider.force_flush(timeout_millis=5000)
+            if hasattr(provider, "shutdown"):
+                provider.shutdown()
+        except Exception:
+            pass
+
+    atexit.register(_shutdown_logs)
 
 
 def _register_shutdown_hook():
