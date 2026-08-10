@@ -13,6 +13,10 @@ def setup_logging(log_level: str = "INFO") -> None:
     """配置 structlog：JSON 格式输出到 stdout。
 
     调用一次，在应用启动时执行。
+
+    注：实际运行中 init_tracing()（引入 Haystack）会以 Haystack 的
+    configure_logging() 覆盖此配置，其内置 correlate_logs_with_traces
+    已在每条日志上注入 trace_id/span_id（int 形式），故此处无需显式注入。
     """
     structlog.configure(
         processors=[

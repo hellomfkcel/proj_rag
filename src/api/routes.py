@@ -11,7 +11,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Request
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -57,6 +57,9 @@ class QueryResponse(BaseModel):
     conversation_id: str
     turn_index: int
     error_code: Optional[str] = None   # retrieve:insufficient_evidence | retrieve:vector_store_unavailable
+    # 链路可观测：本次查询的 OTel trace_id + Grafana Tempo 查看链路（空串表示未捕获到 trace）
+    trace_id: str = ""
+    trace_ui_url: str = ""
 
 
 class DeleteResponse(BaseModel):
@@ -137,8 +140,40 @@ def upload_document(
 # Query — dispatch-only（§9.1 / §17 红线：API 禁止调 pipeline.run()）
 # ══════════════════════════════════════════════════════════════
 
+def _build_trace_ui_url(trace_id: str) -> str:
+    """构造 Grafana Tempo 按 trace_id 查看的深链（无 trace 时返回空串）。
+
+    §8.2 单一查询出口 = Grafana；tempo 数据源 UID 由 Settings 配置（观测栈 provision 固定 tempo-uid）。
+    """
+    if not trace_id:
+        return ""
+    try:
+        import json as _json
+        from urllib.parse import quote
+        from src.config import Settings
+        s = Settings()
+        if not s.grafana_url:
+            return ""
+        pane_id = "v1"
+        panes = {
+            pane_id: {
+                "datasource": s.grafana_tempo_datasource_uid,
+                "queries": [
+                    {"refId": "A", "query": trace_id,
+                     "queryType": "traceql", "queryType2": "traceql"}
+                ],
+                "range": {"from": "now-6h", "to": "now"},
+            }
+        }
+        qs = quote(_json.dumps(panes))
+        return f"{s.grafana_url}/explore?schemaVersion=1&panes={qs}"
+    except Exception:
+        return ""
+
+
 @router.post("/conversations/query", response_model=QueryResponse)
-async def query(request: QueryRequest, ctx: RequestContext = Depends(get_request_context)):
+async def query(request: QueryRequest, ctx: RequestContext = Depends(get_request_context),
+                http_request: Request = None, response: Response = None):
     """分发检索+生成任务到 Celery retrieval-worker。
 
     API 进程只做：参数校验 → mint ctx_token → delay() 提交任务 → 立即返回。
@@ -146,6 +181,7 @@ async def query(request: QueryRequest, ctx: RequestContext = Depends(get_request
     结果通过 SSE (GET /conversations/{id}/stream) 流式推送到前端。
 
     设计依据：§17 "API 进程禁止调 pipeline.run()——计算密集与 I/O 密集抢占同组进程"。
+    响应携带 trace_id / trace_ui_url（§2.1 request_id=trace_id，供前端跳 Tempo 查看链路）。
     """
     import uuid as _uuid
     from src.config import Settings
@@ -153,6 +189,13 @@ async def query(request: QueryRequest, ctx: RequestContext = Depends(get_request
     from src.chat.service import retrieve_and_generate_task
 
     s = Settings()
+
+    # 从 ASGI scope 取 OTel trace_id（OtelTraceCaptureMiddleware 已捕获）
+    trace_id = ""
+    try:
+        trace_id = (http_request or {}).scope.get("otel_trace_id", "") if http_request else ""
+    except Exception:
+        trace_id = ""
     conv_id = request.conversation_id or str(_uuid.uuid4())
 
     # 1. 确保 conversation 存在
@@ -197,12 +240,16 @@ async def query(request: QueryRequest, ctx: RequestContext = Depends(get_request
     )
 
     # 6. 立即返回 — answer 和 chunk_ids 由 worker 经 Redis Pub/Sub → SSE 推送
+    if response is not None and trace_id:
+        response.headers["X-Trace-Id"] = trace_id
     return QueryResponse(
         answer="",          # dispatched to worker — results via SSE
         chunk_ids=[],       # dispatched to worker — sources via SSE "retrieved" event
         conversation_id=conv_id,
         turn_index=turn_index,
         error_code=None,
+        trace_id=trace_id,
+        trace_ui_url=_build_trace_ui_url(trace_id),
     )
 
 
@@ -221,6 +268,24 @@ async def query_stream(conversation_id: str, turn_index: int = 1):
 
     s = Settings()
     SSE_IDLE_TIMEOUT = 60  # 秒 — 匹配 LLM 生成最长等待时间
+
+    # 取该 turn 已持久化的 trace_id（= 查询链路 trace_id），作为响应头供前端关联 Tempo。
+    # worker 尚未完成时 turn 未落库 → 为空，此时前端已从 POST 响应拿到 trace_id。
+    persisted_trace_id = ""
+    try:
+        import asyncpg as _apg
+        _conn = await _apg.connect(
+            s.database_url.replace("postgresql+asyncpg://", "postgresql://"))
+        _row = await _conn.fetchrow(
+            "SELECT trace_id FROM conversation_turns "
+            "WHERE conversation_id=$1 AND turn_index=$2",
+            conversation_id, turn_index,
+        )
+        if _row:
+            persisted_trace_id = _row["trace_id"] or ""
+        await _conn.close()
+    except Exception:
+        pass
 
     async def _stream():
         # ── Step 1: 检查 DB 中是否已有答案（worker prior-art race condition）──
@@ -289,13 +354,17 @@ async def query_stream(conversation_id: str, turn_index: int = 1):
             pubsub.close()
             r.close()
 
+    _headers = {
+        "Cache-Control": "no-cache",
+        "X-Accel-Buffering": "no",
+    }
+    if persisted_trace_id:
+        _headers["X-Trace-Id"] = persisted_trace_id
+
     return StreamingResponse(
         _stream(),
         media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
-        },
+        headers=_headers,
     )
 
 

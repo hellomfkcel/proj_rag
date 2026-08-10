@@ -17,6 +17,8 @@ export interface QueryOverrides {
   oversample_factor?: number;
   min_results?: number;
   refetch_max_rounds?: number;
+  refine_batch_size?: number;
+  doc_preview_max_chars?: number;
 }
 
 interface Props {

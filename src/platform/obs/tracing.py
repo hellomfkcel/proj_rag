@@ -114,6 +114,32 @@ def get_tracer(name: str = "rag-v14"):
     return trace.get_tracer(name)
 
 
+def get_current_trace_id() -> str:
+    """读取当前 OTel span 的 trace_id，格式化为 32 位十六进制字符串。
+
+    P-OBS 统一提供，供日志 processor / P-AUTHC request_id / B-CHAT 持久化使用。
+    当前无活跃 span 或 OTel 未初始化时返回空字符串（fail-open，不抛异常）。
+    """
+    try:
+        span_context = trace.get_current_span().get_span_context()
+        if span_context.is_valid:
+            return format(span_context.trace_id, "032x")
+    except Exception:
+        pass
+    return ""
+
+
+def get_current_span_id() -> str:
+    """读取当前 OTel span 的 span_id，格式化为 16 位十六进制字符串。"""
+    try:
+        span_context = trace.get_current_span().get_span_context()
+        if span_context.is_valid:
+            return format(span_context.span_id, "016x")
+    except Exception:
+        pass
+    return ""
+
+
 def instrument_fastapi(app):
     """对 FastAPI 应用进行自动埋点。
 

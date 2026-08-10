@@ -201,11 +201,12 @@ def retrieve_and_generate_task(
         answer=answer,
     )
 
-    # 5. 审计
+    # 5. 审计（request_id=ctx.request_id=OTel trace_id，供 audit↔Tempo 四方互跳，§7.3）
     from src.platform.audit.service import emit_audit_event
     try:
         emit_audit_event(
             event_type="KB_QUERY",
+            request_id=ctx.request_id,
             user_id=ctx.user_id,
             tenant_id=tenant_id,
             action="kb:read",
@@ -668,15 +669,18 @@ def _save_turn(
         conn = await asyncpg.connect(
             s.database_url.replace("postgresql+asyncpg://", "postgresql://")
         )
+        # 当前 OTel span（worker 的 CONSUMER span）= 查询链路 trace_id，落库供前端/审计关联 Tempo（§16.1）
+        from src.platform.obs.tracing import get_current_trace_id
+        trace_id = get_current_trace_id()
         try:
             await conn.execute(
                 """INSERT INTO conversation_turns
                    (id, conversation_id, turn_index, user_question, resolved_query,
-                    answer, retrieved_chunk_ids, pipeline_yaml_version, created_at)
-                   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)""",
+                    answer, retrieved_chunk_ids, pipeline_yaml_version, trace_id, created_at)
+                   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)""",
                 str(uuid.uuid4()), conversation_id, turn_index,
                 user_question, resolved_query, answer,
-                chunk_ids, pipeline_yaml_version,
+                chunk_ids, pipeline_yaml_version, trace_id,
                 datetime.now(timezone.utc),
             )
         finally:

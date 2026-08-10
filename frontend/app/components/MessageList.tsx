@@ -13,6 +13,8 @@ interface Message {
   sources?: Source[];
   streaming?: boolean;
   errorCode?: string;
+  trace_id?: string;       // 查询链路 OTel trace_id
+  trace_ui_url?: string;   // Grafana Tempo 查看链路深链（仅本次 query 有）
 }
 
 interface Props {
@@ -83,6 +85,25 @@ export default function MessageList({ messages, msgEndRef, streamError }: Props)
                         <SourcesCard key={j} index={j} source={s} />
                       ))}
                     </div>
+                  </div>
+                )}
+
+                {/* Trace 链路（可复制 trace_id + 跳转 Grafana Tempo） */}
+                {msg.trace_id && (
+                  <div className="mt-3 pt-2 border-t border-gray-200 flex items-center gap-2 text-xs text-gray-400">
+                    <span title={msg.trace_id}>🛰️ {msg.trace_id.slice(0, 12)}</span>
+                    <button
+                      type="button"
+                      onClick={() => navigator.clipboard?.writeText(msg.trace_id!)}
+                      className="hover:text-gray-600 underline"
+                    >
+                      复制
+                    </button>
+                    {msg.trace_ui_url && (
+                      <a href={msg.trace_ui_url} target="_blank" rel="noreferrer" className="hover:text-gray-600 underline">
+                        查看链路
+                      </a>
+                    )}
                   </div>
                 )}
               </div>
