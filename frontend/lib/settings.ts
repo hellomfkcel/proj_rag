@@ -7,6 +7,7 @@ export async function getRetrievalConfig(kbId:string){const {data}=await api.get
 export async function updateRetrievalConfig(kbId:string,fields:Record<string,any>){const {data}=await api.patch(`/configs/retrieval?kb_id=${kbId}`,fields);return data;}
 export async function listPrompts(){const {data}=await api.get("/prompts");return data;}
 export async function activatePrompt(id:string){const {data}=await api.patch(`/prompts/${id}/activate`);return data;}
+export async function updatePrompt(id:string, fields:{template_text:string; description?:string}){const {data}=await api.patch(`/prompts/${id}`, fields);return data;}
 
 // Dynamic config — Phase 6: external URLs from backend
 export interface AppConfig { grafana_url:string;langfuse_url:string;cerbos_url:string;admin_console_url:string;otel_collector_url:string; }

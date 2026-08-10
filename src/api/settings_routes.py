@@ -47,6 +47,10 @@ class RetrievalConfigPatch(BaseModel):
 class PromptItem(BaseModel):
     id: str; prompt_id: str; version: str; template_text: str; description: str; is_active: bool
 
+class PromptItemPatch(BaseModel):
+    template_text: str
+    description: Optional[str] = None
+
 
 # ── 模型列表 ──
 
@@ -224,7 +228,10 @@ async def app_config(ctx: RequestContext = Depends(get_request_context)):
 
 @router.patch("/prompts/{prompt_id}/activate")
 async def activate_prompt(prompt_id: str, ctx: RequestContext = Depends(get_request_context)):
-    """激活指定版本的 Prompt 模板。需要 kb:manage 权限。"""
+    """激活指定版本的 Prompt 模板。需要 kb:manage 权限。
+
+    激活语义：同一 prompt_id 下仅目标版本为 is_active=true，其余版本置 false。
+    """
     from src.permission.authz import check
 
     # ★ 权限检查：修改 Prompt 激活状态需要 kb:manage 权限
@@ -234,10 +241,46 @@ async def activate_prompt(prompt_id: str, ctx: RequestContext = Depends(get_requ
 
     conn = await asyncpg.connect(_dsn())
     try:
-        # Deactivate all versions of this prompt
-        await conn.execute("UPDATE prompt_templates SET is_active=false WHERE id=$1", prompt_id)
-        # Activate
+        # 先取目标行的 prompt_id，将同 prompt_id 其它版本全部置 false
+        row = await conn.fetchrow("SELECT prompt_id FROM prompt_templates WHERE id=$1", prompt_id)
+        if not row:
+            raise HTTPException(status_code=404, detail="prompt:not_found")
+        await conn.execute(
+            "UPDATE prompt_templates SET is_active=false WHERE prompt_id=$1 AND id<>$2",
+            row["prompt_id"], prompt_id)
+        # 再激活目标版本
         await conn.execute("UPDATE prompt_templates SET is_active=true WHERE id=$1", prompt_id)
         return {"status": "activated", "prompt_id": prompt_id}
+    finally:
+        await conn.close()
+
+
+@router.patch("/prompts/{prompt_id}", response_model=PromptItem)
+async def update_prompt(prompt_id: str, body: PromptItemPatch,
+                        ctx: RequestContext = Depends(get_request_context)):
+    """更新指定版本 Prompt 模板的 template_text / description。需要 kb:manage 权限。
+
+    编辑后立即对生成生效——合成逻辑经 resolve_prompt 读取该版本的模板文本。
+    """
+    from src.permission.authz import check
+
+    # ★ 权限检查：修改 Prompt 模板内容需要 kb:manage 权限（与 activate 一致）
+    decision = check(ctx, "kb:manage", "kb", "config")
+    if decision.get("decision") != "allow":
+        raise HTTPException(status_code=403, detail="auth:forbidden — 您没有修改 Prompt 配置的权限（需要 kb:manage）")
+
+    conn = await asyncpg.connect(_dsn())
+    try:
+        row = await conn.fetchrow(
+            "UPDATE prompt_templates SET template_text=$1, "
+            "description=COALESCE($2, description) "
+            "WHERE id=$3 RETURNING id, prompt_id, version, template_text, description, is_active",
+            body.template_text, body.description, prompt_id)
+        if not row:
+            raise HTTPException(status_code=404, detail="prompt:not_found")
+        return PromptItem(id=str(row["id"]), prompt_id=row["prompt_id"],
+                          version=row["version"], template_text=row["template_text"],
+                          description=row["description"] or "",
+                          is_active=row["is_active"])
     finally:
         await conn.close()
