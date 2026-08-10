@@ -95,7 +95,7 @@ export default function MessageList({ messages, msgEndRef, streamError }: Props)
           <div key={i} className="flex justify-end">
             {/* max-w 放在外层，相对 conversation 白板宽度；短内容贴合、超 60% 才换行 */}
             <div className="group relative max-w-[60%]">
-              <div className="rounded-2xl bg-blue-600 text-white px-3 py-2">
+              <div className="rounded-md bg-blue-600 text-white px-3 py-2">
                 <p className="text-sm whitespace-pre-wrap leading-relaxed">{msg.content}</p>
               </div>
               {msg.content && (
