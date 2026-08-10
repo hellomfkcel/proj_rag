@@ -91,10 +91,10 @@ export default function MessageList({ messages, msgEndRef, streamError }: Props)
       )}
       {messages.map((msg, i) =>
         msg.role === "user" ? (
-          /* ── 用户消息：贴合内容的文字框 + 右下角框外复制图标（hover 显示） ── */
+          /* ── 用户消息：贴合内容的文字框（最长 60% 行宽）+ 右下侧复制图标（hover 显示） ── */
           <div key={i} className="flex justify-end">
             <div className="group relative">
-              <div className="max-w-[80%] rounded-2xl bg-blue-600 text-white px-3 py-2">
+              <div className="max-w-[60%] rounded-2xl bg-blue-600 text-white px-3 py-2">
                 <p className="text-sm whitespace-pre-wrap leading-relaxed">{msg.content}</p>
               </div>
               {msg.content && (
@@ -102,7 +102,7 @@ export default function MessageList({ messages, msgEndRef, streamError }: Props)
                   type="button"
                   onClick={() => copyContent(i, msg.content)}
                   title="复制内容"
-                  className="absolute -bottom-3 -right-3 rounded-full bg-white p-1.5 text-gray-500 shadow-md ring-1 ring-gray-200 hover:text-gray-800 hover:bg-gray-50 active:scale-90 transition-all duration-150 opacity-0 group-hover:opacity-100"
+                  className="absolute -bottom-3 right-0 rounded-full bg-white p-1.5 text-gray-500 shadow-md ring-1 ring-gray-200 hover:text-gray-800 hover:bg-gray-50 active:scale-90 transition-all duration-150 opacity-0 group-hover:opacity-100"
                 >
                   {copiedId === i ? <CheckIcon /> : <CopyIcon />}
                 </button>
