@@ -1,11 +1,13 @@
 "use client";
-// Message List — user + assistant messages with source cards, error states
+// Message List — user + assistant messages with copy buttons, source chips, error states
 
+import { useState } from "react";
 import SourcesCard from "./SourcesCard";
 
 interface Source {
   chunk_id: string;
-  content: string;
+  doc_name?: string;
+  content?: string;
 }
 interface Message {
   role: "user" | "assistant";
@@ -24,6 +26,18 @@ interface Props {
 }
 
 export default function MessageList({ messages, msgEndRef, streamError }: Props) {
+  const [copiedId, setCopiedId] = useState<number | null>(null);
+
+  const copyContent = async (id: number, text: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedId(id);
+      setTimeout(() => setCopiedId(null), 1500);
+    } catch {
+      // clipboard 不可用时忽略
+    }
+  };
+
   return (
     <div className="flex-1 overflow-y-auto px-6 py-4 space-y-4">
       {messages.length === 0 && (
@@ -46,6 +60,22 @@ export default function MessageList({ messages, msgEndRef, streamError }: Props)
                   : "bg-gray-100 text-gray-800"
             }`}
           >
+            {/* 复制按钮 */}
+            {msg.content && (
+              <div className="flex justify-end -mb-1">
+                <button
+                  type="button"
+                  onClick={() => copyContent(i, msg.content)}
+                  className={`text-[10px] transition ${
+                    msg.role === "user" ? "text-blue-200 hover:text-white" : "text-gray-400 hover:text-gray-600"
+                  }`}
+                  title="复制内容"
+                >
+                  {copiedId === i ? "✓ 已复制" : "📋 复制"}
+                </button>
+              </div>
+            )}
+
             {msg.role === "user" ? (
               <p className="text-sm whitespace-pre-wrap">{msg.content}</p>
             ) : (
@@ -74,7 +104,7 @@ export default function MessageList({ messages, msgEndRef, streamError }: Props)
                   </div>
                 ) : null}
 
-                {/* Sources */}
+                {/* Sources — 标注化来源 chips（文档名，点击弹窗看详情） */}
                 {msg.sources && msg.sources.length > 0 && (
                   <div className="mt-3 pt-2 border-t border-gray-200">
                     <p className="text-xs text-gray-400 mb-1.5">

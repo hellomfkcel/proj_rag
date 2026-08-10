@@ -1,6 +1,7 @@
 """Phase 3 对话 REST 端点。"""
 
 import uuid
+import json
 from datetime import datetime, timezone
 from typing import List, Optional
 
@@ -142,6 +143,7 @@ class TurnResponse(BaseModel):
     resolved_query: str
     answer: str = ""
     chunk_ids: List[str] = []
+    retrieved_chunks: List[dict] = []   # 来源元数据 [{chunk_id, doc_name, content}]，供前端来源标注
     trace_id: str = ""
     created_at: str
 
@@ -151,7 +153,8 @@ async def list_turns(conv_id: str, ctx: RequestContext = Depends(get_request_con
     conn = await asyncpg.connect(_dsn())
     try:
         rows = await conn.fetch(
-            "SELECT id, turn_index, user_question, resolved_query, answer, retrieved_chunk_ids, trace_id, created_at "
+            "SELECT id, turn_index, user_question, resolved_query, answer, retrieved_chunk_ids, "
+            "retrieved_chunks, trace_id, created_at "
             "FROM conversation_turns WHERE conversation_id=$1 ORDER BY turn_index ASC",
             conv_id,
         )
@@ -160,6 +163,7 @@ async def list_turns(conv_id: str, ctx: RequestContext = Depends(get_request_con
                 id=str(r["id"]), turn_index=r["turn_index"],
                 user_question=r["user_question"], resolved_query=r["resolved_query"],
                 answer=r["answer"] or "", chunk_ids=r["retrieved_chunk_ids"] or [],
+                retrieved_chunks=json.loads(r["retrieved_chunks"]) if r["retrieved_chunks"] else [],
                 trace_id=r["trace_id"] or "",
                 created_at=r["created_at"].isoformat() if r["created_at"] else "",
             ) for r in rows
