@@ -25,6 +25,23 @@ interface Props {
   streamError?: string | null;
 }
 
+function CopyIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+    </svg>
+  );
+}
+
+function CheckIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <polyline points="20 6 9 17 4 12" />
+    </svg>
+  );
+}
+
 export default function MessageList({ messages, msgEndRef, streamError }: Props) {
   const [copiedId, setCopiedId] = useState<number | null>(null);
 
@@ -52,7 +69,7 @@ export default function MessageList({ messages, msgEndRef, streamError }: Props)
       {messages.map((msg, i) => (
         <div key={i} className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
           <div
-            className={`max-w-[80%] rounded-2xl px-4 py-3 ${
+            className={`group max-w-[80%] rounded-2xl px-4 py-3 ${
               msg.role === "user"
                 ? "bg-blue-600 text-white"
                 : msg.errorCode
@@ -60,22 +77,6 @@ export default function MessageList({ messages, msgEndRef, streamError }: Props)
                   : "bg-gray-100 text-gray-800"
             }`}
           >
-            {/* 复制按钮 */}
-            {msg.content && (
-              <div className="flex justify-end -mb-1">
-                <button
-                  type="button"
-                  onClick={() => copyContent(i, msg.content)}
-                  className={`text-[10px] transition ${
-                    msg.role === "user" ? "text-blue-200 hover:text-white" : "text-gray-400 hover:text-gray-600"
-                  }`}
-                  title="复制内容"
-                >
-                  {copiedId === i ? "✓ 已复制" : "📋 复制"}
-                </button>
-              </div>
-            )}
-
             {msg.role === "user" ? (
               <p className="text-sm whitespace-pre-wrap">{msg.content}</p>
             ) : (
@@ -136,6 +137,24 @@ export default function MessageList({ messages, msgEndRef, streamError }: Props)
                     )}
                   </div>
                 )}
+              </div>
+            )}
+
+            {/* 复制按钮 — 放在内容下方；query 的图标 hover 才显示 */}
+            {msg.content && (
+              <div className="mt-1.5 flex justify-end">
+                <button
+                  type="button"
+                  onClick={() => copyContent(i, msg.content)}
+                  title="复制内容"
+                  className={`rounded-md p-1.5 transition-opacity duration-150 ${
+                    msg.role === "user"
+                      ? "text-blue-200 hover:text-white hover:bg-white/15 opacity-0 group-hover:opacity-100"
+                      : "text-gray-400 hover:text-gray-700 hover:bg-gray-200"
+                  }`}
+                >
+                  {copiedId === i ? <CheckIcon /> : <CopyIcon />}
+                </button>
               </div>
             )}
           </div>
