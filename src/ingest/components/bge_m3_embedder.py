@@ -32,32 +32,19 @@ from haystack import component, Document
 # ══════════════════════════════════════════════════════════════════
 
 _model: Any = None
-_model_last_used: float = 0.0
-# 空闲超时（秒），可通过环境变量 GPU_MODEL_IDLE_TIMEOUT 配置，默认 300s
-_IDLE_TIMEOUT = int(_os.getenv("GPU_MODEL_IDLE_TIMEOUT", "300"))
 
 
 def _get_model():
-    """获取 BGE-M3 全局单例——惰性加载，进程生命周期内复用。
+    """获取 BGE-M3 全局单例——惰性加载，进程生命周期内常驻。
 
     每次 Pipeline.loads() 创建新的 Component 实例时，
     不会重新加载模型——所有实例共享此单例。
 
-    空闲超时：如果距离上次使用超过 _IDLE_TIMEOUT 秒，
-    自动卸载模型释放 GPU 显存，下次调用时重新加载。
+    ★ 模型常驻：加载后进程生命周期内不卸载（用户指令——共享 embedding-service
+    应常驻模型，避免每次查询重载 20-40s）。共享服务是唯一模型持有者，
+    worker 经 HTTP 调用，不重复加载 → 无资源争夺。
     """
-    global _model, _model_last_used
-    now = _time.time()
-
-    # ── 空闲超时检查 ──
-    if _model is not None and _model_last_used > 0:
-        if now - _model_last_used > _IDLE_TIMEOUT:
-            try:
-                import torch
-                _model = None
-                torch.cuda.empty_cache()
-            except Exception:
-                _model = None
+    global _model
 
     if _model is None:
         from FlagEmbedding import BGEM3FlagModel
@@ -90,7 +77,6 @@ def _get_model():
             local_files_only=True,
         )
 
-    _model_last_used = _time.time()
     return _model
 
 
