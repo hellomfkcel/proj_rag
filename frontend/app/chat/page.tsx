@@ -17,7 +17,7 @@ import type { Conversation, Turn } from "@/lib/chat";
 interface Message {
   role: "user" | "assistant";
   content: string;
-  sources?: { chunk_id: string; content: string }[];
+  sources?: { chunk_id: string; doc_name?: string; content?: string }[];
   streaming?: boolean;
   errorCode?: string;
   trace_id?: string;
@@ -126,7 +126,10 @@ export default function ChatPage() {
           role: "assistant",
           content: t.answer || (t.chunk_ids?.length ? "回答已生成（请刷新查看完整内容）" : "正在生成回答..."),
           streaming: !t.answer,
-          sources: (t.chunk_ids || []).map((id: string) => ({ chunk_id: id, content: "" })),
+          // 历史来源优先用持久化的 retrieved_chunks（含 doc_name/content），否则回退 chunk_ids
+          sources: (t.retrieved_chunks && t.retrieved_chunks.length > 0)
+            ? t.retrieved_chunks
+            : (t.chunk_ids || []).map((id: string) => ({ chunk_id: id })),
           trace_id: t.trace_id || undefined,
         });
       }
@@ -149,7 +152,9 @@ export default function ChatPage() {
                 if (last?.role === "assistant") {
                   last.content = t.answer;
                   last.streaming = false;
-                  last.sources = (t.chunk_ids || []).map((id: string) => ({ chunk_id: id, content: "" }));
+                  last.sources = (t.retrieved_chunks && t.retrieved_chunks.length > 0)
+                    ? t.retrieved_chunks
+                    : (t.chunk_ids || []).map((id: string) => ({ chunk_id: id }));
                 }
                 return [...next];
               });
@@ -181,7 +186,7 @@ export default function ChatPage() {
     setLoading(true);
 
     let sseAnswer = "";
-    let sseSources: { chunk_id: string; content: string }[] = [];
+    let sseSources: { chunk_id: string; doc_name?: string; content?: string }[] = [];
 
     try {
       // ── Step 1: Fire the query FIRST ──
@@ -239,6 +244,7 @@ export default function ChatPage() {
             const d = JSON.parse(e.data);
             sseSources = (d.chunks || []).map((c: any) => ({
               chunk_id: c.chunk_id || c.id || "",
+              doc_name: c.doc_name || "",
               content: c.content || "",
             }));
             setMessages(prev => {
@@ -317,6 +323,7 @@ export default function ChatPage() {
         const pollStart = Date.now();
         let pollAnswer: string | null = null;
         let pollChunkIds: string[] = [];
+        let pollSources: { chunk_id: string; doc_name?: string; content?: string }[] = [];
 
         // Progress dots animation — cycles through "生成中.", "生成中..", "生成中..."
         const progressStates = ["正在生成回答.", "正在生成回答..", "正在生成回答..."];
@@ -342,6 +349,9 @@ export default function ChatPage() {
             if (latestTurn?.answer) {
               pollAnswer = latestTurn.answer;
               pollChunkIds = latestTurn.chunk_ids || [];
+              pollSources = (latestTurn.retrieved_chunks && latestTurn.retrieved_chunks.length > 0)
+                ? latestTurn.retrieved_chunks
+                : (latestTurn.chunk_ids || []).map((id: string) => ({ chunk_id: id }));
               break;  // 答案已就绪，停止轮询
             }
           } catch {
@@ -358,7 +368,7 @@ export default function ChatPage() {
             const last = next[next.length - 1];
             if (last?.role === "assistant") {
               last.content = pollAnswer!;
-              last.sources = pollChunkIds.map((id: string) => ({ chunk_id: id, content: "" }));
+              last.sources = pollSources;
               last.streaming = false;
             }
             return [...next];

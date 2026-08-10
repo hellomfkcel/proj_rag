@@ -8,6 +8,7 @@ export interface Conversation {
 export interface Turn {
   id: string; turn_index: number; user_question: string; resolved_query: string; answer: string; chunk_ids: string[];
   trace_id?: string;
+  retrieved_chunks?: { chunk_id: string; doc_name?: string; content?: string }[];
 }
 
 export interface QueryOverrides {

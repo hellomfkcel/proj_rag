@@ -91,19 +91,11 @@ def retrieve_and_generate_task(
         rr = redis.from_url(s.redis_url)
         channel = f"query-stream:{conversation_id}:{turn_index}"
 
-        # 引用来源：带 chunk 原文前 200 字，供前端 HoverCard 展示
-        chunk_sources = []
-        for j, doc in enumerate(documents[:5]):
-            chunk_sources.append({
-                "chunk_id": doc.id if hasattr(doc, "id") else str(j),
-                "content": (doc.content[:200] if hasattr(doc, "content") else str(doc)[:200]),
-                "score": doc.meta.get("score", 0) if hasattr(doc, "meta") else 0,
-            } if hasattr(doc, "content") else {"chunk_id": str(j), "content": str(doc)[:200]})
-
+        # 引用来源：含 doc_name + 截断内容（供前端来源标注与弹窗展示）
         rr.publish(channel, json.dumps({
             "event": "retrieved",
             "chunk_ids": chunk_ids,
-            "chunks": chunk_sources,
+            "chunks": r["source_meta"],
         }, default=str))
 
         rr.publish(channel, json.dumps({
@@ -126,6 +118,7 @@ def retrieve_and_generate_task(
         chunk_ids=chunk_ids,
         pipeline_yaml_version=yaml_version,
         answer=answer,
+        retrieved_chunks=r["source_meta"],
     )
 
     # 5. 审计（request_id=ctx.request_id=OTel trace_id，供 audit↔Tempo 四方互跳，§7.3）
@@ -288,6 +281,21 @@ def _run_retrieve_generate(
         for i, doc in enumerate(documents)
     ]
 
+    # 来源元数据（doc_name + 截断内容，供前端来源标注与历史持久化）
+    doc_names = _resolve_doc_names(documents)
+    source_meta = []
+    for i, doc in enumerate(documents):
+        content = doc.content if hasattr(doc, "content") else str(doc)
+        did = doc.meta.get("document_id", "") if hasattr(doc, "meta") else ""
+        doc_name = doc_names.get(did) if did else ""
+        if not doc_name:
+            doc_name = (content[:12] + "…") if content else "未知来源"
+        source_meta.append({
+            "chunk_id": doc.id if hasattr(doc, "id") else str(i),
+            "doc_name": doc_name,
+            "content": content[:500],
+        })
+
     return {
         "query": user_question,
         "resolved_query": resolved_query,
@@ -296,9 +304,43 @@ def _run_retrieve_generate(
         "is_answerable": bool(documents),
         "contexts": contexts,
         "retrieved_chunks": retrieved_chunks,
+        "source_meta": source_meta,
         "documents": documents,
         "ctx": ctx,
     }
+
+
+def _resolve_doc_names(documents: list) -> dict:
+    """按 doc.meta['document_id'] 批量查 documents.filename，返回 {document_id: filename}。
+
+    run_async_safe 兼容同步/异步上下文；查询失败回退空 dict（fail-open，不影响检索）。
+    """
+    doc_ids = set()
+    for d in documents:
+        if hasattr(d, "meta"):
+            did = d.meta.get("document_id", "")
+            if did:
+                doc_ids.add(did)
+    if not doc_ids:
+        return {}
+
+    async def _query():
+        import asyncpg
+        conn = await asyncpg.connect(
+            Settings().database_url.replace("postgresql+asyncpg://", "postgresql://"))
+        try:
+            rows = await conn.fetch(
+                "SELECT id::text AS id, filename FROM documents WHERE id = ANY($1::uuid[])",
+                list(doc_ids))
+            return {r["id"]: r["filename"] for r in rows}
+        finally:
+            await conn.close()
+
+    try:
+        from src.platform.async_utils import run_async_safe
+        return run_async_safe(_query())
+    except Exception:
+        return {}
 
 
 @celery_app.task(
@@ -771,8 +813,9 @@ def _save_turn(
     chunk_ids: List[str],
     pipeline_yaml_version: str = "v1",
     answer: str = "",
+    retrieved_chunks: Optional[List[dict]] = None,
 ) -> None:
-    """写 conversation_turn 记录（含 LLM 生成答案）。"""
+    """写 conversation_turn 记录（含 LLM 生成答案 + 来源元数据）。"""
     import asyncpg
     import asyncio
 
@@ -788,11 +831,13 @@ def _save_turn(
             await conn.execute(
                 """INSERT INTO conversation_turns
                    (id, conversation_id, turn_index, user_question, resolved_query,
-                    answer, retrieved_chunk_ids, pipeline_yaml_version, trace_id, created_at)
-                   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)""",
+                    answer, retrieved_chunk_ids, retrieved_chunks, pipeline_yaml_version, trace_id, created_at)
+                   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)""",
                 str(uuid.uuid4()), conversation_id, turn_index,
                 user_question, resolved_query, answer,
-                chunk_ids, pipeline_yaml_version, trace_id,
+                chunk_ids,
+                json.dumps(retrieved_chunks or [], ensure_ascii=False),
+                pipeline_yaml_version, trace_id,
                 datetime.now(timezone.utc),
             )
         finally:

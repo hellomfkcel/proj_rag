@@ -76,6 +76,7 @@ CREATE TABLE conversation_turns (
     resolved_query           TEXT NOT NULL,      -- 阶段一 = user_question，阶段二改写
     retrieval_params_snapshot JSONB,
     retrieved_chunk_ids      TEXT[] DEFAULT '{}',
+    retrieved_chunks         JSONB DEFAULT '[]',   -- 来源元数据 [{chunk_id, doc_name, content}]，供前端来源标注
     trace_id                 VARCHAR(64) DEFAULT '',
     authz_decision_ref       VARCHAR(64) DEFAULT '',  -- 阶段二审计补全
     pipeline_yaml_version    VARCHAR(32) DEFAULT 'v1',
