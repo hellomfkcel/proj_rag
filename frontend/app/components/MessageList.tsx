@@ -45,13 +45,36 @@ function CheckIcon() {
 export default function MessageList({ messages, msgEndRef, streamError }: Props) {
   const [copiedId, setCopiedId] = useState<number | null>(null);
 
-  const copyContent = async (id: number, text: string) => {
+  // 兼容非安全上下文（http://ip，非 localhost）：navigator.clipboard 不可用时回退 execCommand
+  const copyToClipboard = async (text: string): Promise<boolean> => {
     try {
-      await navigator.clipboard.writeText(text);
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(text);
+        return true;
+      }
+    } catch {
+      // 回退到 execCommand
+    }
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand("copy");
+      document.body.removeChild(ta);
+      return ok;
+    } catch {
+      return false;
+    }
+  };
+
+  const copyContent = async (id: number, text: string) => {
+    const ok = await copyToClipboard(text);
+    if (ok) {
       setCopiedId(id);
       setTimeout(() => setCopiedId(null), 1500);
-    } catch {
-      // clipboard 不可用时忽略
     }
   };
 
@@ -68,22 +91,22 @@ export default function MessageList({ messages, msgEndRef, streamError }: Props)
       )}
       {messages.map((msg, i) =>
         msg.role === "user" ? (
-          /* ── 用户消息：贴合内容的文字框 + 框外复制图标（hover 显示） ── */
+          /* ── 用户消息：贴合内容的文字框 + 右下角框外复制图标（hover 显示） ── */
           <div key={i} className="flex justify-end">
-            <div className="group flex items-start gap-1.5">
+            <div className="group relative">
+              <div className="max-w-[80%] rounded-2xl bg-blue-600 text-white px-3 py-2">
+                <p className="text-sm whitespace-pre-wrap leading-relaxed">{msg.content}</p>
+              </div>
               {msg.content && (
                 <button
                   type="button"
                   onClick={() => copyContent(i, msg.content)}
                   title="复制内容"
-                  className="mt-1 rounded-md p-1.5 text-blue-300 hover:text-white hover:bg-white/20 opacity-0 group-hover:opacity-100 transition-opacity duration-150"
+                  className="absolute -bottom-3 -right-3 rounded-full bg-white p-1.5 text-gray-500 shadow-md ring-1 ring-gray-200 hover:text-gray-800 hover:bg-gray-50 active:scale-90 transition-all duration-150 opacity-0 group-hover:opacity-100"
                 >
                   {copiedId === i ? <CheckIcon /> : <CopyIcon />}
                 </button>
               )}
-              <div className="max-w-[80%] rounded-2xl bg-blue-600 text-white px-3 py-2">
-                <p className="text-sm whitespace-pre-wrap leading-relaxed">{msg.content}</p>
-              </div>
             </div>
           </div>
         ) : (
@@ -136,7 +159,7 @@ export default function MessageList({ messages, msgEndRef, streamError }: Props)
                   <span title={msg.trace_id}>🛰️ {msg.trace_id.slice(0, 12)}</span>
                   <button
                     type="button"
-                    onClick={() => navigator.clipboard?.writeText(msg.trace_id!)}
+                    onClick={() => copyToClipboard(msg.trace_id!)}
                     className="hover:text-gray-600 underline"
                   >
                     复制
@@ -156,7 +179,7 @@ export default function MessageList({ messages, msgEndRef, streamError }: Props)
                     type="button"
                     onClick={() => copyContent(i, msg.content)}
                     title="复制内容"
-                    className="rounded-md p-1.5 text-gray-400 hover:text-gray-700 hover:bg-gray-200 transition-colors"
+                    className="rounded-md p-1.5 text-gray-400 hover:text-gray-700 hover:bg-gray-200 active:scale-90 transition-all duration-150"
                   >
                     {copiedId === i ? <CheckIcon /> : <CopyIcon />}
                   </button>
