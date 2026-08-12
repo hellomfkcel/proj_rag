@@ -22,7 +22,11 @@
       "Bash(curl -s http://localhost:8000/openapi.json)",
       "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); [print\\(p\\) for p in sorted\\(d.get\\('paths',{}\\).keys\\(\\)\\)]\")",
       "Bash(curl *)",
-      "Bash(awk '{print $2}')"
+      "Bash(awk '{print $2}')",
+      "Read(//home/mfkcel/**)",
+      "Bash(tmux ls *)",
+      "Bash(docker exec *)",
+      "Bash(docker cp *)"
     ]
   }
 }
