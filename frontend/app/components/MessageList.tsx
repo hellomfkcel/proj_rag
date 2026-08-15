@@ -1,7 +1,7 @@
 "use client";
 // Message List — user + assistant messages with copy buttons, source chips, error states
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import SourcesCard from "./SourcesCard";
 
 interface Source {
@@ -12,6 +12,7 @@ interface Source {
 interface Message {
   role: "user" | "assistant";
   content: string;
+  thinking?: string;
   sources?: Source[];
   streaming?: boolean;
   errorCode?: string;
@@ -23,6 +24,7 @@ interface Props {
   messages: Message[];
   msgEndRef: React.RefObject<HTMLDivElement>;
   streamError?: string | null;
+  showThinking?: boolean;
 }
 
 function CopyIcon() {
@@ -42,8 +44,39 @@ function CheckIcon() {
   );
 }
 
-export default function MessageList({ messages, msgEndRef, streamError }: Props) {
+export default function MessageList({ messages, msgEndRef, streamError, showThinking = true }: Props) {
   const [copiedId, setCopiedId] = useState<number | null>(null);
+
+  // ── 流式滚动：主容器 ref + 贴底跟踪 ──
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const thinkingRef = useRef<HTMLParagraphElement>(null);
+  const [stickToBottom, setStickToBottom] = useState(true);
+
+  // 用户滚动时检测是否贴近底部：贴底则跟随流式内容，向上阅读则让用户自由滚动不抢夺
+  const handleScroll = () => {
+    const el = scrollRef.current;
+    if (!el) return;
+    setStickToBottom(el.scrollHeight - el.scrollTop - el.clientHeight < 80);
+  };
+
+  // 思考过程内部自动滚动到最新（max-h-40 溢出时跟随最新内容）
+  useEffect(() => {
+    const el = thinkingRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [messages[messages.length - 1]?.thinking]);
+
+  // 流式时跟随最新内容：rAF 每帧合并一次 + 瞬时 scrollTop，
+  // 避免原 scrollIntoView({behavior:"smooth"}) 高频动画队列堆积卡顿。
+  // rAF 保证最后一次更新也会执行（无节流漏尾）。
+  useEffect(() => {
+    if (!stickToBottom) return;
+    const el = scrollRef.current;
+    if (!el) return;
+    const raf = requestAnimationFrame(() => {
+      el.scrollTop = el.scrollHeight;
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [messages, stickToBottom]);
 
   // 兼容非安全上下文（http://ip，非 localhost）：navigator.clipboard 不可用时回退 execCommand
   const copyToClipboard = async (text: string): Promise<boolean> => {
@@ -79,7 +112,7 @@ export default function MessageList({ messages, msgEndRef, streamError }: Props)
   };
 
   return (
-    <div className="flex-1 overflow-y-auto px-6 py-4 space-y-4">
+    <div ref={scrollRef} onScroll={handleScroll} className="flex-1 overflow-y-auto px-6 py-4 space-y-4">
       {messages.length === 0 && (
         <div className="flex items-center justify-center h-full text-gray-400">
           <div className="text-center">
@@ -124,6 +157,19 @@ export default function MessageList({ messages, msgEndRef, streamError }: Props)
                 </div>
               )}
 
+              {/* 思考过程（推理流，可折叠；showThinking=false 时不展示） */}
+              {showThinking && msg.thinking && (
+                <details open={!!msg.streaming} className="mb-2 text-xs text-gray-500 border border-gray-200 rounded-md px-2.5 py-1.5 bg-white/50">
+                  <summary className="cursor-pointer select-none">
+                    <span className="inline-flex items-center gap-1">🧠 思考过程</span>
+                  </summary>
+                  <p
+                    ref={i === messages.length - 1 ? thinkingRef : undefined}
+                    className="whitespace-pre-wrap leading-relaxed mt-1 max-h-40 overflow-y-auto"
+                  >{msg.thinking}</p>
+                </details>
+              )}
+
               {/* Content */}
               {msg.content ? (
                 <p className="text-sm whitespace-pre-wrap leading-relaxed">
@@ -140,13 +186,13 @@ export default function MessageList({ messages, msgEndRef, streamError }: Props)
                 </div>
               ) : null}
 
-              {/* Sources — 标注化来源 chips（文档名，点击弹窗看详情） */}
+              {/* Sources — 来源卡片列表（序号徽标 + 文档名 + 摘要，点击看原文） */}
               {msg.sources && msg.sources.length > 0 && (
                 <div className="mt-3 pt-2 border-t border-gray-200">
-                  <p className="text-xs text-gray-400 mb-1.5">
-                    📎 {msg.sources.filter(s => s.content).length > 0 ? `${msg.sources.filter(s => s.content).length} 个引用来源` : `${msg.sources.length} 个来源`}
+                  <p className="text-xs text-gray-400 mb-2">
+                    📎 引用来源（{msg.sources.length}）
                   </p>
-                  <div className="flex flex-wrap gap-1.5">
+                  <div className="flex flex-col gap-2">
                     {msg.sources.map((s, j) => (
                       <SourcesCard key={j} index={j} source={s} />
                     ))}

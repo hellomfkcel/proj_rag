@@ -9,7 +9,7 @@
 import json
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from src.platform.task.celery_app import celery_app
 from src.config import Settings
@@ -54,60 +54,79 @@ def retrieve_and_generate_task(
     （与评测任务共用，保证线上/评测完全一致）；本任务额外负责副作用：
     Redis Pub/Sub 流式回传 → 写 conversation_turn → 审计。
 
+    流式回传契约（经 on_event 事件汇）：retrieved（检索完成即发，含来源）
+    → thinking（推理增量，可配开关）→ token（答案增量/完整答案）→ done。
+    compact 模式逐 token 流式；refine/tree/no_synthesis 结束一次性补发。
+
     阶段一：resolved_query = user_question（直接透传）
-    阶段二：LLM 多轮改写
+    阶段二：LLM 多轮改写（thinking=disabled，快速）
+    阶段三：检索 + 流式生成（thinking=enabled，保质量）
     P1-5: 支持 Per-Query 检索参数覆盖（retrieval_mode/fusion_method/strict/top_k）
     """
-    r = _run_retrieve_generate(
-        user_question=user_question,
-        kb_ids=kb_ids,
-        tenant_id=tenant_id,
-        ctx_token=ctx_token,
-        conversation_id=conversation_id,
-        turn_index=turn_index,
-        retrieval_mode=retrieval_mode,
-        fusion_method=fusion_method,
-        strict=strict,
-        top_k=top_k,
-        dense_weight=dense_weight,
-        sparse_weight=sparse_weight,
-        synthesis_mode=synthesis_mode,
-        oversample_factor=oversample_factor,
-        min_results=min_results,
-        refetch_max_rounds=refetch_max_rounds,
-        refine_batch_size=refine_batch_size,
-        doc_preview_max_chars=doc_preview_max_chars,
-    )
+    s = Settings()
+
+    # ── Redis Pub/Sub 流式回传：先开连接，检索/生成过程中经 sink 逐事件发布 ──
+    # 方向四：retrieved（来源）在检索完成后立即发布；真流式：compact 逐 token 发布；
+    # 非流式路径（refine/tree/no_synthesis/失败 fallback）结束后补发完整答案。
+    import redis as _redis
+    rr = _redis.from_url(s.redis_url)
+    channel = f"query-stream:{conversation_id}:{turn_index}"
+    state = {"published_token": False}
+
+    def sink(event_type: str, data: dict) -> None:
+        """把事件以 {"event": type, **data} 形状发布到 query-stream 频道（fail-open）。"""
+        if event_type == "token" and data.get("content"):
+            state["published_token"] = True
+        try:
+            rr.publish(channel, json.dumps({"event": event_type, **data}, default=str))
+        except Exception as exc:
+            log.warning("redis_publish_failed", event=event_type, error=str(exc))
+
+    try:
+        r = _run_retrieve_generate(
+            user_question=user_question,
+            kb_ids=kb_ids,
+            tenant_id=tenant_id,
+            ctx_token=ctx_token,
+            conversation_id=conversation_id,
+            turn_index=turn_index,
+            retrieval_mode=retrieval_mode,
+            fusion_method=fusion_method,
+            strict=strict,
+            top_k=top_k,
+            dense_weight=dense_weight,
+            sparse_weight=sparse_weight,
+            synthesis_mode=synthesis_mode,
+            oversample_factor=oversample_factor,
+            min_results=min_results,
+            refetch_max_rounds=refetch_max_rounds,
+            refine_batch_size=refine_batch_size,
+            doc_preview_max_chars=doc_preview_max_chars,
+            on_event=sink,
+        )
+    except Exception:
+        try:
+            rr.close()
+        except Exception:
+            pass
+        raise
+
     answer = r["answer"]
     chunk_ids = r["chunk_ids"]
     documents = r["documents"]
     resolved_query = r["resolved_query"]
     ctx = r["ctx"]
-    s = Settings()
 
-    # 3. Redis Pub/Sub 流式回传
+    # 非流式路径未发布过 token → 补发完整答案，保证前端一定能收到；
+    # 流式路径已逐 token 发布，不重复。
+    if not state["published_token"] and answer:
+        sink("token", {"content": answer})
+    sink("done", {})
+
     try:
-        import redis
-        rr = redis.from_url(s.redis_url)
-        channel = f"query-stream:{conversation_id}:{turn_index}"
-
-        # 引用来源：含 doc_name + 截断内容（供前端来源标注与弹窗展示）
-        rr.publish(channel, json.dumps({
-            "event": "retrieved",
-            "chunk_ids": chunk_ids,
-            "chunks": r["source_meta"],
-        }, default=str))
-
-        rr.publish(channel, json.dumps({
-            "event": "token",
-            "content": answer,
-        }, default=str))
-
-        rr.publish(channel, json.dumps({"event": "done"}, default=str))
-
         rr.close()
-    except Exception as exc:
-        log.warning("redis_publish_failed", error=str(exc))
+    except Exception:
+        pass
 
     # 4. 写 conversation_turn（含 LLM 生成的答案，供前端刷新时加载历史）
     _save_turn(
@@ -165,12 +184,18 @@ def _run_retrieve_generate(
     refetch_max_rounds: Optional[int] = None,
     refine_batch_size: Optional[int] = None,
     doc_preview_max_chars: Optional[int] = None,
+    on_event: Optional[Callable[[str, dict], None]] = None,
 ) -> Dict[str, Any]:
     """检索 + 生成共享核心（线上任务与评测任务共用，保证逻辑完全一致）。
 
     返回完整中间结果，供线上任务做副作用、评测任务透出：
     { query, resolved_query, answer, chunk_ids, is_answerable,
       contexts, retrieved_chunks, documents, ctx }
+
+    on_event（可选，仅线上任务传）：事件汇，检索完成后立即回调
+    ("retrieved", {chunk_ids, chunks})；compact 流式生成时逐段回调
+    ("thinking", {content}) / ("token", {content})。on_event=None
+    （评测路径）时行为与既有完全一致——非流式纯累积。
     """
     from src.retrieve.service import retrieve
     from src.permission.context import build_context, resolve_ctx_token
@@ -220,6 +245,26 @@ def _run_retrieve_generate(
     documents = ret.get("documents", [])
     chunk_ids = ret.get("chunk_ids", [])
 
+    # 来源元数据（doc_name + 截断内容，供前端来源标注与历史持久化）。
+    # 在检索后立即构建：流式路径需在 LLM 生成前把 retrieved 事件回传前端（方向四）。
+    doc_names = _resolve_doc_names(documents)
+    source_meta = []
+    for i, doc in enumerate(documents):
+        content = doc.content if hasattr(doc, "content") else str(doc)
+        did = doc.meta.get("document_id", "") if hasattr(doc, "meta") else ""
+        doc_name = doc_names.get(did) if did else ""
+        if not doc_name:
+            doc_name = (content[:12] + "…") if content else "未知来源"
+        source_meta.append({
+            "chunk_id": doc.id if hasattr(doc, "id") else str(i),
+            "doc_name": doc_name,
+            "content": content[:500],
+        })
+
+    # 方向四：检索完成即回传 retrieved，用户在 LLM 生成期间即可看到来源
+    if on_event is not None:
+        on_event("retrieved", {"chunk_ids": chunk_ids, "chunks": source_meta})
+
     # 3. LLM 生成（选择 synthesis 模式）
     if not documents:
         answer = "未找到足够信息。"
@@ -238,8 +283,15 @@ def _run_retrieve_generate(
             _max_chars = doc_preview_max_chars or retrieval_cfg.doc_preview_max_chars
 
             if mode == "compact":
-                answer = _synthesize_compact(user_question, documents,
-                    max_chars=_max_chars)
+                if on_event is not None:
+                    # 真流式：逐推理段/逐 token 回传（thinking 事件 + 增量 token 事件）
+                    answer = _synthesize_compact(user_question, documents,
+                        max_chars=_max_chars,
+                        on_token=lambda c: on_event("token", {"content": c}),
+                        on_reasoning=lambda r: on_event("thinking", {"content": r}))
+                else:
+                    answer = _synthesize_compact(user_question, documents,
+                        max_chars=_max_chars)
             elif mode == "refine":
                 answer = _synthesize_refine(user_question, documents,
                     batch_size=_batch,
@@ -253,8 +305,14 @@ def _run_retrieve_generate(
             elif mode == "no_synthesis":
                 answer = _synthesize_no_synthesis(user_question, documents)
             else:
-                answer = _synthesize_compact(user_question, documents,
-                    max_chars=retrieval_cfg.doc_preview_max_chars)
+                if on_event is not None:
+                    answer = _synthesize_compact(user_question, documents,
+                        max_chars=retrieval_cfg.doc_preview_max_chars,
+                        on_token=lambda c: on_event("token", {"content": c}),
+                        on_reasoning=lambda r: on_event("thinking", {"content": r}))
+                else:
+                    answer = _synthesize_compact(user_question, documents,
+                        max_chars=retrieval_cfg.doc_preview_max_chars)
 
             # 阶段三：引用校验
             if chunk_ids:
@@ -280,21 +338,6 @@ def _run_retrieve_generate(
         }
         for i, doc in enumerate(documents)
     ]
-
-    # 来源元数据（doc_name + 截断内容，供前端来源标注与历史持久化）
-    doc_names = _resolve_doc_names(documents)
-    source_meta = []
-    for i, doc in enumerate(documents):
-        content = doc.content if hasattr(doc, "content") else str(doc)
-        did = doc.meta.get("document_id", "") if hasattr(doc, "meta") else ""
-        doc_name = doc_names.get(did) if did else ""
-        if not doc_name:
-            doc_name = (content[:12] + "…") if content else "未知来源"
-        source_meta.append({
-            "chunk_id": doc.id if hasattr(doc, "id") else str(i),
-            "doc_name": doc_name,
-            "content": content[:500],
-        })
 
     return {
         "query": user_question,
@@ -432,7 +475,8 @@ def _rewrite_query(conversation_id: str, user_question: str, turn_index: int) ->
 
     try:
         from src.platform.model.registry import invoke_llm
-        rewritten = invoke_llm(rewrite_prompt).strip()
+        # 改写：关闭思考模式（thinking=disabled），改写只需快速产出独立查询，无需深度推理
+        rewritten = invoke_llm(rewrite_prompt, thinking="disabled").strip()
         if rewritten and len(rewritten) > 3:
             log.info("query_rewritten", original=user_question[:80],
                     rewritten=rewritten[:80])
@@ -657,12 +701,17 @@ def _prepare_doc_list(documents: list, max_chars: int = 1000) -> list:
     return result
 
 
-def _synthesize_compact(question: str, documents: list, max_chars: int = 1000) -> str:
-    """Compact 模式：使用 PromptBuilder 风格模板 + invoke_llm。
+def _synthesize_compact(question: str, documents: list, max_chars: int = 1000,
+                        on_token: Optional[Callable[[str], None]] = None,
+                        on_reasoning: Optional[Callable[[str], None]] = None) -> str:
+    """Compact 模式：单次 LLM 调用，使用 PromptBuilder 风格模板 + invoke_llm_stream。
 
     适合 ≤5 篇文档的场景，速度最快。
+    on_token/on_reasoning：可选流式回调，逐段内容/推理增量触发；
+    缺省时纯累积返回完整答案（评测等非流式场景契约不变）。
+    内容生成开启思考模式（thinking=enabled），推理与答案经 invoke_llm_stream 流式产出。
     """
-    from src.platform.model.registry import invoke_llm, resolve_prompt, build_prompt
+    from src.platform.model.registry import invoke_llm_stream, resolve_prompt, build_prompt
 
     if not documents:
         return "未找到足够信息。"
@@ -674,7 +723,15 @@ def _synthesize_compact(question: str, documents: list, max_chars: int = 1000) -
     docs = _prepare_doc_list(documents, max_chars=max_chars)
     prompt = build_prompt(template, {"query": question, "documents": docs})
 
-    return invoke_llm(prompt)
+    answer = ""
+    for chunk in invoke_llm_stream(prompt, thinking="enabled"):
+        if chunk.reasoning and on_reasoning:
+            on_reasoning(chunk.reasoning)
+        if chunk.content:
+            answer += chunk.content
+            if on_token:
+                on_token(chunk.content)
+    return answer
 
 
 def _synthesize_refine(question: str, documents: list, batch_size: int = 3,
@@ -704,7 +761,7 @@ def _synthesize_refine(question: str, documents: list, batch_size: int = 3,
             "请将以下答案精简为不超过{target}字的摘要，保留所有关键信息点：\n\n"
             "{answer}"
         ).format(target=compress_target, answer=answer[:3000])
-        return invoke_llm(compress_prompt)
+        return invoke_llm(compress_prompt, thinking="enabled")
 
     # ── 初始答案（前 batch_size 个 chunk 合并） ──
     batch_docs = documents[:batch_size]
@@ -717,7 +774,7 @@ def _synthesize_refine(question: str, documents: list, batch_size: int = 3,
         "query": question,
         "current_doc": combined_docs,
     })
-    answer = invoke_llm(init_prompt)
+    answer = invoke_llm(init_prompt, thinking="enabled")
 
     # ── 分批 refine ──
     refine_template = resolve_prompt("refine", "v1") or _DEFAULT_REFINE_TEMPLATE
@@ -738,7 +795,7 @@ def _synthesize_refine(question: str, documents: list, batch_size: int = 3,
             "existing_answer": answer,
             "current_doc": combined,
         })
-        answer = invoke_llm(refine_prompt)
+        answer = invoke_llm(refine_prompt, thinking="enabled")
 
     return answer
 
@@ -771,7 +828,7 @@ def _synthesize_tree_summarize(question: str, documents: list, batch_size: int =
                 "query": question,
                 "documents": docs,
             })
-            summary = invoke_llm(summary_prompt)
+            summary = invoke_llm(summary_prompt, thinking="enabled")
             summaries.append(summary)
         except Exception:
             pass  # 某批失败不影响其他批次
@@ -786,7 +843,7 @@ def _synthesize_tree_summarize(question: str, documents: list, batch_size: int =
         "summaries": combined,
     })
 
-    return invoke_llm(final_prompt)
+    return invoke_llm(final_prompt, thinking="enabled")
 
 
 def _synthesize_no_synthesis(question: str, documents: list) -> str:

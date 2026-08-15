@@ -17,7 +17,7 @@ import asyncio
 import asyncpg
 import os
 import time as _time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Generator, List, Optional
 from dataclasses import dataclass
 
 from src.config import Settings
@@ -94,6 +94,19 @@ class ModelOutputError(Exception):
     吃满 max_tokens 预算，导致最终 content 为空（finish_reason=length）。
     该异常不携带任何 prompt / 生成内容 / credential。
     """
+
+
+@dataclass
+class LLMStreamChunk:
+    """invoke_llm_stream 的流式产出单元。
+
+    - reasoning: 推理阶段增量（thinking_content），可为空字符串；
+    - content:    答案阶段增量，可为空字符串。
+    两者同一 chunk 只会有其一非空（不同阶段）。
+    """
+
+    reasoning: str = ""
+    content: str = ""
 
 
 # ── DB helpers ──────────────────────────────────────────────────
@@ -273,11 +286,15 @@ def invoke_embedding(texts: List[str], mode: str = "document") -> List[List[floa
 # ── invoke_llm（已有 OpenAI SDK — 天然兼容所有 provider）────────
 
 def invoke_llm(prompt: str, model_id: Optional[str] = None,
-               max_tokens: Optional[int] = None, temperature: Optional[float] = None) -> str:
+               max_tokens: Optional[int] = None, temperature: Optional[float] = None,
+               thinking: Optional[str] = None) -> str:
     """调用 LLM 生成（OpenAI 兼容 API → Ollama / vLLM / DeepSeek / OpenAI）。
 
     生成参数（max_tokens / temperature）缺省取 Settings（env 可覆盖），
     支持按调用覆盖——所有生成调用必须经此门面（§0.2.3 红线 4）。
+
+    thinking: "enabled" | "disabled" | None —— 透传给 DeepSeek 思考模式开关
+    （extra_body={"thinking": {"type": ...}}）。None = 不发该参数（保持 provider 默认）。
 
     自动产生 OTel span 上报到 Tempo + Langfuse observation（包围实际计算，非后置记录）。
 
@@ -324,11 +341,15 @@ def invoke_llm(prompt: str, model_id: Optional[str] = None,
     finish_reason = ""
     reasoning_tokens = None
     try:
+        extra_body = None
+        if thinking in ("enabled", "disabled"):
+            extra_body = {"thinking": {"type": thinking}}
         resp = client.chat.completions.create(
             model=cfg.model_name,
             messages=[{"role": "user", "content": prompt}],
             max_tokens=effective_max_tokens,
             temperature=effective_temperature,
+            extra_body=extra_body,
         )
         _choice = resp.choices[0]
         finish_reason = _choice.finish_reason or ""
@@ -375,6 +396,127 @@ def invoke_llm(prompt: str, model_id: Optional[str] = None,
         span.end()
 
     return answer
+
+
+# ── invoke_llm_stream（真流式生成）──────────────────────────────
+
+def invoke_llm_stream(prompt: str, model_id: Optional[str] = None,
+                      max_tokens: Optional[int] = None, temperature: Optional[float] = None,
+                      thinking: Optional[str] = None) -> Generator[LLMStreamChunk, None, None]:
+    """流式调用 LLM（OpenAI 兼容 → Ollama / vLLM / DeepSeek / OpenAI），逐 chunk 产出 LLMStreamChunk。
+
+    与 invoke_llm 同一 P-MODEL 门面语义，供 B-CHAT 逐推理段/逐 token 回传。
+    thinking: "enabled" | "disabled" | None —— 同 invoke_llm，透传 DeepSeek 思考模式开关。
+
+    观测契约与 invoke_llm 一致：OTel span + Langfuse observation 包围整个流，
+    结束后补记 elapsed_ms / answer_len / finish_reason / reasoning_tokens。
+    空 content 守卫同 invoke_llm：推理吃满 max_tokens 时 content 为空 → 抛 ModelOutputError。
+
+    reasoning_content 为 DeepSeek 非标准字段；SDK（requirements 1.40 / dev 2.50）模型
+    extra="allow" 保留未知字段，故经 getattr(delta, "reasoning_content", None) 读取。
+    """
+    from openai import OpenAI
+    import time as _wall
+
+    s = Settings()
+    if model_id is None:
+        model_id = s.llm_model
+    effective_max_tokens = max_tokens or s.llm_max_tokens
+    effective_temperature = temperature if temperature is not None else s.llm_temperature
+    cfg = resolve_model(model_id)
+    base = (cfg.base_url or s.llm_base_url).rstrip("/")
+
+    # OTel span（生成器首迭代时创建，span 覆盖整个流时长）
+    span = None
+    try:
+        from opentelemetry import trace
+        tracer = trace.get_tracer("rag-v14")
+        span = tracer.start_span("invoke_llm_stream")
+        span.set_attribute("model", cfg.model_name)
+        span.set_attribute("model_id", model_id)
+        span.set_attribute("provider", cfg.provider)
+        span.set_attribute("max_tokens", effective_max_tokens)
+    except Exception:
+        pass
+
+    # Langfuse observation（开始前创建，duration 反映实际耗时）
+    langfuse_obs = _start_langfuse_observation(
+        trace_name=f"llm-{model_id}",
+        model=cfg.model_name,
+        input_data=prompt[:10000],
+        metadata={},
+    )
+
+    client = OpenAI(base_url=base, api_key=cfg.api_key or s.llm_api_key, timeout=120.0)
+
+    _start = _wall.time()
+    answer = ""
+    finish_reason = ""
+    reasoning_tokens = None
+    try:
+        extra_body = None
+        if thinking in ("enabled", "disabled"):
+            extra_body = {"thinking": {"type": thinking}}
+        resp = client.chat.completions.create(
+            model=cfg.model_name,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=effective_max_tokens,
+            temperature=effective_temperature,
+            stream=True,
+            stream_options={"include_usage": True},
+            extra_body=extra_body,
+        )
+        for chunk in resp:
+            # 末 chunk 携 usage（stream_options include_usage=True）；SDK 版本间可能把
+            # usage 附在含 choice 的 chunk 上，故每个 chunk 都检查，避免漏读。
+            if chunk.usage:
+                try:
+                    reasoning_tokens = getattr(
+                        chunk.usage.completion_tokens_details, "reasoning_tokens", None)
+                except Exception:
+                    reasoning_tokens = None
+            if not chunk.choices:
+                continue
+            _choice = chunk.choices[0]
+            if _choice.finish_reason:
+                finish_reason = _choice.finish_reason
+            _delta = _choice.delta
+            rc = getattr(_delta, "reasoning_content", None)
+            if rc:
+                yield LLMStreamChunk(reasoning=rc)
+            if _delta.content:
+                answer += _delta.content
+                yield LLMStreamChunk(content=_delta.content)
+
+        if not answer:
+            # 空输出守卫：只记元数据，绝不落 prompt / 生成内容 / credential（§11.3 / §27.1）
+            log.warning(
+                "llm_empty_output",
+                finish_reason=finish_reason,
+                reasoning_tokens=reasoning_tokens,
+                model=cfg.model_name,
+                model_id=model_id,
+                max_tokens=effective_max_tokens,
+                elapsed_ms=int((_wall.time() - _start) * 1000),
+            )
+            raise ModelOutputError(
+                f"LLM returned empty content (model={cfg.model_name}, "
+                f"finish_reason={finish_reason!r}, max_tokens={effective_max_tokens}, "
+                f"reasoning_tokens={reasoning_tokens})"
+            )
+    finally:
+        _elapsed = _wall.time() - _start
+        _end_langfuse_observation(
+            langfuse_obs,
+            output_data=answer[:10000] if answer else "",
+            metadata={"elapsed_ms": int(_elapsed * 1000)},
+        )
+        if span:
+            span.set_attribute("elapsed_ms", int(_elapsed * 1000))
+            span.set_attribute("answer_len", len(answer))
+            span.set_attribute("finish_reason", finish_reason)
+            span.set_attribute("reasoning_tokens", reasoning_tokens or 0)
+            span.end()
 
 
 # ── invoke_rerank ───────────────────────────────────────────────
