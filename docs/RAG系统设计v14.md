@@ -642,6 +642,8 @@ def run_pipeline_task(pipeline_name: str, pipeline_input: dict, task_metadata: d
 
 `query-stream:{task_id}` 频道；事件类型：retrieved / token / done / error；API 侧 SSE 订阅转发，**必须设超时**（30s 无消息发 error 断开）。
 
+**★ 前端 SSE 代理缓冲陷阱**（2026-08-15 实测）：浏览器经 Next.js `rewrites` 代理（`/api/*` → 后端）订阅 SSE 时，代理会**缓冲整个响应直到连接关闭**，前端一次性收到全部事件（retrieved/thinking/token/done 同时到达，表现为"非流式"）。后端直连增量 ≠ 浏览器端增量，**必须实测经前端代理的完整路径**。规避方式：前端 SSE 走同源 Route Handler（`frontend/app/stream/[...path]/route.ts`）逐块透传后端流（URL 形如 `/stream/v1/conversations/{id}/stream?turn_index=N&token=<jwt>`）；生产走 nginx 反向代理时须 `proxy_buffering off`。若直接给浏览器用绝对后端地址，还需注意 CORS `allow_origins` 覆盖实际访问来源（含 LAN IP）。
+
 ### 9.4 健康检查
 
 `/healthz`（进程活着）与 `/readyz`（依赖就绪）。

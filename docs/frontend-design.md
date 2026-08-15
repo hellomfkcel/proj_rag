@@ -343,6 +343,8 @@ not_parsed ──trigger_parse──→ queued ──worker pickup──→ proc
      GET /conversations/{id}/stream → events: retrieved/token/done
 ```
 
+**⚠️ SSE 必须绕过 Next.js 代理**（2026-08-15 实测）：`GET /api/v1/conversations/{id}/stream` 若经 `next.config.js` 的 `rewrites()`（`/api/*` → FastAPI）订阅，**代理会缓冲整个 SSE 响应直到连接关闭**，前端一次性收到全部事件（非流式）。前端 SSE 必须走同源 Route Handler `frontend/app/stream/[...path]/route.ts`（逐块透传后端 ReadableStream，同源无 CORS），URL 形如 `/stream/v1/conversations/{id}/stream?turn_index=N&token=<jwt>`。生产走 nginx 反向代理时须 `proxy_buffering off`。
+
 | 前端操作 | HTTP 方法 + 路径 | 后端现状 |
 |---------|-----------------|---------|
 | 列出历史会话 | `GET /api/v1/conversations` | ❌ 需新增—`SELECT FROM conversations WHERE tenant_id=$1 AND user_id=$2` |

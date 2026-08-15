@@ -342,6 +342,9 @@ async def query_stream(conversation_id: str, turn_index: int = 1):
 
                 if event_type == "retrieved":
                     yield f"event: retrieved\ndata: {json.dumps(data, default=str)}\n\n"
+                elif event_type == "thinking":
+                    # 推理增量（deepseek reasoning_content），透传给前端"思考过程"
+                    yield f"event: thinking\ndata: {json.dumps(data, default=str)}\n\n"
                 elif event_type == "token":
                     yield f"event: token\ndata: {json.dumps(data, default=str)}\n\n"
                 elif event_type == "done":

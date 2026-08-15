@@ -17,6 +17,7 @@ import type { Conversation, Turn } from "@/lib/chat";
 interface Message {
   role: "user" | "assistant";
   content: string;
+  thinking?: string;
   sources?: { chunk_id: string; doc_name?: string; content?: string }[];
   streaming?: boolean;
   errorCode?: string;
@@ -38,6 +39,18 @@ export default function ChatPage() {
   const [loading, setLoading] = useState(false);
   const [streamError, setStreamError] = useState<string | null>(null);
   const [retryCountdown, setRetryCountdown] = useState(0);
+  // 思考过程展示开关（可配：默认开，localStorage 持久化）
+  const [showThinking, setShowThinking] = useState<boolean>(() => {
+    if (typeof window === "undefined") return true;
+    return localStorage.getItem("rag-show-thinking") !== "false";
+  });
+  const toggleThinking = () => {
+    setShowThinking(prev => {
+      const next = !prev;
+      localStorage.setItem("rag-show-thinking", next ? "true" : "false");
+      return next;
+    });
+  };
   const retryTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const latestMessagesRef = useRef<Message[]>([]);
   const msgEndRef = useRef<HTMLDivElement>(null!);
@@ -80,7 +93,9 @@ export default function ChatPage() {
     fetchConvs();
   }, [token, router]);
 
-  useEffect(() => { msgEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages]);
+  // 自动滚动已下放到 MessageList（scrollRef + 节流瞬时跟随），避免流式高频
+  // scrollIntoView({behavior:"smooth"}) 动画队列堆积导致视图卡顿/答案在视口外增长。
+  // msgEndRef 保留作为底部锚点 div。
 
   const fetchConvs = async () => {
     try { setConvs(await listConversations()); } catch {}
@@ -186,7 +201,18 @@ export default function ChatPage() {
     setLoading(true);
 
     let sseAnswer = "";
+    let sseThinking = "";
+    let lastThinkingFlush = 0;
     let sseSources: { chunk_id: string; doc_name?: string; content?: string }[] = [];
+    // 推理流事件频率高（每 token 一次），用 50ms 节流合并 setMessages，避免高频重渲染卡顿
+    const flushThinking = () => {
+      setMessages(prev => {
+        const next = [...prev];
+        const last = next[next.length - 1];
+        if (last?.role === "assistant") { last.thinking = sseThinking; }
+        return [...next];
+      });
+    };
 
     try {
       // ── Step 1: Fire the query FIRST ──
@@ -224,7 +250,9 @@ export default function ChatPage() {
       // ── Step 2: Open SSE with CORRECT conversation_id + turn_index ──
       // The Celery worker publishes results to Redis Pub/Sub when done.
       // We subscribe via SSE and wait for the "done" event (or 60s timeout).
-      const streamUrl = `/api/v1/conversations/${activeConvIdNew}/stream?turn_index=${turnIndex}&token=${encodeURIComponent(token || "")}`;
+      // ★ 走 /stream/... Route Handler：Next.js rewrites 代理（/api/*）会缓冲 SSE，
+      //   导致前端一次性收到全部事件；/stream/... 由 Route Handler 逐块透传后端流。
+      const streamUrl = `/stream/v1/conversations/${activeConvIdNew}/stream?turn_index=${turnIndex}&token=${encodeURIComponent(token || "")}`;
 
       // Use a Promise to properly await SSE completion
       await new Promise<void>((resolve) => {
@@ -273,6 +301,18 @@ export default function ChatPage() {
           } catch {}
         });
 
+        evtSource.addEventListener("thinking", (e: MessageEvent) => {
+          try {
+            const d = JSON.parse(e.data);
+            sseThinking += d.content || "";
+            const now = Date.now();
+            if (now - lastThinkingFlush >= 50) {
+              lastThinkingFlush = now;
+              flushThinking();
+            }
+          } catch {}
+        });
+
         evtSource.addEventListener("error", (e: MessageEvent) => {
           try {
             const d = JSON.parse((e as any).data || "{}");
@@ -297,6 +337,7 @@ export default function ChatPage() {
         evtSource.addEventListener("done", () => {
           evtSource.close();
           clearTimeout(streamTimeout);
+          flushThinking(); // 收尾 flush 节流期间未提交的推理增量
           setMessages(prev => {
             const next = [...prev];
             const last = next[next.length - 1];
@@ -465,7 +506,18 @@ export default function ChatPage() {
               </button>
             </div>
           )}
-          <MessageList messages={messages} msgEndRef={msgEndRef} streamError={streamError} />
+          {/* 推理过程展示开关（可配，localStorage 持久化） */}
+          <div className="px-4 py-1.5 border-b border-gray-100 flex items-center gap-2 text-xs text-gray-500">
+            <button
+              onClick={toggleThinking}
+              className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded border border-gray-200 hover:bg-gray-50 transition"
+              title={showThinking ? "隐藏推理过程" : "显示推理过程"}
+            >
+              <span className={`w-3 h-3 rounded-full ${showThinking ? "bg-blue-500" : "bg-gray-300"}`} />
+              推理过程 {showThinking ? "开" : "关"}
+            </button>
+          </div>
+          <MessageList messages={messages} msgEndRef={msgEndRef} streamError={streamError} showThinking={showThinking} />
           <InputBar
             input={input}
             onInputChange={setInput}

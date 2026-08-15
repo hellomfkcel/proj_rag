@@ -26,7 +26,14 @@
       "Read(//home/mfkcel/**)",
       "Bash(tmux ls *)",
       "Bash(docker exec *)",
-      "Bash(docker cp *)"
+      "Bash(docker cp *)",
+      "Bash(echo \"=== exit: $? ===\")",
+      "Bash(python3 -m json.tool)",
+      "Bash(python3 *)",
+      "Bash(export PGPASSWORD=rag_dev_pwd_2026)",
+      "Bash(psql -h localhost -p 25432 -U rag -d rag -c ' *)",
+      "Bash(psql -h localhost -p 25432 -U rag -d rag -c \"SELECT kb_id, version, chunk_size, chunk_overlap FROM chunking_configs LIMIT 10;\")",
+      "Bash(psql -h localhost -p 25432 -U rag -d rag -t -A -c ' *)"
     ]
   }
 }
