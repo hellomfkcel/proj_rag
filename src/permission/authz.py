@@ -248,18 +248,13 @@ def filter_items(
 # get_prefilter（检索前编译，带熔断）
 # ══════════════════════════════════════════════════════════════════
 
-# P1-2: 请求内缓存 — 使用 contextvars 实现同一次检索内复用 prefilter 结果。
-# 设计依据：docs/RAG系统设计v14.md §6.6 "请求内缓存（同一次检索复用），
-# 不跨请求缓存（非 strict 库无层 3 兜底，陈旧即越权窗口）"。
-import contextvars
-import time
-from dataclasses import dataclass, field
-
-_prefilter_cache: contextvars.ContextVar[dict] = contextvars.ContextVar(
-    "prefilter_cache", default={}
-)
-
-_PREFILTER_CACHE_TTL_S = 30  # 请求内最大缓存时长
+# P1-2 修订（2026-08-16 联调发现）：原实现用模块级 contextvars 做"请求内缓存"，
+# 但 Celery worker 复用线程执行任务时，contextvars 在线程内跨任务泄漏 ——
+# 同一用户在"无权限查询 → 被授予权限"的 30s 内再次查询，会命中陈旧 prefilter，
+# 造成授权已生效但检索仍被拒。违反 §6.6 "不跨请求缓存"（陈旧即越权窗口）。
+# 而 get_prefilter 在每次检索任务中只调用一次，缓存本无同请求复用价值，
+# 故直接移除缓存：每次任务都向权限服务取最新 prefilter（权限服务侧自带
+# 60s 服务端缓存与限流，无性能问题）。
 
 
 @_with_circuit_breaker
@@ -267,29 +262,17 @@ def get_prefilter(ctx: RequestContext) -> Dict[str, Any]:
     """检索前编译过滤条件 → /v1/prefilter。
 
     返回 PreFilter 或 SUSPENDED 哨兵（suspended: true）。
-    请求内缓存（同一次 HTTP 请求/检索任务内复用），不跨请求缓存。
+    不缓存 —— 每次检索任务都取最新授权状态（§6.6 不跨请求缓存）。
     失败 → 不允许回退到无过滤查询，必须整体拒答。
 
     所有模式（开发/生产）统一走权限服务判定。
     """
-    # P1-2: 请求内缓存 — 以 credential hash 为键，TTL 30s
-    cache = _prefilter_cache.get()
-    cache_key = f"pf:{hash(ctx.credential) & 0xFFFFFFFF:x}"
-    cached = cache.get(cache_key)
-    if cached and (time.monotonic() - cached["_ts"] < _PREFILTER_CACHE_TTL_S):
-        logger.debug("prefilter_cache_hit", request_id=ctx.request_id)
-        return cached["result"]
-
     client = get_client()
     try:
-        result = client.get_prefilter(
+        return client.get_prefilter(
             request_id=ctx.request_id, credential=ctx.credential,
             ctx=ctx,
         )
-        # 缓存结果并标记时间戳
-        cache[cache_key] = {"result": result, "_ts": time.monotonic()}
-        _prefilter_cache.set(cache)
-        return result
     except Exception:
         logger.warning("authz_prefilter_failed", request_id=ctx.request_id)
         raise  # 让 circuitbreaker 计数，熔断打开时由 _circuit_open_fallback 处理

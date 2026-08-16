@@ -404,7 +404,9 @@ def _process_stream_message(msg_id: str, msg_data: dict) -> bool:
         True 表示处理成功（应 ACK），False 表示处理失败（不 ACK，下轮重试）。
     """
     try:
-        event_json = msg_data.get("event", "")
+        # Redis 返回的消息字段名是 bytes（b'event'），redis-py 不做解码。
+        # 用 get() 同时兼容 bytes 与 str 键，避免"字段名不匹配 → 永远解析失败"。
+        event_json = msg_data.get("event") or msg_data.get(b"event") or ""
         if isinstance(event_json, bytes):
             event_json = event_json.decode("utf-8")
         event = json.loads(event_json)

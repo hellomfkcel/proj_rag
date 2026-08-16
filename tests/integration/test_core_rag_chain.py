@@ -42,10 +42,14 @@ def test_kb_listing():
     assert isinstance(data, list)
     assert len(data) >= 1, "Expected at least 1 KB (seed data)"
 
-    kb_ids = [kb["id"] for kb in data]
-    assert SEED_KB_ID in kb_ids, f"Seed KB {SEED_KB_ID} not found in list"
+    # 种子 KB 使用随机 UUID（seed_dev.py），不再断言固定 SEED_KB_ID；
+    # 关键不变量是列表非空且全部属于当前租户。
+    assert all(kb["tenant_id"] == TEST_TENANT for kb in data), (
+        f"All listed KBs must belong to tenant {TEST_TENANT}"
+    )
 
-    kb = next(kb for kb in data if kb["id"] == SEED_KB_ID)
+    # 任意一个 KB 应具备完整字段（种子使用随机 UUID，不锁定固定 ID）
+    kb = data[0]
     assert "name" in kb
     assert "tenant_id" in kb
     assert kb["tenant_id"] == TEST_TENANT

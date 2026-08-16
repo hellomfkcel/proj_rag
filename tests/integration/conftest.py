@@ -75,27 +75,30 @@ requires_postgres = pytest.mark.skipif(not _postgres_reachable(), reason="Postgr
 # JWT helpers (sync wrappers for external test scripts)
 # ══════════════════════════════════════════════════════════════════
 
+DEV_PASSWORD = os.environ.get("TEST_DEV_PASSWORD", "admin123")
+
+
 def admin_token_sync() -> str:
     resp = httpx.post(f"{API_BASE}/api/v1/auth/dev-login", json={
-        "username": "admin", "tenant": TEST_TENANT, "role": "system_admin",
+        "username": "admin", "password": DEV_PASSWORD, "tenant": TEST_TENANT,
     }, timeout=10)
-    assert resp.status_code == 200, f"dev-login failed: {resp.status_code}"
+    assert resp.status_code == 200, f"dev-login failed: {resp.status_code} {resp.text[:150]}"
     return resp.json()["access_token"]
 
 
 def reader_token_sync() -> str:
     resp = httpx.post(f"{API_BASE}/api/v1/auth/dev-login", json={
-        "username": "reader", "tenant": TEST_TENANT, "role": "user",
+        "username": "reader", "password": DEV_PASSWORD, "tenant": TEST_TENANT,
     }, timeout=10)
-    assert resp.status_code == 200
+    assert resp.status_code == 200, f"dev-login failed: {resp.status_code} {resp.text[:150]}"
     return resp.json()["access_token"]
 
 
 def writer_token_sync() -> str:
     resp = httpx.post(f"{API_BASE}/api/v1/auth/dev-login", json={
-        "username": "writer", "tenant": TEST_TENANT, "role": "user",
+        "username": "writer", "password": DEV_PASSWORD, "tenant": TEST_TENANT,
     }, timeout=10)
-    assert resp.status_code == 200
+    assert resp.status_code == 200, f"dev-login failed: {resp.status_code} {resp.text[:150]}"
     return resp.json()["access_token"]
 
 
@@ -113,7 +116,8 @@ async def get_token(
     role: str = "system_admin",
     client: Optional[httpx.AsyncClient] = None,
 ) -> str:
-    payload = {"username": username, "tenant": tenant, "role": role}
+    # 角色由 Keycloak 决定，dev-login 不再接受 role 字段；统一用共享测试口令
+    payload = {"username": username, "tenant": tenant, "password": DEV_PASSWORD}
     async def _fetch(c: httpx.AsyncClient) -> str:
         resp = await c.post("/api/v1/auth/dev-login", json=payload)
         if resp.status_code != 200:

@@ -23,7 +23,7 @@ from tests.integration.conftest import (
     admin_headers, reader_headers, writer_headers,
     admin_token, reader_token,
     unique_test_name, create_test_text_file,
-    API_BASE, SEED_KB_ID, TEST_TENANT,
+    API_BASE, SEED_KB_ID, TEST_TENANT, DEV_PASSWORD,
 )
 
 pytestmark = pytest.mark.integration
@@ -38,8 +38,9 @@ V1 = f"{API_BASE}/api/v1"
 @requires_api
 def test_dev_login_returns_jwt():
     """POST /api/v1/auth/dev-login returns a valid JWT."""
+    from tests.integration.conftest import DEV_PASSWORD
     resp = httpx.post(f"{V1}/auth/dev-login", json={
-        "username": "admin", "tenant": TEST_TENANT, "role": "system_admin",
+        "username": "admin", "tenant": TEST_TENANT, "password": DEV_PASSWORD,
     }, timeout=10)
     assert resp.status_code == 200
     data = resp.json()
@@ -316,15 +317,18 @@ def test_tenant_isolation():
                      headers={"Authorization": f"Bearer {tdev}"},
                      timeout=10)
     assert resp.status_code == 200
-    dev_ids = {kb["id"] for kb in resp.json()}
-    assert SEED_KB_ID in dev_ids
+    dev_kbs = resp.json()
+    assert len(dev_kbs) >= 1, "tenant-dev should have at least 1 KB"
+    assert all(kb["tenant_id"] == TEST_TENANT for kb in dev_kbs), \
+        "All tenant-dev listed KBs must belong to tenant-dev"
+    a_dev_kb = dev_kbs[0]["id"]  # 真实存在的 KB（种子使用随机 UUID）
 
-    # tenant-other (no KBs)
+    # 其他租户（acme-corp，admin 同为成员，但应看不到 tenant-dev 的 KB）
     resp = httpx.post(f"{V1}/auth/dev-login", json={
-        "username": "other-admin", "tenant": "tenant-other",
-        "role": "system_admin",
+        "username": "admin", "tenant": "acme-corp",
+        "password": DEV_PASSWORD,
     }, timeout=10)
-    assert resp.status_code == 200
+    assert resp.status_code == 200, f"acme-corp dev-login: {resp.text[:150]}"
     tother = resp.json()["access_token"]
 
     resp = httpx.get(f"{V1}/knowledge-bases",
@@ -332,8 +336,8 @@ def test_tenant_isolation():
                      timeout=10)
     assert resp.status_code == 200
     other_ids = {kb["id"] for kb in resp.json()}
-    assert SEED_KB_ID not in other_ids, \
-        "tenant-other must NOT see tenant-dev KBs"
+    assert a_dev_kb not in other_ids, \
+        f"tenant-other must NOT see tenant-dev KB {a_dev_kb}"
 
 
 @requires_api
@@ -345,9 +349,9 @@ def test_kb_list_filtered_by_permission():
                      timeout=10)
     assert resp.status_code == 200
     data = resp.json()
-    assert len(data) >= 1
-    kb_ids = [kb["id"] for kb in data]
-    assert SEED_KB_ID in kb_ids
+    assert len(data) >= 1, "reader should see at least 1 KB in its tenant"
+    assert all(kb["tenant_id"] == TEST_TENANT for kb in data), \
+        "reader must only see tenant-dev KBs"
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -358,10 +362,10 @@ def test_kb_list_filtered_by_permission():
 @requires_api
 @requires_postgres
 def test_view_vs_download():
-    """User can view and download documents (no Cerbos check yet).
+    """doc:view 已接线：无授权的 reader 被 403，owner/admin 可查看。
 
-    NOTE: When Phase 2 adds doc:view / doc:download checks, reader
-    should only pass view, not download.
+    2026-08-16 联调确认：GET /documents/{id} 走 P-AUTHC check(doc:view)，
+    未授权的 reader 返回 403（此前未接线时返回 200）。
     """
     import asyncpg
     import asyncio
@@ -386,16 +390,20 @@ def test_view_vs_download():
         assert resp.status_code == 200
         doc_id = resp.json()["document_id"]
 
-        # View with reader token
+        # reader 无 doc:view 授权 → 403（权限已接线）
         resp = httpx.get(f"{V1}/documents/{doc_id}",
                          headers=reader_headers(), timeout=10)
-        assert resp.status_code == 200, f"Reader view: {resp.status_code}"
+        assert resp.status_code == 403, f"Reader (no doc:view) view: {resp.status_code}"
 
-        # Download with reader token
+        # admin（system_admin）可查看
+        resp = httpx.get(f"{V1}/documents/{doc_id}",
+                         headers=admin_headers(), timeout=10)
+        assert resp.status_code == 200, f"Admin view: {resp.status_code}"
+
+        # reader 无 doc:download → 同样 403
         resp = httpx.get(f"{V1}/documents/{doc_id}/download",
                          headers=reader_headers(), timeout=10)
-        assert resp.status_code in (200, 302, 307, 404), \
-            f"Reader download: {resp.status_code}"
+        assert resp.status_code == 403, f"Reader (no doc:download) download: {resp.status_code}"
 
     finally:
         os.unlink(filepath)

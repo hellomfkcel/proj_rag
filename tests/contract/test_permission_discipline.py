@@ -274,18 +274,26 @@ def test_no_query_then_filter_pattern():
 # ══════════════════════════════════════════════════════════════════
 
 def test_hybrid_mode_same_filter_object():
-    """断言 hybrid 模式下两路 Retriever 使用同一 flt 对象。"""
+    """断言 hybrid 模式下两路 Retriever 使用同一 filter 表达式。
+
+    当前实现：flt = compile_filter(pf, ctx, kb_id) 每个 KB 编译一次，
+    filter_expr = _compile_filter_expr(flt) 后，dense 与 sparse 两路
+    Retriever 都注入 {"filters": filter_expr} —— 同一 filter，两路复用。
+    """
     retrieve_path = os.path.join(SRC_DIR, "retrieve", "service.py")
     content = _read_file(retrieve_path)
 
-    # 稠密和稀疏检索器都必须引用 flt
-    assert '"filters": flt' in content, (
-        "Both dense_retriever and sparse_retriever must use the same 'flt' object"
+    # 每个 KB 只编译一次 filter（compile_filter → _compile_filter_expr）
+    assert "flt = compile_filter(pf, ctx, kb_id)" in content, (
+        "compile_filter must be called once per KB"
     )
-    # 统计 flt 出现次数
-    flt_count = content.count('"filters": flt')
-    assert flt_count >= 2, (
-        f"Expected at least 2 references to the same filter object, found {flt_count}"
+    # 稠密与稀疏两路都注入同一 filter_expr（同一对象派生）
+    assert '"filters": filter_expr' in content, (
+        "Retrievers must inject the same filter_expr"
+    )
+    filters_refs = content.count('"filters": filter_expr')
+    assert filters_refs >= 2, (
+        f"Expected >=2 references to the same filter expression, found {filters_refs}"
     )
 
 
@@ -336,13 +344,14 @@ def test_no_credential_in_log_statements():
         if "permission/context.py" in rel or "permission/middleware.py" in rel:
             continue  # P-AUTHC 内部需要处理 credential
         content = _read_file(fpath)
-        # 检查 log.*credential 模式
-        if re.search(r'log\.\w+\([^)]*credential', content):
-            # 排除 build_context 的参数名
-            lines = content.split("\n")
-            for i, line in enumerate(lines):
-                if re.search(r'log\.\w+\(.*credential', line):
-                    violations.append(f"{rel}:{i+1}: {line.strip()[:80]}")
+        # 只旗标"把 credential 作为值传入日志调用"的语句（`credential=...` 关键字
+        # 或 `, credential)` 位置实参），排除事件名本身含 credential 的 false positive
+        # （如 log.warning("reconcile_mirror_no_credential", ...)——事件名不是泄露）。
+        lines = content.split("\n")
+        for i, line in enumerate(lines):
+            if re.search(r'log\.\w+\([^)]*credential\s*[,)]', line) or \
+               re.search(r'log\.\w+\([^)]*credential\s*=', line):
+                violations.append(f"{rel}:{i+1}: {line.strip()[:80]}")
 
     assert not violations, (
         f"credential leakage in log statements in {len(violations)} location(s):\n"
