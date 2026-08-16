@@ -311,18 +311,45 @@ async def query_stream(conversation_id: str, turn_index: int = 1):
         except Exception:
             pass  # DB 不可达时回退到 Redis Pub/Sub
 
-        # ── Step 2: 订阅 Redis Pub/Sub 等待 worker 发布 ──
+        # ── Step 2: 订阅 Redis Streams 等待 worker 发布（Pub/Sub→Streams 迁移）──
+        # 竞态处理：先 XREAD 从 0 排空已发布事件（覆盖 worker 已完成/先于 SSE 的竞态），
+        # 再阻塞读新增；收到 done/error 或空闲超时后 DEL 流键清理。
         r = redis.from_url(s.redis_url)
-        pubsub = r.pubsub()
-        channel = f"query-stream:{conversation_id}:{turn_index}"
-        pubsub.subscribe(channel)
-
+        stream_key = f"query-stream:{conversation_id}:{turn_index}"
+        last_id = "0-0"
+        seen = False
         last_msg_time = _time.time()
 
+        def _parse_event(payload: dict) -> dict | None:
+            """从 Stream 消息体提取事件 dict（兼容 bytes 键/值）。"""
+            raw = payload.get("event") or payload.get(b"event") or b""
+            if isinstance(raw, bytes):
+                raw = raw.decode("utf-8")
+            if not raw:
+                return None
+            try:
+                return json.loads(raw)
+            except Exception:
+                return None
+
+        def _sse_line(data: dict) -> tuple[str, bool]:
+            """构造 SSE 文本行；返回 (text, is_terminal)。"""
+            event_type = data.get("event", "unknown")
+            line = f"event: {event_type}\ndata: {json.dumps(data, default=str)}\n\n"
+            return line, event_type in ("done", "error")
+
+        terminated = False
         try:
-            while True:
-                message = pubsub.get_message(timeout=1.0)
-                if message is None:
+            while not terminated:
+                # 尚未读到任何事件：流不存在时用 $ 阻塞等 worker 创建；
+                # 流已存在则从 0 排空（下轮 seen=True 后从 last_id 续读，天然补间隙）。
+                if not seen:
+                    read_id = "$" if not r.exists(stream_key) else "0"
+                else:
+                    read_id = last_id
+
+                resp = r.xread({stream_key: read_id}, count=100, block=1000)
+                if not resp:
                     if _time.time() - last_msg_time > SSE_IDLE_TIMEOUT:
                         error_data = json.dumps({
                             "event": "error",
@@ -333,29 +360,32 @@ async def query_stream(conversation_id: str, turn_index: int = 1):
                         break
                     continue
 
-                if message["type"] != "message":
-                    continue
-
                 last_msg_time = _time.time()
-                data = json.loads(message["data"])
-                event_type = data.get("event", "unknown")
-
-                if event_type == "retrieved":
-                    yield f"event: retrieved\ndata: {json.dumps(data, default=str)}\n\n"
-                elif event_type == "thinking":
-                    # 推理增量（deepseek reasoning_content），透传给前端"思考过程"
-                    yield f"event: thinking\ndata: {json.dumps(data, default=str)}\n\n"
-                elif event_type == "token":
-                    yield f"event: token\ndata: {json.dumps(data, default=str)}\n\n"
-                elif event_type == "done":
-                    yield f"event: done\ndata: {json.dumps(data, default=str)}\n\n"
-                    break
-                elif event_type == "error":
-                    yield f"event: error\ndata: {json.dumps(data, default=str)}\n\n"
-                    break
+                for _stream_name, messages in resp:
+                    for msg_id, payload in messages:
+                        seen = True
+                        last_id = msg_id
+                        data = _parse_event(payload)
+                        if data is None:
+                            continue
+                        line, is_terminal = _sse_line(data)
+                        if line:
+                            yield line
+                        if is_terminal:
+                            terminated = True
+                            break
+                    if terminated:
+                        break
         finally:
-            pubsub.close()
-            r.close()
+            # 清理流键（防残留；worker 侧 EXPIRE 120s 二次兜底）
+            try:
+                r.delete(stream_key)
+            except Exception:
+                pass
+            try:
+                r.close()
+            except Exception:
+                pass
 
     _headers = {
         "Cache-Control": "no-cache",

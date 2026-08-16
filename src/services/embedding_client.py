@@ -26,10 +26,13 @@ def _http_post(endpoint: str, json_data: dict, timeout: int = 120) -> dict:
 
 def embed_documents(
     texts: List[str],
-    batch_size: int = 512,
+    batch_size: int = 64,
     normalize: bool = True,
 ) -> Tuple[List[List[float]], List[Dict[str, float]], int]:
     """文档批量嵌入（通过 HTTP 服务或本地模型）。
+
+    2026-08-16：HTTP 路径改为客户端主动合批——按 batch_size（默认 64）切块，
+    每块一次 HTTP 请求，避免单次请求携带全部文本带来的排队/超时。
 
     Returns:
         (embeddings, sparse_embeddings, elapsed_ms)
@@ -38,14 +41,22 @@ def embed_documents(
     if service_url:
         t0 = _time.time()
         try:
-            result = _http_post("/v1/embed", {
-                "texts": texts,
-                "batch_size": batch_size,
-                "normalize": normalize,
-            })
+            all_embeddings: List[List[float]] = []
+            all_sparse: List[Dict[str, float]] = []
+            for i in range(0, len(texts), batch_size):
+                batch = texts[i : i + batch_size]
+                # batch_size 传配置值（≥32，满足服务端 EmbedRequest.batch_size 校验），
+                # 而非 len(batch)——末批/小批（如语义分割的少量句子）可能 <32 会 422。
+                result = _http_post("/v1/embed", {
+                    "texts": batch,
+                    "batch_size": batch_size,
+                    "normalize": normalize,
+                })
+                all_embeddings.extend(result["embeddings"])
+                all_sparse.extend(result["sparse_embeddings"])
             return (
-                result["embeddings"],
-                result["sparse_embeddings"],
+                all_embeddings,
+                all_sparse,
                 int((_time.time() - t0) * 1000),
             )
         except Exception:

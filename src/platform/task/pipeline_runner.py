@@ -200,30 +200,31 @@ def run_pipeline_task(
 
     result = run_pipeline_sync(pipeline_name, pipeline_input)
 
-    # 流式回传（仅检索类任务使用）
+    # 流式回传（仅检索类任务使用）— 2026-08-16 Pub/Sub→Streams 迁移
     task_id = task_metadata.get("task_id", "")
     if task_id:
         import redis
         s = Settings()
         r = redis.from_url(s.redis_url)
-        channel = f"query-stream:{task_id}"
+        stream_key = f"query-stream:{task_id}"
+
+        def _push(event_type: str, data: dict) -> None:
+            r.xadd(stream_key, {"event": json.dumps({"event": event_type, **data}, default=str)})
 
         documents = result.get("joiner", {}).get("documents", [])
         if documents:
             chunk_ids = [d.id for d in documents if hasattr(d, "id")]
-            r.publish(channel, json.dumps({
-                "event": "retrieved",
-                "chunk_ids": chunk_ids,
-            }))
+            _push("retrieved", {"chunk_ids": chunk_ids})
 
         replies = result.get("generator", {}).get("replies", [])
         if replies:
-            r.publish(channel, json.dumps({
-                "event": "token",
-                "content": replies[0],
-            }))
+            _push("token", {"content": replies[0]})
 
-        r.publish(channel, json.dumps({"event": "done"}))
+        _push("done", {})
+        try:
+            r.expire(stream_key, 120)  # 兜底清理，防残留流堆积
+        except Exception:
+            pass
         r.close()
 
     return {"status": "completed"}

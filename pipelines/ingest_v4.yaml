@@ -8,7 +8,7 @@ components:
   embedder:
     type: src.ingest.components.bge_m3_embedder.BGE_M3DocumentEmbedder
     init_parameters:
-      batch_size: 512
+      batch_size: 64
   perm_enricher:
     type: src.ingest.components.perm_enricher.PermissionMetadataEnricher
     init_parameters: {}

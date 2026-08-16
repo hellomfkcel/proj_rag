@@ -66,7 +66,7 @@ class SemanticDocumentSplitter:
             try:
                 from src.services.embedding_client import embed_documents
                 embeddings_raw, _, _ = embed_documents(
-                    sentences, batch_size=512, normalize=False
+                    sentences, batch_size=64, normalize=False
                 )
                 embeddings = embeddings_raw
             except Exception as exc:

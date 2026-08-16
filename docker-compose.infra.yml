@@ -13,6 +13,7 @@ volumes:
   milvus_data:
   seaweedfs_data:
   cerbos_audit:
+  infinity_hf:          # Infinity 可写缓存（.infinity_cache），模型本体以只读挂载
 
 services:
 
@@ -208,3 +209,50 @@ services:
     networks:
       - rag-network-v14
     restart: unless-stopped
+
+  # ════════════════════════════════════════════════════════════════
+  # Infinity Embedding Server — 稠密嵌入 + rerank 推理引擎
+  # ════════════════════════════════════════════════════════════════
+  # 用途：替换自研 embedding_service 的稠密 + rerank 推理（Infinity 内置
+  #       动态 batching、接口 OpenAI 兼容）。稀疏向量（BGE-M3 lexical weights）
+  #       Infinity 不提供，仍由 embedding_service 本地 BGE-M3 生成（见
+  #       src/services/embedding_service.py Adapter）。
+  # 本地连接：http://localhost:19501（embedding_service 经 INFINITY_URL 访问）
+  # 使用方：embedding-service（app.yml，网络 rag-network）——Docker 部署时
+  #         embedding-service 需 INFINITY_URL=http://infinity:7997 并并入本网络。
+  infinity:
+    image: michaelf34/infinity:latest
+    command: >-
+      v2
+      --model-id BAAI/bge-m3
+      --model-id BAAI/bge-reranker-v2-m3
+      --batch-size 64
+      --dtype float16
+      --engine torch
+      --device cuda
+      --no-bettertransformer
+      --port 7997
+    environment:
+      HF_HOME: /models
+      # 离线模式：sentence_transformers 加载本地缓存模型时会向 HF Hub 发元数据
+      # 请求（is_sentence_transformer_model），离线环境会长时间挂起；置 1 强制纯本地。
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+    volumes:
+      # 可写缓存卷（Infinity 需创建 .infinity_cache）
+      # 模型本体挂载宿主缓存：transformers 首次启动需做一次 cache 迁移（写操作），
+      # 故 hub 挂载为可写；宿主机缓存已含新式 hub 布局，迁移为幂等 no-op。
+      - infinity_hf:/models
+      - /home/mfkcel/.cache/huggingface/hub:/models/hub
+    ports:
+      - "19501:7997"
+    networks:
+      - rag-network-v14
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

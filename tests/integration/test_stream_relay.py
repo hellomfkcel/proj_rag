@@ -51,18 +51,22 @@ def test_stream_relays_thinking_event():
 
     conv_id = str(uuid.uuid4())
     turn_index = 1
-    channel = f"query-stream:{conv_id}:{turn_index}"
+    stream_key = f"query-stream:{conv_id}:{turn_index}"
 
     r = _redis.from_url(_redis_pubsub_url())
 
     def _publish():
-        # 等 SSE 订阅就绪后再发布（Redis pubsub 只接收订阅后的消息）
+        # 2026-08-16：SSE 链路已从 Pub/Sub 迁移到 Redis Streams（XADD/XREAD），
+        # 测试按新链路 XADD 发布事件。
         time.sleep(1.0)
         try:
-            r.publish(channel, json.dumps({"event": "retrieved", "chunk_ids": [], "chunks": []}, default=str))
-            r.publish(channel, json.dumps({"event": "thinking", "content": "推理片段A"}, default=str))
-            r.publish(channel, json.dumps({"event": "token", "content": "答案片段B"}, default=str))
-            r.publish(channel, json.dumps({"event": "done"}, default=str))
+            for ev in (
+                {"event": "retrieved", "chunk_ids": [], "chunks": []},
+                {"event": "thinking", "content": "推理片段A"},
+                {"event": "token", "content": "答案片段B"},
+                {"event": "done"},
+            ):
+                r.xadd(stream_key, {"event": json.dumps(ev, default=str)})
         finally:
             r.close()
 

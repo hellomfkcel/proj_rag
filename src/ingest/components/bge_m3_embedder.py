@@ -100,9 +100,11 @@ class BGE_M3DocumentEmbedder:
       - doc.sparse_embedding: Dict[str, float]  稀疏词权重(BM25 风格)
     """
 
-    def __init__(self, batch_size: int = 512):
-        """batch_size: 每次 encode 的文本数量。
-        512 在 RTX 3060 上产生 ~80 MiB 峰值分配，安全并发 2 任务。
+    def __init__(self, batch_size: int = 64):
+        """batch_size: 每次 HTTP 请求携带的文本数量（客户端主动合批，2026-08-16）。
+
+        由 512 降为 64：embedding_client 按此值切块、逐块一次请求，降低单请求
+        排队/超时；服务端（Infinity 动态 batching / 本地 BGE-M3）仍可在内部聚合。
         """
         self.batch_size = batch_size
 

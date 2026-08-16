@@ -25,7 +25,7 @@ import os
 import sys
 import time
 from contextlib import asynccontextmanager
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 # 确保项目根在 sys.path 中（支持直接 python 执行和 uvicorn 导入）
 _project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -124,6 +124,15 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# FastAPI 自动埋点：为 /v1/embed、/v1/embed_query、/v1/rerank 创建 OTel server span，
+# 使 embedding_service 的请求链路在 Tempo 可见（此前仅 worker 侧 Haystack span）。
+# 2026-08-16 补齐，满足可观测完整性要求（P-OBS 单一出口）。
+try:
+    from src.platform.obs.tracing import instrument_fastapi
+    instrument_fastapi(app)
+except Exception:
+    pass
+
 
 # ══════════════════════════════════════════════════════════════════
 # 模型访问辅助
@@ -138,6 +147,69 @@ def _normalize_vector(vec: List[float]) -> List[float]:
 
 
 # ══════════════════════════════════════════════════════════════════
+# Infinity Embedding Server Adapter（2026-08-16）
+# ══════════════════════════════════════════════════════════════════
+# 稠密嵌入 + rerank 转发给 Infinity（内置动态 batching、OpenAI/Cohere 兼容）；
+# 稀疏向量（BGE-M3 lexical weights）Infinity 不提供，由本地 BGE-M3 生成。
+# 契约不变：调用方（embedding_client / Haystack 组件）零改动。
+# Infinity 不可达时 fail-open 回退本地 BGE-M3 / 本地 reranker。
+
+INFINITY_URL = os.getenv("INFINITY_URL", "http://localhost:19501").rstrip("/")
+INFINITY_EMBED_MODEL = os.getenv("INFINITY_EMBED_MODEL", "BAAI/bge-m3")
+INFINITY_RERANK_MODEL = os.getenv("INFINITY_RERANK_MODEL", "BAAI/bge-reranker-v2-m3")
+
+
+def _infinity_dense(texts: List[str]) -> List[List[float]]:
+    """经 Infinity 批量稠密嵌入（OpenAI /embeddings 兼容）。"""
+    import httpx
+    resp = httpx.post(
+        f"{INFINITY_URL}/embeddings",
+        json={"model": INFINITY_EMBED_MODEL, "input": texts},
+        timeout=60.0,
+    )
+    resp.raise_for_status()
+    data = resp.json().get("data", [])
+    # OpenAI 响应按 index 排序，保证与输入顺序一致
+    dense = [d["embedding"] for d in sorted(data, key=lambda x: x.get("index", 0))]
+    return dense
+
+
+def _local_dense(texts: List[str]) -> List[List[float]]:
+    """本地 BGE-M3 稠密嵌入（fail-open 兜底，与自研实现一致）。"""
+    from src.ingest.components.bge_m3_embedder import _get_model
+    model = _get_model()
+    output = model.encode(texts, return_dense=True, return_sparse=False, batch_size=len(texts))
+    return [v.tolist() if hasattr(v, "tolist") else list(v) for v in output["dense_vecs"]]
+
+
+def _local_sparse(texts: List[str]) -> List[Dict[str, float]]:
+    """本地 BGE-M3 稀疏词权重（唯一权威源，Infinity 不提供稀疏）。"""
+    from src.ingest.components.bge_m3_embedder import _get_model
+    model = _get_model()
+    output = model.encode(
+        texts, return_dense=False, return_sparse=True, batch_size=len(texts)
+    )
+    return output.get("lexical_weights", [{}] * len(texts))
+
+
+def _infinity_rerank(query: str, documents: List[str], top_k: int) -> Tuple[List[str], List[float]]:
+    """经 Infinity rerank（Cohere /rerank 兼容）。返回 (排序后文档, 分数)。"""
+    import httpx
+    resp = httpx.post(
+        f"{INFINITY_URL}/rerank",
+        json={"model": INFINITY_RERANK_MODEL, "query": query,
+              "documents": documents, "top_n": top_k},
+        timeout=60.0,
+    )
+    resp.raise_for_status()
+    results = resp.json().get("results", [])
+    # results 已按 relevance_score 降序；index 为原 documents 下标
+    sorted_docs = [documents[r["index"]] for r in results if r.get("index") is not None]
+    scores = [float(r.get("relevance_score", 0.0)) for r in results]
+    return sorted_docs, scores
+
+
+# ══════════════════════════════════════════════════════════════════
 # 端点
 # ══════════════════════════════════════════════════════════════════
 
@@ -145,45 +217,36 @@ def _normalize_vector(vec: List[float]) -> List[float]:
 async def embed(request: EmbedRequest):
     """文档批量嵌入——稠密 + 稀疏一次产出。
 
+    2026-08-16 Adapter：稠密经 Infinity（/embeddings），稀疏经本地 BGE-M3。
+    Infinity 不可达时 fail-open 回退本地稠密。
     供摄入 Pipeline (BGE_M3DocumentEmbedder) 和语义分割器使用。
     """
-    from src.ingest.components.bge_m3_embedder import _get_model
-
     t0 = time.time()
-    try:
-        model = _get_model()
-    except Exception as exc:
-        log.error("embedding_model_load_failed", error=str(exc))
-        raise HTTPException(status_code=503, detail="Embedding model not available")
-
     all_embeddings: List[List[float]] = []
     all_sparse: List[Dict[str, float]] = []
 
     try:
-        for i in range(0, len(request.texts), request.batch_size):
-            batch = request.texts[i : i + request.batch_size]
-            output = model.encode(
-                batch,
-                return_dense=True,
-                return_sparse=True,
-                batch_size=len(batch),
-            )
-            dense_batch = output["dense_vecs"]
-            sparse_batch = output.get("lexical_weights", [{}] * len(batch))
+        # ── 稠密：Infinity 优先，失败回退本地 BGE-M3 ──
+        try:
+            all_embeddings = _infinity_dense(request.texts)
+            dense_source = "infinity"
+        except Exception as exc:
+            log.warning("infinity_dense_failed_fallback_local", error=str(exc)[:200],
+                        text_count=len(request.texts))
+            all_embeddings = _local_dense(request.texts)
+            dense_source = "local"
+        if request.normalize:
+            all_embeddings = [_normalize_vector(v) for v in all_embeddings]
 
-            for vec in dense_batch:
-                vec_list = vec.tolist() if hasattr(vec, "tolist") else list(vec)
-                if request.normalize:
-                    vec_list = _normalize_vector(vec_list)
-                all_embeddings.append(vec_list)
-
-            all_sparse.extend(sparse_batch)
-
+        # ── 稀疏：本地 BGE-M3（唯一权威源）──
+        all_sparse = _local_sparse(request.texts)
     except Exception as exc:
         log.error("embedding_encode_failed", error=str(exc), text_count=len(request.texts))
         raise HTTPException(status_code=500, detail=f"Embedding failed: {exc}")
 
     elapsed_ms = int((time.time() - t0) * 1000)
+    log.info("embed_completed", count=len(all_embeddings),
+             dense_source=dense_source, elapsed_ms=elapsed_ms)
     return EmbedResponse(
         embeddings=all_embeddings,
         sparse_embeddings=all_sparse,
@@ -196,31 +259,26 @@ async def embed(request: EmbedRequest):
 async def embed_query(request: EmbedQueryRequest):
     """查询嵌入——稠密 + 稀疏一次产出。
 
+    2026-08-16 Adapter：稠密经 Infinity，稀疏经本地 BGE-M3；Infinity 不可达回退本地。
     供检索 Pipeline (BGE_M3TextEmbedder) 使用。
     """
-    from src.ingest.components.bge_m3_embedder import _get_model
-
     t0 = time.time()
     try:
-        model = _get_model()
-    except Exception as exc:
-        log.error("embedding_model_load_failed", error=str(exc))
-        raise HTTPException(status_code=503, detail="Embedding model not available")
-
-    try:
-        output = model.encode([request.text], return_dense=True, return_sparse=True)
-        dense_vec = output["dense_vecs"][0]
-        vec_list = dense_vec.tolist() if hasattr(dense_vec, "tolist") else list(dense_vec)
-        vec_list = _normalize_vector(vec_list)
-
-        lexical = output.get("lexical_weights", [{}])
-        sparse = lexical[0] if len(lexical) > 0 else {}
-
+        try:
+            dense_raw = _infinity_dense([request.text])
+            dense_source = "infinity"
+        except Exception as exc:
+            log.warning("infinity_query_dense_failed_fallback_local", error=str(exc)[:200])
+            dense_raw = _local_dense([request.text])
+            dense_source = "local"
+        vec_list = _normalize_vector(dense_raw[0])
+        sparse = _local_sparse([request.text])[0]
     except Exception as exc:
         log.error("embedding_query_failed", error=str(exc))
         raise HTTPException(status_code=500, detail=f"Query embedding failed: {exc}")
 
     elapsed_ms = int((time.time() - t0) * 1000)
+    log.info("embed_query_completed", dense_source=dense_source, elapsed_ms=elapsed_ms)
     return EmbedQueryResponse(
         embedding=vec_list,
         sparse_embedding=sparse,
@@ -230,37 +288,42 @@ async def embed_query(request: EmbedQueryRequest):
 
 @app.post("/v1/rerank", response_model=RerankResponse)
 async def rerank(request: RerankRequest):
-    """文档重排序——使用 BGE-Reranker-v2-m3。
+    """文档重排序——BGE-Reranker-v2-m3。
 
+    2026-08-16 Adapter：优先经 Infinity（Cohere /rerank 兼容）；
+    Infinity 不可达时 fail-open 回退本地 reranker。
     供检索 Pipeline (BGEReranker) 使用。
     """
-    from src.platform.model.registry import _get_reranker
-
     t0 = time.time()
     try:
-        ranker = _get_reranker()
-    except Exception as exc:
-        log.error("reranker_model_load_failed", error=str(exc))
-        raise HTTPException(status_code=503, detail="Reranker model not available")
-
-    try:
-        scores = ranker.compute_score(
-            [[request.query, d] for d in request.documents],
-            normalize=True,
-        )
-        scored = sorted(
-            zip(request.documents, scores),
-            key=lambda x: x[1],
-            reverse=True,
-        )
-        result_docs = [doc for doc, _ in scored[:request.top_k]]
-        result_scores = [float(s) for _, s in scored[:request.top_k]]
-
+        try:
+            result_docs, result_scores = _infinity_rerank(
+                request.query, request.documents, request.top_k
+            )
+            rerank_source = "infinity"
+        except Exception as exc:
+            log.warning("infinity_rerank_failed_fallback_local", error=str(exc)[:200])
+            from src.platform.model.registry import _get_reranker
+            ranker = _get_reranker()
+            scores = ranker.compute_score(
+                [[request.query, d] for d in request.documents],
+                normalize=True,
+            )
+            scored = sorted(
+                zip(request.documents, scores),
+                key=lambda x: x[1],
+                reverse=True,
+            )
+            result_docs = [doc for doc, _ in scored[:request.top_k]]
+            result_scores = [float(s) for _, s in scored[:request.top_k]]
+            rerank_source = "local"
     except Exception as exc:
         log.error("rerank_failed", error=str(exc))
         raise HTTPException(status_code=500, detail=f"Rerank failed: {exc}")
 
     elapsed_ms = int((time.time() - t0) * 1000)
+    log.info("rerank_completed", doc_count=len(request.documents),
+             rerank_source=rerank_source, elapsed_ms=elapsed_ms)
     return RerankResponse(
         documents=result_docs,
         scores=result_scores,
@@ -276,15 +339,22 @@ async def healthz():
 
 @app.get("/readyz", response_model=HealthResponse)
 async def readyz():
-    """就绪检查——模型是否可用。
+    """就绪检查——推理能力可用。
 
-    注意：模型可能因空闲超时被卸载（Layer 2），此时 readyz 返回 not_ready。
-    调用方应处理此状态：等待模型重新加载或降级到本地模式。
+    Adapter 架构（2026-08-16）：稠密 + rerank 由 Infinity 承担，稀疏由本地 BGE-M3。
+    就绪条件 = Infinity 可达 或 本地 BGE-M3 已加载（任一可用即可服务）。
     """
     try:
+        import httpx
+        infinity_ok = False
+        try:
+            r = httpx.get(f"{INFINITY_URL}/models", timeout=2.0)
+            infinity_ok = r.status_code == 200
+        except Exception:
+            infinity_ok = False
+
         from src.ingest.components.bge_m3_embedder import _model as bge_model
-        from src.platform.model.registry import _reranker_cache
-        models_ok = bge_model is not None and len(_reranker_cache) > 0
+        models_ok = infinity_ok or bge_model is not None
     except Exception:
         models_ok = False
     return HealthResponse(

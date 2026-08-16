@@ -65,22 +65,32 @@ def retrieve_and_generate_task(
     """
     s = Settings()
 
-    # ── Redis Pub/Sub 流式回传：先开连接，检索/生成过程中经 sink 逐事件发布 ──
+    # ── Redis Streams 流式回传：先开连接，检索/生成过程中经 sink 逐事件 XADD ──
+    # 2026-08-16 优化：Pub/Sub（fire-and-forget，订阅方未连接则丢事件）→ Redis Streams
+    # （持久化，SSE 后到可补读，配合 DB 兜底消除丢失）。
     # 方向四：retrieved（来源）在检索完成后立即发布；真流式：compact 逐 token 发布；
     # 非流式路径（refine/tree/no_synthesis/失败 fallback）结束后补发完整答案。
     import redis as _redis
     rr = _redis.from_url(s.redis_url)
-    channel = f"query-stream:{conversation_id}:{turn_index}"
+    stream_key = f"query-stream:{conversation_id}:{turn_index}"
     state = {"published_token": False}
 
     def sink(event_type: str, data: dict) -> None:
-        """把事件以 {"event": type, **data} 形状发布到 query-stream 频道（fail-open）。"""
+        """把事件以 {"event": type, **data} 形状 XADD 到 query-stream 流（fail-open）。
+
+        SSE 端读到 done/error 后 DEL 流键；此处 EXPIRE 120s 作二次兜底，
+        防残留流（SSE 未订阅/进程退出）堆积 Redis。
+        """
         if event_type == "token" and data.get("content"):
             state["published_token"] = True
         try:
-            rr.publish(channel, json.dumps({"event": event_type, **data}, default=str))
+            rr.xadd(
+                stream_key,
+                {"event": json.dumps({"event": event_type, **data}, default=str)},
+            )
+            rr.expire(stream_key, 120)
         except Exception as exc:
-            log.warning("redis_publish_failed", event=event_type, error=str(exc))
+            log.warning("redis_stream_add_failed", event=event_type, error=str(exc))
 
     try:
         r = _run_retrieve_generate(
