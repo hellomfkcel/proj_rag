@@ -274,11 +274,16 @@ def test_no_query_then_filter_pattern():
 # ══════════════════════════════════════════════════════════════════
 
 def test_hybrid_mode_same_filter_object():
-    """断言 hybrid 模式下两路 Retriever 使用同一 filter 表达式。
+    """断言 hybrid 模式下双路 ANN 共享同一 filter 表达式。
 
-    当前实现：flt = compile_filter(pf, ctx, kb_id) 每个 KB 编译一次，
-    filter_expr = _compile_filter_expr(flt) 后，dense 与 sparse 两路
-    Retriever 都注入 {"filters": filter_expr} —— 同一 filter，两路复用。
+    新架构（P0-1 用户批准）：Milvus 原生 hybrid_search ——
+    - retrieve() 每个 KB 只编译一次 filter：flt = compile_filter(pf, ctx, kb_id)
+    - 编译产物 filter_expr 注入 hybrid_retriever 的 filters run 输入
+    - hybrid_retriever 内部构造两个 AnnSearchRequest（dense + sparse），
+      两个 request 都使用同一个 filter=filters —— 两路共享同一过滤条件。
+
+    语义保证（两路同 filter）不变，仅实现位置从"两个 retriever 组件各自注入"
+    迁移到"一个 hybrid 检索组件内部的两个 ANN 请求共享同一 filter"。
     """
     retrieve_path = os.path.join(SRC_DIR, "retrieve", "service.py")
     content = _read_file(retrieve_path)
@@ -287,13 +292,21 @@ def test_hybrid_mode_same_filter_object():
     assert "flt = compile_filter(pf, ctx, kb_id)" in content, (
         "compile_filter must be called once per KB"
     )
-    # 稠密与稀疏两路都注入同一 filter_expr（同一对象派生）
-    assert '"filters": filter_expr' in content, (
-        "Retrievers must inject the same filter_expr"
+    # 编译产物注入检索组件的 filters 输入
+    assert '["filters"] = filter_expr' in content, (
+        "Retriever must receive the compiled filter expression"
     )
-    filters_refs = content.count('"filters": filter_expr')
-    assert filters_refs >= 2, (
-        f"Expected >=2 references to the same filter expression, found {filters_refs}"
+
+    # hybrid_retriever 内两个 AnnSearchRequest（dense + sparse）共享同一 filter=filters
+    hybrid_path = os.path.join(SRC_DIR, "retrieve", "components", "hybrid_retriever.py")
+    assert os.path.exists(hybrid_path), "MilvusHybridRetriever component not found"
+    hcontent = _read_file(hybrid_path)
+    assert 'anns_field="vector"' in hcontent and 'anns_field="sparse_vector"' in hcontent, (
+        "hybrid retriever must search both dense and sparse routes"
+    )
+    same_filter_refs = hcontent.count("filter=filters")
+    assert same_filter_refs >= 2, (
+        f"Expected both AnnSearchRequests to share filter=filters, found {same_filter_refs}"
     )
 
 

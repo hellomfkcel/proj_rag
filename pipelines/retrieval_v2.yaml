@@ -1,0 +1,9 @@
+components:
+  retriever:
+    type: src.retrieve.components.dense_retriever.MilvusDenseRetriever
+    init_parameters:
+      collection_name: rag_documents
+      top_k: 20
+      milvus_host: ${MILVUS_HOST}
+      milvus_port: ${MILVUS_PORT}
+connections: []

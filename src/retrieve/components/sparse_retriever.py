@@ -45,12 +45,15 @@ class MilvusSparseRetriever:
         self,
         query_sparse_embedding: Any,
         filters: Optional[Dict[str, Any]] = None,
+        top_k: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Execute sparse vector search against Milvus.
 
         query_sparse_embedding: SparseEmbedding from BGE_M3SparseTextEmbedder
         filters: Milvus expression string (from _compile_filter_expr) or dict
+        top_k:   覆盖 init top_k（检索服务传 k' = k × 1.5 过采样）
         """
+        effective_top_k = top_k or self.top_k
         from dataclasses import replace
         from milvus_haystack.filters import parse_filters
 
@@ -90,7 +93,7 @@ class MilvusSparseRetriever:
                 data=[sparse_vec],
                 anns_field="sparse_vector",
                 filter=expr,
-                limit=self.top_k,
+                limit=effective_top_k,
                 output_fields=["content", "document_id", "kb_id", "vis_version"],
                 search_params={"metric_type": "IP", "params": {"nprobe": 16}},
             )

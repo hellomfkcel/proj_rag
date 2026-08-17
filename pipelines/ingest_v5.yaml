@@ -9,6 +9,11 @@ components:
   embedder:
     type: src.ingest.components.bge_m3_embedder.BGE_M3DocumentEmbedder
     init_parameters:
+      # 客户端合批大小：512。
+      # 曾降为 64 以缩短单批锁持有，但实测代价更大：
+      # ①调用数 11→89，Tempo 碎片 trace 从 11 暴增到 89（可观测性退化）；
+      # ②HTTP 往返开销 8 倍，ingest 更慢。Infinity 健康时 512 段真实文本
+      #   仅 ~2.4s（dense 走 Infinity + 本地 sparse），锁持有很短。
       batch_size: 512
   perm_enricher:
     type: src.ingest.components.perm_enricher.PermissionMetadataEnricher

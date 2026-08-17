@@ -10,6 +10,7 @@ import asyncio
 import asyncpg
 import random
 import time
+from datetime import datetime, timedelta, timezone
 from typing import Set
 
 from src.config import Settings
@@ -233,6 +234,77 @@ async def reconcile_stamps() -> dict:
 # 定时循环（开发期运行：每分钟一次，而非每小时/15min）
 # ══════════════════════════════════════════════════════════════════
 
+# ══════════════════════════════════════════════════════════════════
+# 陈旧 ingest 任务对账
+# ══════════════════════════════════════════════════════════════════
+
+# 'processing' 超过 45 分钟 → 判定陈旧。
+# ingest_document_task 硬超时 35min（time_limit=2100s），活跃任务的重投会
+# 重新置 'processing' 刷新 updated_at，因此 >45min 的 processing 必然为
+# "worker 崩溃后未被重投"或"提交后从未被消费"的陈旧任务，标记 failed 安全。
+STALE_PROCESSING_SECONDS = 45 * 60
+# 'queued' 超过 2 小时 → 提交时无 worker 消费/任务丢失，判定陈旧。
+STALE_QUEUED_SECONDS = 2 * 60 * 60
+
+
+async def reconcile_stale_ingest() -> dict:
+    """清理卡在 queued/processing 的陈旧 ingest 任务。
+
+    背景：ingest_document_task 的 parse_status 只在开始置 'processing'、
+    完成置 'completed'/'failed'。worker 崩溃（OOM/被杀）且任务未被 Celery
+    重投、或提交时无 worker 消费，任务会永远卡住（如历史遗留的 8月6日
+    queued 任务）。原先系统无此对账 → 陈旧任务堆积、前端看"一直 processing"。
+
+    规则（安全，不误杀活跃任务）：
+    - 'processing' 且 updated_at < now-45min → failed(stale_timeout)
+    - 'queued'   且 updated_at < now-2h   → failed(stale_timeout)
+    UPDATE 带 parse_status 条件，避免与并发写入竞态。
+    """
+    conn = await asyncpg.connect(_dsn())
+    now = datetime.now(timezone.utc)
+    marked_processing = 0
+    marked_queued = 0
+    try:
+        # 1. processing 超时
+        rows = await conn.fetch(
+            "SELECT mount_id FROM ingest_executions "
+            "WHERE parse_status='processing' AND updated_at < $1",
+            now - timedelta(seconds=STALE_PROCESSING_SECONDS),
+        )
+        for r in rows:
+            result = await conn.execute(
+                "UPDATE ingest_executions SET parse_status='failed', updated_at=$2 "
+                "WHERE mount_id=$1 AND parse_status='processing'",
+                r["mount_id"], now,
+            )
+            if result.endswith("1"):
+                marked_processing += 1
+
+        # 2. queued 超时
+        rows2 = await conn.fetch(
+            "SELECT mount_id FROM ingest_executions "
+            "WHERE parse_status='queued' AND updated_at < $1",
+            now - timedelta(seconds=STALE_QUEUED_SECONDS),
+        )
+        for r in rows2:
+            result = await conn.execute(
+                "UPDATE ingest_executions SET parse_status='failed', updated_at=$2 "
+                "WHERE mount_id=$1 AND parse_status='queued'",
+                r["mount_id"], now,
+            )
+            if result.endswith("1"):
+                marked_queued += 1
+    finally:
+        await conn.close()
+
+    if marked_processing or marked_queued:
+        log.warning("stale_ingest_marked_failed",
+                    processing=marked_processing, queued=marked_queued)
+    else:
+        log.info("stale_ingest_reconciled", processing=0, queued=0)
+    return {"stale_processing": marked_processing, "stale_queued": marked_queued}
+
+
 def run_reconciliation_loop():
     """启动对账循环（常驻进程）。"""
     mirror_interval = 60      # 开发期 60s，生产环境 3600s
@@ -264,6 +336,14 @@ def run_reconciliation_loop():
             except Exception as exc:
                 log.error("stamp_reconcile_failed", error=str(exc))
             last_stamp = now
+
+        # 陈旧 ingest 对账（同 stamp 频率）
+        if now - last_stamp >= stamp_interval:
+            try:
+                result = asyncio.run(reconcile_stale_ingest())
+                log.info("stale_ingest_reconciled", **result)
+            except Exception as exc:
+                log.error("stale_ingest_reconcile_failed", error=str(exc))
 
         time.sleep(10)
 
@@ -314,6 +394,24 @@ def reconcile_stamps_beat(self) -> dict:
         return result
     except Exception as exc:
         log.error("stamp_beat_failed", error=str(exc))
+        return {"error": str(exc)}
+
+
+@celery_app.task(
+    bind=True,
+    max_retries=0,
+    queue="ingestion_queue",
+)
+def reconcile_stale_ingest_beat(self) -> dict:
+    """Celery beat 任务：每 15 分钟清理陈旧 ingest 任务（queued/processing 超时）。
+
+    防止"一直 processing/queued"的陈旧任务堆积（worker 崩溃未重投 / 提交未消费）。
+    """
+    try:
+        result = asyncio.run(reconcile_stale_ingest())
+        return result
+    except Exception as exc:
+        log.error("stale_ingest_beat_failed", error=str(exc))
         return {"error": str(exc)}
 
 

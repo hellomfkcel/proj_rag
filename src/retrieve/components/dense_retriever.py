@@ -54,13 +54,13 @@ class MilvusDenseRetriever:
         self.milvus_port = milvus_port
         self._retriever = None
 
-    def _get_retriever(self):
-        key = f"{self.milvus_host}:{self.milvus_port}:{self.collection_name}:{self.top_k}"
+    def _get_retriever(self, top_k: int):
+        key = f"{self.milvus_host}:{self.milvus_port}:{self.collection_name}:{top_k}"
         if key not in _retrievers:
             from milvus_haystack.milvus_embedding_retriever import MilvusEmbeddingRetriever
             doc_store = _get_document_store(self.collection_name, self.milvus_host, str(self.milvus_port))
             _retrievers[key] = MilvusEmbeddingRetriever(
-                document_store=doc_store, top_k=self.top_k,
+                document_store=doc_store, top_k=top_k,
             )
         return _retrievers[key]
 
@@ -69,12 +69,16 @@ class MilvusDenseRetriever:
         self,
         query_embedding: List[float],
         filters: Any = None,
+        top_k: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Execute dense vector search.
 
         Dict filters → milvus-haystack MilvusEmbeddingRetriever (standard path).
         Str filters  → direct PyMilvus search (json_contains/not_json_contains).
+        top_k        → 覆盖 init top_k（检索服务传 k' = k × 1.5 过采样）。
         """
+        effective_top_k = top_k or self.top_k
+
         # String expression → MilvusClient (json_contains operators)
         # MilvusClient API 不会自动 load collection → 必须显式调用 load_collection。
         # load_collection 已加载时是快速空操作（幂等）。
@@ -88,7 +92,7 @@ class MilvusDenseRetriever:
                 data=[query_embedding],
                 anns_field="vector",
                 filter=filters,
-                limit=self.top_k,
+                limit=effective_top_k,
                 output_fields=["content", "document_id", "kb_id", "vis_version"],
                 search_params={"metric_type": "IP", "params": {"nprobe": 16}},
             )
@@ -110,6 +114,6 @@ class MilvusDenseRetriever:
             return {"documents": docs}
 
         # Dict (or None) → standard milvus-haystack path
-        retriever = self._get_retriever()
+        retriever = self._get_retriever(effective_top_k)
         result = retriever.run(query_embedding=query_embedding, filters=filters)
         return {"documents": result.get("documents", [])}

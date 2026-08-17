@@ -9,7 +9,7 @@
 import json
 import uuid
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Request, Response
 from fastapi.responses import StreamingResponse
@@ -36,19 +36,23 @@ class QueryRequest(BaseModel):
     question: str
     kb_ids: List[str]
     conversation_id: Optional[str] = None
-    # Per-query retrieval overrides (写入 turn 级 retrieval_configs)
-    retrieval_mode: Optional[str] = None       # hybrid / vector_only / keyword_only
-    fusion_method: Optional[str] = None         # rrf / weighted_sum
+    # Per-query 检索覆盖（仅本次查询生效的内存覆盖，不写入 retrieval_configs；
+    # 配置级联见 P-CONFIG resolve_retrieval_config 四层：turn→conversation→kb→tenant）
+    retrieval_mode: Optional[Literal["hybrid", "vector_only", "keyword_only"]] = None
+    fusion_method: Optional[Literal["rrf", "weighted_sum"]] = None
     strict: Optional[bool] = None               # 实时权限复核
     top_k: Optional[int] = None                 # 返回文档数
     dense_weight: float = 0.5                   # dense 路权重 (weighted_sum 模式)
     sparse_weight: float = 0.5                  # sparse 路权重 (weighted_sum 模式)
-    synthesis_mode: Optional[str] = None         # compact / refine / tree_summarize / no_synthesis / auto
+    synthesis_mode: Optional[Literal["auto", "compact", "refine", "tree_summarize", "no_synthesis"]] = None
     oversample_factor: Optional[float] = None    # 过采样系数（默认 1.5）
     min_results: Optional[int] = None            # 最小结果数（补检索触发阈值，默认 3）
     refetch_max_rounds: Optional[int] = None     # 最大补检索轮数（默认 2）
     refine_batch_size: Optional[int] = None       # Refine 每批 chunk 数
     doc_preview_max_chars: Optional[int] = None   # Chunk 截断长度
+    tree_summarize_batch_size: Optional[int] = None  # Tree Summarize 每批数
+    max_answer_length: Optional[int] = None           # Refine 答案压缩阈值
+    compress_target_length: Optional[int] = None      # Refine 压缩目标长度
 
 
 class QueryResponse(BaseModel):
@@ -213,7 +217,9 @@ async def query(request: QueryRequest, ctx: RequestContext = Depends(get_request
     #    写入 conversation_turn 参数快照供审计追溯。
     from src.platform.config.service import resolve_retrieval_config
     kb_id = request.kb_ids[0] if request.kb_ids else ""
-    retrieval_cfg = resolve_retrieval_config(kb_id=kb_id, tenant_id=ctx.tenant_id)
+    # 四层级联：传 conversation_id 使 conversation 级配置（若存在）参与覆盖
+    retrieval_cfg = resolve_retrieval_config(
+        kb_id=kb_id, tenant_id=ctx.tenant_id, conversation_id=conv_id)
 
     # 5. 分发到 retrieval_queue（API 进程不执行任何 Pipeline 计算）
     retrieve_and_generate_task.delay(
@@ -237,6 +243,9 @@ async def query(request: QueryRequest, ctx: RequestContext = Depends(get_request
         refetch_max_rounds=request.refetch_max_rounds,
         refine_batch_size=request.refine_batch_size,
         doc_preview_max_chars=request.doc_preview_max_chars,
+        tree_summarize_batch_size=request.tree_summarize_batch_size,
+        max_answer_length=request.max_answer_length,
+        compress_target_length=request.compress_target_length,
     )
 
     # 6. 立即返回 — answer 和 chunk_ids 由 worker 经 Redis Pub/Sub → SSE 推送

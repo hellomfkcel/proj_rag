@@ -170,6 +170,7 @@ celery_app.conf.update(
         "src.ingest.service.stamp_channel_task": {"queue": "stamping_queue"},
         "src.platform.task.reconciliation.reconcile_mirror_beat": {"queue": "ingestion_queue"},
         "src.platform.task.reconciliation.reconcile_stamps_beat": {"queue": "stamping_queue"},
+        "src.platform.task.reconciliation.reconcile_stale_ingest_beat": {"queue": "ingestion_queue"},
     },
     # Celery Beat 定时调度
     beat_schedule={
@@ -179,6 +180,10 @@ celery_app.conf.update(
         },
         "reconcile-stamps-every-15min": {
             "task": "src.platform.task.reconciliation.reconcile_stamps_beat",
+            "schedule": crontab(minute="*/15"),  # 每 15 分钟
+        },
+        "reconcile-stale-ingest-every-15min": {
+            "task": "src.platform.task.reconciliation.reconcile_stale_ingest_beat",
             "schedule": crontab(minute="*/15"),  # 每 15 分钟
         },
     },

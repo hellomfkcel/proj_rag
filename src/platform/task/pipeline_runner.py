@@ -142,6 +142,8 @@ def _preload_component_modules() -> None:
                   "src.retrieve.components.ollama_text_embedder")
     _try_register("src.retrieve.components.sparse_text_embedder",
                   "src.retrieve.components.sparse_text_embedder")
+    _try_register("src.retrieve.components.hybrid_retriever",
+                  "src.retrieve.components.hybrid_retriever")
     _try_register("src.retrieve.components.dense_retriever",
                   "src.retrieve.components.dense_retriever")
     _try_register("src.retrieve.components.sparse_retriever",

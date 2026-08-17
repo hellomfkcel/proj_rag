@@ -23,6 +23,7 @@
 import math
 import os
 import sys
+import threading
 import time
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Tuple
@@ -146,6 +147,20 @@ def _normalize_vector(vec: List[float]) -> List[float]:
     return vec
 
 
+# ── 模型访问串行化锁 ──
+# BGE-M3 / BGE-Reranker 的 encode()/compute_score() 是同步、非线程安全的。
+# 处理器改为 def（FastAPI 线程池执行，避免阻塞事件循环）后，并发请求会进入
+# 多线程；锁保证同一时刻只有一个模型前向传播，杜绝线程竞争。
+#
+# 锁粒度：BGE-M3（稠密回退 + 稀疏）与 BGE-Reranker 是**不同模型实例**，
+# 各自独立加锁 → rerank 与 embed 可并行，互不阻塞（"只锁本地模型"的粒度）。
+# 未用 Semaphore(>1)：BGE-M3 并发 encode 的线程安全无法保证（共享权重前向
+# 可能竞争），允许多并发会冒结果损坏/崩溃的风险 —— 属于"为提速牺牲正确性"，
+# 架构上禁止。吞吐靠降低 ingest 批次（batch_size）缩短单次锁持有时间换取。
+_BGE_MODEL_LOCK = threading.Lock()
+_RERANK_MODEL_LOCK = threading.Lock()
+
+
 # ══════════════════════════════════════════════════════════════════
 # Infinity Embedding Server Adapter（2026-08-16）
 # ══════════════════════════════════════════════════════════════════
@@ -177,18 +192,22 @@ def _infinity_dense(texts: List[str]) -> List[List[float]]:
 def _local_dense(texts: List[str]) -> List[List[float]]:
     """本地 BGE-M3 稠密嵌入（fail-open 兜底，与自研实现一致）。"""
     from src.ingest.components.bge_m3_embedder import _get_model
-    model = _get_model()
-    output = model.encode(texts, return_dense=True, return_sparse=False, batch_size=len(texts))
+    with _BGE_MODEL_LOCK:
+        model = _get_model()
+        output = model.encode(
+            texts, return_dense=True, return_sparse=False, batch_size=len(texts)
+        )
     return [v.tolist() if hasattr(v, "tolist") else list(v) for v in output["dense_vecs"]]
 
 
 def _local_sparse(texts: List[str]) -> List[Dict[str, float]]:
     """本地 BGE-M3 稀疏词权重（唯一权威源，Infinity 不提供稀疏）。"""
     from src.ingest.components.bge_m3_embedder import _get_model
-    model = _get_model()
-    output = model.encode(
-        texts, return_dense=False, return_sparse=True, batch_size=len(texts)
-    )
+    with _BGE_MODEL_LOCK:
+        model = _get_model()
+        output = model.encode(
+            texts, return_dense=False, return_sparse=True, batch_size=len(texts)
+        )
     return output.get("lexical_weights", [{}] * len(texts))
 
 
@@ -214,12 +233,16 @@ def _infinity_rerank(query: str, documents: List[str], top_k: int) -> Tuple[List
 # ══════════════════════════════════════════════════════════════════
 
 @app.post("/v1/embed", response_model=EmbedResponse)
-async def embed(request: EmbedRequest):
+def embed(request: EmbedRequest):
     """文档批量嵌入——稠密 + 稀疏一次产出。
 
     2026-08-16 Adapter：稠密经 Infinity（/embeddings），稀疏经本地 BGE-M3。
     Infinity 不可达时 fail-open 回退本地稠密。
     供摄入 Pipeline (BGE_M3DocumentEmbedder) 和语义分割器使用。
+
+    用 def 而非 async def：内部 model.encode() 是同步 CPU/GPU 阻塞调用，
+    async def 会阻塞事件循环导致整个服务（含 /healthz）不可响应。
+    def 由 FastAPI 放入线程池执行，事件循环保持可用；模型访问由 _MODEL_LOCK 串行化。
     """
     t0 = time.time()
     all_embeddings: List[List[float]] = []
@@ -256,11 +279,12 @@ async def embed(request: EmbedRequest):
 
 
 @app.post("/v1/embed_query", response_model=EmbedQueryResponse)
-async def embed_query(request: EmbedQueryRequest):
+def embed_query(request: EmbedQueryRequest):
     """查询嵌入——稠密 + 稀疏一次产出。
 
     2026-08-16 Adapter：稠密经 Infinity，稀疏经本地 BGE-M3；Infinity 不可达回退本地。
     供检索 Pipeline (BGE_M3TextEmbedder) 使用。
+    def（线程池）原因同 /v1/embed：避免同步模型调用阻塞事件循环。
     """
     t0 = time.time()
     try:
@@ -287,12 +311,13 @@ async def embed_query(request: EmbedQueryRequest):
 
 
 @app.post("/v1/rerank", response_model=RerankResponse)
-async def rerank(request: RerankRequest):
+def rerank(request: RerankRequest):
     """文档重排序——BGE-Reranker-v2-m3。
 
     2026-08-16 Adapter：优先经 Infinity（Cohere /rerank 兼容）；
     Infinity 不可达时 fail-open 回退本地 reranker。
     供检索 Pipeline (BGEReranker) 使用。
+    def（线程池）原因同 /v1/embed：避免同步模型调用阻塞事件循环。
     """
     t0 = time.time()
     try:
@@ -304,11 +329,12 @@ async def rerank(request: RerankRequest):
         except Exception as exc:
             log.warning("infinity_rerank_failed_fallback_local", error=str(exc)[:200])
             from src.platform.model.registry import _get_reranker
-            ranker = _get_reranker()
-            scores = ranker.compute_score(
-                [[request.query, d] for d in request.documents],
-                normalize=True,
-            )
+            with _RERANK_MODEL_LOCK:
+                ranker = _get_reranker()
+                scores = ranker.compute_score(
+                    [[request.query, d] for d in request.documents],
+                    normalize=True,
+                )
             scored = sorted(
                 zip(request.documents, scores),
                 key=lambda x: x[1],

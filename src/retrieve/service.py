@@ -7,6 +7,7 @@
 不做：不做生成编排、不拥有对话状态、不做权限判定、不做事后过滤。
 """
 
+from copy import deepcopy
 from typing import Any, Dict, List, Optional
 
 from src.platform.task.pipeline_runner import run_pipeline_sync
@@ -44,7 +45,6 @@ def retrieve(
     rerank_model_id: 空字符串 = 使用默认 BGE-Reranker
     """
     from haystack import Document
-    from milvus_haystack.filters import parse_filters
     from src.permission.context import build_context, resolve_ctx_token
     from src.permission.authz import get_prefilter, compile_filter
 
@@ -70,33 +70,50 @@ def retrieve(
     if not candidate_kbs:
         return {"documents": [], "status": "empty_candidates"}
 
+    # ── P0-2: 查询嵌入只编一次（与 KB 无关，确定性纯函数）──
+    # 复用 BGE_M3TextEmbedder 组件（保留 Langfuse observation）。
+    # 组件在管线外直接调用时不产生 haystack.component.run span，
+    # 故显式包一层 OTel span 保持"查询嵌入"在 trace 中可见。
+    from src.retrieve.components.bge_m3_text_embedder import BGE_M3TextEmbedder
+    from opentelemetry import trace as _otel_trace
+
+    _tracer = _otel_trace.get_tracer("retrieve.service")
+    with _tracer.start_as_current_span("query_embedding", attributes={"mode": "query"}) as _emb_span:
+        query_emb = BGE_M3TextEmbedder().run(text=query)
+        _emb_span.set_attribute("query_len", len(query))
+    dense_emb: List[float] = query_emb["embedding"]
+    sparse_emb: Dict[str, float] = query_emb["sparse_embedding"]
+
     # ── Select pipeline template based on retrieval_mode + fusion_method ──
-    # The same pipeline structure is used for all KBs; only the filter (MetadataFilter)
-    # differs per KB to enforce tenant+bucket isolation (6-condition filter §15.1).
+    # 三模式统一为"无 embedder"管线，embeddings 作为 run 输入传入（P0-2）。
+    # §15.1: 每个 KB 使用独立的 6-condition filter（不同 kb_id），共享同一管线模板。
+    # P1-1: k_prime = k × 1.5 过采样真正下推为 Milvus limit（不再硬编码 20）。
+    k_prime = int(top_k * oversample_factor)
+
     if retrieval_mode == "vector_only":
-        _pipeline_name = "retrieval_v1"
-        _pipeline_input_template: Dict[str, Any] = {
-            "query_embedder": {"text": query},
+        _pipeline_name = "retrieval_v2"
+        _retriever_key = "retriever"
+        _base_input: Dict[str, Any] = {
+            "retriever": {"query_embedding": dense_emb},
         }
-        _docs_key = "retriever"
     elif retrieval_mode == "keyword_only":
-        _pipeline_name = "query_v2"
-        _pipeline_input_template = {
-            "query_embedder": {"text": query},
+        _pipeline_name = "query_v7"
+        _retriever_key = "sparse_retriever"
+        _base_input = {
+            "sparse_retriever": {"query_sparse_embedding": sparse_emb},
         }
-        _docs_key = "ranker"
-    else:  # hybrid (default) — select pipeline by fusion_method
-        if fusion_method == "weighted_sum":
-            _pipeline_name = "query_v5"
-            _joiner_input: Dict[str, Any] = {"dense_weight": dense_weight, "sparse_weight": sparse_weight}
-        else:
-            _pipeline_name = "query_v4"
-            _joiner_input = {}
-        _pipeline_input_template = {
-            "query_embedder": {"text": query},
-            "joiner": _joiner_input,
+    else:  # hybrid (default) — Milvus 原生 hybrid_search，服务端 RRF/加权融合
+        _pipeline_name = "query_v6"
+        _retriever_key = "hybrid_retriever"
+        _base_input = {
+            "hybrid_retriever": {
+                "query_embedding": dense_emb,
+                "query_sparse_embedding": sparse_emb,
+                "fusion_method": fusion_method,
+                "dense_weight": dense_weight,
+                "sparse_weight": sparse_weight,
+            }
         }
-        _docs_key = "ranker"
 
     # ── Resolve rerank model (P1-6: dynamic rerank_model_id) ──
     ranker_kwargs: Dict[str, Any] = {"query": query}
@@ -109,12 +126,18 @@ def retrieve(
         except Exception:
             log.warning("rerank_model_resolve_failed", model_id=rerank_model_id)
 
+    def _build_pipeline_input(filter_expr: str) -> Dict[str, Any]:
+        """按 KB 构建管线输入：embeddings 固定，filter + top_k 每 KB 注入。"""
+        pin = deepcopy(_base_input)
+        pin[_retriever_key]["filters"] = filter_expr
+        pin[_retriever_key]["top_k"] = k_prime
+        if retrieval_mode in ("keyword_only", "hybrid"):
+            pin["ranker"] = ranker_kwargs
+        return pin
+
     # ── Run Haystack Query Pipeline for each candidate KB ──
     # §15.2: 最终候选 KB = prefilter.kbs ∩ 业务候选。
-    # 每个 KB 使用独立的 6-condition filter（不同 kb_id），
-    # 但共享同一 Pipeline 模板（嵌入/融合/rerank 结构相同）。
     all_docs: List[Document] = []
-    k_prime = int(top_k * oversample_factor)
 
     from src.permission.authz import _compile_filter_expr
 
@@ -123,24 +146,11 @@ def retrieve(
         flt = compile_filter(pf, ctx, kb_id)
         filter_expr = _compile_filter_expr(flt)
 
-        # Build KB-specific pipeline input with this KB's filter
-        _pipeline_input = dict(_pipeline_input_template)
-        if retrieval_mode == "vector_only":
-            _pipeline_input["retriever"] = {"filters": filter_expr}
-        elif retrieval_mode == "keyword_only":
-            _pipeline_input["sparse_retriever"] = {"filters": filter_expr}
-            _pipeline_input["ranker"] = ranker_kwargs
-        else:  # hybrid
-            _pipeline_input["dense_retriever"] = {"filters": filter_expr}
-            _pipeline_input["sparse_retriever"] = {"filters": filter_expr}
-            _pipeline_input["ranker"] = ranker_kwargs
-
         try:
-            result = run_pipeline_sync(_pipeline_name, _pipeline_input)
-
+            result = run_pipeline_sync(_pipeline_name, _build_pipeline_input(filter_expr))
             docs = (result.get("hierarchical_merger", {}).get("documents", []) or
                     result.get("ranker", {}).get("documents", []) or
-                    result.get(_docs_key, {}).get("documents", []))
+                    result.get(_retriever_key, {}).get("documents", []))
             all_docs.extend(docs)
 
         except Exception as exc:
@@ -153,27 +163,18 @@ def retrieve(
     # §15.3: "Never relax filter conditions during refetch" — 过滤器不变。
     # Refetch 仅在 0 < len(all_docs) < min_results 时有意义：
     # ANN 近似搜索的非确定性可能在补检索中返回不同排列。
+    # P0-2: refetch 复用已算好的 embeddings，不再重复编码查询。
     round_count = 0
     while 0 < len(all_docs) < min_results and round_count < refetch_max_rounds:
         round_count += 1
         for kb_id in candidate_kbs:
             flt = compile_filter(pf, ctx, kb_id)
             filter_expr = _compile_filter_expr(flt)
-            refetch_input = dict(_pipeline_input_template)
-            if retrieval_mode == "vector_only":
-                refetch_input["retriever"] = {"filters": filter_expr}
-            elif retrieval_mode == "keyword_only":
-                refetch_input["sparse_retriever"] = {"filters": filter_expr}
-                refetch_input["ranker"] = ranker_kwargs
-            else:
-                refetch_input["dense_retriever"] = {"filters": filter_expr}
-                refetch_input["sparse_retriever"] = {"filters": filter_expr}
-                refetch_input["ranker"] = ranker_kwargs
             try:
-                result2 = run_pipeline_sync(_pipeline_name, refetch_input)
+                result2 = run_pipeline_sync(_pipeline_name, _build_pipeline_input(filter_expr))
                 docs2 = (result2.get("hierarchical_merger", {}).get("documents", []) or
                          result2.get("ranker", {}).get("documents", []) or
-                         result2.get(_docs_key, {}).get("documents", []))
+                         result2.get(_retriever_key, {}).get("documents", []))
                 seen_contents = {d.content for d in all_docs}
                 for d in docs2:
                     if d.content not in seen_contents:

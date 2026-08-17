@@ -19,6 +19,9 @@ export interface QueryOverrides {
   refetch_max_rounds?: number;
   refine_batch_size?: number;
   doc_preview_max_chars?: number;
+  tree_summarize_batch_size?: number;
+  max_answer_length?: number;
+  compress_target_length?: number;
 }
 
 interface Props {
@@ -199,6 +202,9 @@ export default function InputBar({ input, onInputChange, onSend, disabled, kbNam
         refetch_max_rounds: refetchMaxRounds,
         refine_batch_size: refineBatchSize,
         doc_preview_max_chars: docPreviewMaxChars,
+        tree_summarize_batch_size: treeSummarizeBatchSize,
+        max_answer_length: maxAnswerLength,
+        compress_target_length: compressTargetLength,
       });
     } else {
       onSend(undefined);

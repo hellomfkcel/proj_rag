@@ -1,13 +1,18 @@
 """Phase 5 设置 REST 端点 — 模型 + 检索配置 + Prompt 模板。"""
 
 import uuid
-from typing import List, Optional
+from typing import List, Literal, Optional
 import asyncpg
 from fastapi import APIRouter, HTTPException, Depends, Body
 from pydantic import BaseModel
 from src.config import Settings
 from src.api.deps import get_request_context
 from src.permission.context import RequestContext
+
+# 检索/合成模式合法值（与 GET /system/enums 一致；非法值 422 而非静默回退）
+RETRIEVAL_MODES = Literal["hybrid", "vector_only", "keyword_only"]
+FUSION_METHODS = Literal["rrf", "weighted_sum"]
+SYNTHESIS_MODES = Literal["auto", "compact", "refine", "tree_summarize", "no_synthesis"]
 
 router = APIRouter(prefix="/api/v1", tags=["settings"])
 
@@ -21,6 +26,8 @@ class ModelItem(BaseModel):
     model_id: str; model_type: str; provider: str; model_name: str; base_url: str; is_default: bool
 
 class RetrievalConfigModel(BaseModel):
+    # 响应模型模式字段保持 str：避免 DB 历史非法值导致序列化 500；
+    # 写入口（PATCH）已用 Literal 校验。
     scope_type: str = "kb"; top_k: int = 10
     retrieval_mode: str = "hybrid"; fusion_method: str = "rrf"
     synthesis_mode: str = "compact"; rerank_model_id: str = ""
@@ -29,20 +36,26 @@ class RetrievalConfigModel(BaseModel):
     refetch_max_rounds: int = 2; haystack_pipeline_name: str = "query_v1"
     dense_weight: float = 0.5; sparse_weight: float = 0.5
     min_score: float = 0.0
-    refine_batch_size: int = 2; max_answer_length: int = 3000
-    compress_target_length: int = 1000; doc_preview_max_chars: int = 1000
+    refine_batch_size: int = 2; tree_summarize_batch_size: int = 5
+    max_answer_length: int = 3000; compress_target_length: int = 1000
+    doc_preview_max_chars: int = 1000
 
 class RetrievalConfigPatch(BaseModel):
-    top_k: Optional[int] = None; retrieval_mode: Optional[str] = None
-    fusion_method: Optional[str] = None; synthesis_mode: Optional[str] = None
+    top_k: Optional[int] = None
+    retrieval_mode: Optional[RETRIEVAL_MODES] = None
+    fusion_method: Optional[FUSION_METHODS] = None
+    synthesis_mode: Optional[SYNTHESIS_MODES] = None
     rerank_model_id: Optional[str] = None
     strict: Optional[bool] = None; oversample_factor: Optional[float] = None
     min_results: Optional[int] = None; refetch_max_rounds: Optional[int] = None
     haystack_pipeline_name: Optional[str] = None
     dense_weight: Optional[float] = None; sparse_weight: Optional[float] = None
     min_score: Optional[float] = None
-    refine_batch_size: Optional[int] = None; max_answer_length: Optional[int] = None
-    compress_target_length: Optional[int] = None; doc_preview_max_chars: Optional[int] = None
+    refine_batch_size: Optional[int] = None
+    tree_summarize_batch_size: Optional[int] = None
+    max_answer_length: Optional[int] = None
+    compress_target_length: Optional[int] = None
+    doc_preview_max_chars: Optional[int] = None
 
 class PromptItem(BaseModel):
     id: str; prompt_id: str; version: str; template_text: str; description: str; is_active: bool
@@ -118,7 +131,9 @@ async def get_retrieval_config(kb_id: str, ctx: RequestContext = Depends(get_req
         dense_weight=rc.dense_weight,
         sparse_weight=rc.sparse_weight,
         min_score=rc.min_score,
-        refine_batch_size=rc.refine_batch_size, max_answer_length=rc.max_answer_length,
+        refine_batch_size=rc.refine_batch_size,
+        tree_summarize_batch_size=rc.tree_summarize_batch_size,
+        max_answer_length=rc.max_answer_length,
         compress_target_length=rc.compress_target_length, doc_preview_max_chars=rc.doc_preview_max_chars)
 
 
@@ -144,8 +159,9 @@ async def update_retrieval_config(kb_id: str, body: RetrievalConfigPatch,
                       "rerank_model_id","strict","oversample_factor","min_results",
                       "refetch_max_rounds","haystack_pipeline_name",
                       "dense_weight","sparse_weight","min_score",
-                      "refine_batch_size","max_answer_length",
-                      "compress_target_length","doc_preview_max_chars"]:
+                      "refine_batch_size","tree_summarize_batch_size",
+                      "max_answer_length","compress_target_length",
+                      "doc_preview_max_chars"]:
                 v = getattr(body, f, None)
                 if v is not None:
                     updates.append(f"{f}=${i}"); vals.append(v); i += 1
@@ -156,13 +172,15 @@ async def update_retrieval_config(kb_id: str, body: RetrievalConfigPatch,
             await conn.execute(
                 "INSERT INTO retrieval_configs (id, scope_type, scope_id, top_k, retrieval_mode, "
                 "fusion_method, synthesis_mode, rerank_model_id, "
-                "strict, oversample_factor, min_results, refetch_max_rounds, haystack_pipeline_name) "
-                "VALUES ($1,'kb',$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)",
+                "strict, oversample_factor, min_results, refetch_max_rounds, haystack_pipeline_name, "
+                "tree_summarize_batch_size) "
+                "VALUES ($1,'kb',$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)",
                 str(uuid.uuid4()), kb_id, body.top_k or 10, body.retrieval_mode or "hybrid",
                 body.fusion_method or "rrf", body.synthesis_mode or "compact",
                 body.rerank_model_id or "",
                 body.strict or False, body.oversample_factor or 1.5, body.min_results or 3,
-                body.refetch_max_rounds or 2, body.haystack_pipeline_name or "query_v1")
+                body.refetch_max_rounds or 2, body.haystack_pipeline_name or "query_v1",
+                body.tree_summarize_batch_size or 5)
         # Return resolved
         from src.platform.config.service import resolve_retrieval_config
         rc = resolve_retrieval_config(kb_id=kb_id, tenant_id=ctx.tenant_id)

@@ -47,6 +47,9 @@ def retrieve_and_generate_task(
     refetch_max_rounds: Optional[int] = None,
     refine_batch_size: Optional[int] = None,
     doc_preview_max_chars: Optional[int] = None,
+    tree_summarize_batch_size: Optional[int] = None,
+    max_answer_length: Optional[int] = None,
+    compress_target_length: Optional[int] = None,
 ) -> Dict[str, Any]:
     """检索 + 生成 Celery 任务（线上路径）。
 
@@ -112,6 +115,9 @@ def retrieve_and_generate_task(
             refetch_max_rounds=refetch_max_rounds,
             refine_batch_size=refine_batch_size,
             doc_preview_max_chars=doc_preview_max_chars,
+            tree_summarize_batch_size=tree_summarize_batch_size,
+            max_answer_length=max_answer_length,
+            compress_target_length=compress_target_length,
             on_event=sink,
         )
     except Exception:
@@ -194,6 +200,9 @@ def _run_retrieve_generate(
     refetch_max_rounds: Optional[int] = None,
     refine_batch_size: Optional[int] = None,
     doc_preview_max_chars: Optional[int] = None,
+    tree_summarize_batch_size: Optional[int] = None,
+    max_answer_length: Optional[int] = None,
+    compress_target_length: Optional[int] = None,
     on_event: Optional[Callable[[str, dict], None]] = None,
 ) -> Dict[str, Any]:
     """检索 + 生成共享核心（线上任务与评测任务共用，保证逻辑完全一致）。
@@ -222,8 +231,10 @@ def _run_retrieve_generate(
         raise ValueError("ctx_token is required for retrieval tasks")
 
     # 2. 解析检索配置（P1-6/7: retrieval_mode + rerank_model_id 动态读取）
+    #    四层级联：传 conversation_id 使 conversation 级配置（若存在）参与覆盖
     kb_id = kb_ids[0] if kb_ids else ""
-    retrieval_cfg = resolve_retrieval_config(kb_id=kb_id, tenant_id=tenant_id)
+    retrieval_cfg = resolve_retrieval_config(
+        kb_id=kb_id, tenant_id=tenant_id, conversation_id=conversation_id)
 
     # P1-5: Per-Query 检索参数覆盖 — turn 级覆盖优先于 DB 配置
     effective_mode = retrieval_mode or retrieval_cfg.retrieval_mode
@@ -288,9 +299,12 @@ def _run_retrieve_generate(
                 mode = effective_synthesis
             else:
                 mode = resolve_synthesis_mode(doc_count, documents)
-            # Per-query overrides
+            # Per-query overrides（P1-5：合成参数同样支持单查询覆盖）
             _batch = refine_batch_size or retrieval_cfg.refine_batch_size
             _max_chars = doc_preview_max_chars or retrieval_cfg.doc_preview_max_chars
+            _tree_batch = tree_summarize_batch_size or retrieval_cfg.tree_summarize_batch_size
+            _max_answer = max_answer_length or retrieval_cfg.max_answer_length
+            _compress_target = compress_target_length or retrieval_cfg.compress_target_length
 
             if mode == "compact":
                 if on_event is not None:
@@ -305,12 +319,12 @@ def _run_retrieve_generate(
             elif mode == "refine":
                 answer = _synthesize_refine(user_question, documents,
                     batch_size=_batch,
-                    max_answer_len=retrieval_cfg.max_answer_length,
-                    compress_target=retrieval_cfg.compress_target_length,
+                    max_answer_len=_max_answer,
+                    compress_target=_compress_target,
                     max_chars=_max_chars)
             elif mode == "tree_summarize":
                 answer = _synthesize_tree_summarize(user_question, documents,
-                    batch_size=retrieval_cfg.tree_summarize_batch_size,
+                    batch_size=_tree_batch,
                     max_chars=_max_chars)
             elif mode == "no_synthesis":
                 answer = _synthesize_no_synthesis(user_question, documents)

@@ -10,7 +10,7 @@ sys.path = [p for p in sys.path if 'ros' not in p]
 
 import asyncio
 import asyncpg
-from pymilvus import connections, Collection, utility
+from pymilvus import MilvusClient
 
 from src.config import Settings
 from src.platform.obs.logger import get_logger
@@ -60,53 +60,24 @@ async def reset_postgres():
 
 
 def reset_milvus():
-    """删除并重建 rag_documents 集合。"""
+    """删除并重建 rag_documents 集合（schema/索引与 MilvusWriter 严格一致）。"""
     s = Settings()
-    connections.connect("default", host=s.milvus_host, port=str(s.milvus_port))
+    client = MilvusClient(uri=f"http://{s.milvus_host}:{s.milvus_port}")
 
-    if utility.has_collection("rag_documents"):
-        utility.drop_collection("rag_documents")
+    if client.has_collection("rag_documents"):
+        client.drop_collection("rag_documents")
         log.info("milvus_collection_dropped")
 
-    # 重建（与 MilvusWriter 中的 schema 一致）
-    from pymilvus import CollectionSchema, FieldSchema, DataType
+    # 复用 writer 的 schema + 索引构造——单一事实来源，杜绝 reset 与 writer 不一致
+    from src.ingest.components.milvus_writer import build_schema, ensure_indices
 
-    pk = FieldSchema(name="id", dtype=DataType.VARCHAR, is_primary=True, max_length=256)
-    content = FieldSchema(name="content", dtype=DataType.VARCHAR, max_length=65535)
-    vector = FieldSchema(name="vector", dtype=DataType.FLOAT_VECTOR, dim=1024)
-    sparse = FieldSchema(name="sparse_vector", dtype=DataType.SPARSE_FLOAT_VECTOR)
-    doc_id = FieldSchema(name="document_id", dtype=DataType.VARCHAR, max_length=256)
-    mount_id = FieldSchema(name="mount_id", dtype=DataType.VARCHAR, max_length=256)
-    kb_id = FieldSchema(name="kb_id", dtype=DataType.VARCHAR, max_length=256)
-    tenant_id = FieldSchema(name="tenant_id", dtype=DataType.VARCHAR, max_length=64)
-    allow_stamps = FieldSchema(name="allow_stamps", dtype=DataType.JSON)
-    deny_stamps = FieldSchema(name="deny_stamps", dtype=DataType.JSON)
-    vis_version = FieldSchema(name="vis_version", dtype=DataType.INT64)
-    retrievable = FieldSchema(name="retrievable", dtype=DataType.BOOL)
-
-    schema = CollectionSchema(
-        fields=[pk, content, vector, sparse, doc_id, mount_id, kb_id,
-                tenant_id, allow_stamps, deny_stamps, vis_version, retrievable],
-        enable_dynamic_field=False,
+    client.create_collection(
+        collection_name="rag_documents",
+        schema=build_schema(),
+        metric_type="IP",
     )
-
-    Collection(name="rag_documents", schema=schema)
-
-    # 创建索引
-    col = Collection("rag_documents")
-    col.create_index("vector", {
-        "metric_type": "IP",
-        "index_type": "IVF_FLAT",
-        "params": {"nlist": 128},
-    })
-    col.create_index("sparse_vector", {
-        "metric_type": "IP",
-        "index_type": "SPARSE_INVERTED_INDEX",
-        "params": {"drop_ratio_build": 0.2},
-    })
-    col.load()
-
-    connections.disconnect("default")
+    ensure_indices(client, "rag_documents")
+    client.load_collection("rag_documents")
     log.info("milvus_collection_created", msg="rag_documents ready")
 
 

@@ -147,6 +147,11 @@ def _increment_epoch(mount_id: str) -> int:
     max_retries=3,
     default_retry_delay=30,
     queue="ingestion_queue",
+    # 全局 task_soft_time_limit=600s 对大型文档（hierarchical 数千 chunk，
+    # 嵌入需 ~15 分钟）过短：超时被中断 → 无限重试、status 卡 processing。
+    # ingest 独立放宽软/硬超时（30/35 min），检索/盖戳保持全局 600s。
+    soft_time_limit=1800,
+    time_limit=2100,
 )
 def ingest_document_task(
     self,
@@ -466,13 +471,15 @@ def _upsert_stamps(
     # MilvusClient.query() 的 filter 语法与 ORM 略有差异：字段名需直接使用
     expr = f'kb_id == "{kb_id}" && document_id == "{doc_id}"'
 
-    # 查询该通道下所有 chunk（需要完整字段用于 upsert）
+    # 查询该通道下所有 chunk（需要完整字段用于 upsert）。
+    # 显式 schema 下 upsert 必须保留全部显式字段，否则层级元数据被清零。
     results: List[Dict[str, Any]] = client.query(
         collection_name="rag_documents",
         filter=expr,
         output_fields=["id", "content", "vector", "sparse_vector",
                       "document_id", "mount_id", "kb_id", "tenant_id",
-                      "allow_stamps", "deny_stamps", "vis_version", "retrievable"],
+                      "allow_stamps", "deny_stamps", "vis_version", "retrievable",
+                      "parent_id", "level", "chunk_index"],
         limit=10000,
     )
 
@@ -521,6 +528,10 @@ def _upsert_stamps(
                 "deny_stamps": deny_stamps,    # Python list → Milvus JSON array
                 "vis_version": vis_version,
                 "retrievable": row.get("retrievable", True),
+                # 层级元数据原样保留（盖戳只更新三个戳记字段，不加工/不推导）
+                "parent_id": row.get("parent_id", "") or "",
+                "level": row.get("level", 0),
+                "chunk_index": row.get("chunk_index", 0),
             })
         client.upsert(collection_name="rag_documents", data=upsert_rows)
 

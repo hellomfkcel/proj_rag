@@ -146,6 +146,15 @@ CREATE TABLE retrieval_configs (
     min_results       INTEGER DEFAULT 3,
     refetch_max_rounds INTEGER DEFAULT 2,
     haystack_pipeline_name VARCHAR(64) DEFAULT 'query_v1',
+    -- ── 检索/合成参数（与 src/platform/config/service.py RetrievalConfig 对齐）──
+    dense_weight      FLOAT DEFAULT 0.5,
+    sparse_weight     FLOAT DEFAULT 0.5,
+    min_score         FLOAT DEFAULT 0.0,
+    refine_batch_size INTEGER DEFAULT 2,
+    tree_summarize_batch_size INTEGER DEFAULT 5,
+    max_answer_length INTEGER DEFAULT 3000,
+    compress_target_length INTEGER DEFAULT 1000,
+    doc_preview_max_chars INTEGER DEFAULT 1000,
     UNIQUE (scope_type, scope_id)
 );
 

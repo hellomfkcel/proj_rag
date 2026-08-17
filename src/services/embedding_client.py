@@ -16,10 +16,25 @@ def _get_service_url() -> Optional[str]:
 
 
 def _http_post(endpoint: str, json_data: dict, timeout: int = 120) -> dict:
-    """向 Embedding Service 发送 HTTP POST 请求。"""
+    """向 Embedding Service 发送 HTTP POST 请求。
+
+    ★ 传播 OTel trace context（W3C traceparent）：
+    不传时 embedding service 的 /v1/embed 每次新建一个根 trace（Tempo 碎片，
+    一个 ingest 被拆成几十上百条），破坏可观测性完整性。
+    propagate.inject 从当前 span（ingest pipeline 的 embedder 组件 span）
+    注入 traceparent，使服务端 span 成为当前 trace 的子 span。
+    """
     import requests
     base = _get_service_url().rstrip("/")
-    resp = requests.post(f"{base}{endpoint}", json=json_data, timeout=timeout)
+    headers: dict = {}
+    try:
+        from opentelemetry import propagate
+        propagate.inject(headers)
+    except Exception:
+        pass  # 无 OTel 上下文时退化为无传播（不阻断业务）
+    resp = requests.post(
+        f"{base}{endpoint}", json=json_data, headers=headers, timeout=timeout
+    )
     resp.raise_for_status()
     return resp.json()
 

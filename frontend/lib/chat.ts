@@ -24,6 +24,9 @@ export interface QueryOverrides {
   refetch_max_rounds?: number;
   refine_batch_size?: number;
   doc_preview_max_chars?: number;
+  tree_summarize_batch_size?: number;
+  max_answer_length?: number;
+  compress_target_length?: number;
 }
 
 export interface QueryResult {
@@ -73,6 +76,9 @@ export async function query(question: string, kbIds: string[], convId?: string, 
     refetch_max_rounds: overrides?.refetch_max_rounds,
     refine_batch_size: overrides?.refine_batch_size,
     doc_preview_max_chars: overrides?.doc_preview_max_chars,
+    tree_summarize_batch_size: overrides?.tree_summarize_batch_size,
+    max_answer_length: overrides?.max_answer_length,
+    compress_target_length: overrides?.compress_target_length,
   });
   return data;
 }

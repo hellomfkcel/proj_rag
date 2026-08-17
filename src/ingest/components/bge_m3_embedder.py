@@ -115,6 +115,10 @@ class BGE_M3DocumentEmbedder:
         # ── Langfuse observation ──
         langfuse_obs = _start_embedding_observation(len(texts), self.batch_size)
 
+        # 先初始化，避免 embed_documents 抛异常时 finally 引用未绑定变量
+        # （UnboundLocalError 会掩盖真实错误——摄入任务因此无限重试、status 卡 processing）。
+        all_dense: List[Any] = []
+        all_sparse: List[Dict[str, float]] = []
         _start = _time.time()
         try:
             from src.services.embedding_client import embed_documents

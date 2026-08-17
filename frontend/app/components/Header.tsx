@@ -84,6 +84,17 @@ export default function Header() {
     try {
       const data = await listKBs();
       setKBs(data);
+      // 对账：丢弃不在当前租户 KB 列表中的选中项。
+      // 跨租户切换 / KB 已删除 / URL(localStorage) 残留的失效 id 会保留在
+      // selectedKBs 中，导致上传到后端命中
+      // "Knowledge base not found or not in current tenant"（后端租户隔离正确，前端不应发出无效 id）。
+      // listKBs() 已按 ctx.tenant_id 过滤，故仅保留在列表内的选中项即为租户内合法选择。
+      const validIds = new Set(data.map((k: { id: string }) => k.id));
+      const current = useKBStore.getState().selectedKBs;
+      const filtered = current.filter((id) => validIds.has(id));
+      if (filtered.length !== current.length) {
+        useKBStore.getState().setSelectedKBs(filtered);
+      }
     } catch {}
   }, []);
 

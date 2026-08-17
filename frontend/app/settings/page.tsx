@@ -281,6 +281,13 @@ export default function SettingsPage() {
               {config.strict?"🟢 开启":"⚪ 关闭"}
             </button>
           </div>
+          <div>
+            <label className="text-sm text-gray-600 mb-1 block">Min Score (rerank 得分阈值): <span className="font-bold text-gray-800">{config.min_score ?? 0.0}</span></label>
+            <input type="range" min={0} max={1} step={0.05} value={config.min_score ?? 0.0}
+              onChange={e=>saveConfig({min_score:parseFloat(e.target.value)})}
+              className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-rose-500"/>
+            <p className="text-[10px] text-gray-400 mt-0.5">低于该 rerank 得分的检索片段会被丢弃（0 = 不过滤）</p>
+          </div>
           {/* ── 合成参数 ── */}
           <div className="pt-3 border-t border-gray-100">
             <p className="text-sm font-medium text-gray-700 mb-2">🎯 合成参数（Refine / Tree Summarize / Compact 共用）</p>
