@@ -86,7 +86,7 @@ def submit_ingest_task(
 ) -> dict:
     """文档上传入口：只登记不解析。
 
-    行为契约（§13.3.1 + §13.7 先调权限服务后提交本地）：
+    行为契约（先调权限服务后提交本地）：
     1. 计算指纹，按 (tenant_id, fingerprint) 查 document → 存在则复用
     2. 不存在：生成 doc_id → 写 SeaweedFS → ★先调 register_resource
        → 成功后 INSERT INTO documents
@@ -232,8 +232,7 @@ async def _trigger_parse_internal(conn, mount_id: str, kb_id: str, tenant_id: st
         return {"mount_id": mount_id, "parse_status": "already_queued"}
 
     # ★ 创建 ingest_execution 记录（状态=queued），供 Celery worker 的 epoch 检查使用。
-    # 之前此记录由 outbox_relay 间接创建导致 epoch 竞态——现在与 DocumentMounted 事件
-    # 在同一事务中原子写入，消除 epoch 不匹配窗口。
+    # 与 DocumentMounted 事件在同一事务中原子写入，保证 epoch 一致。
     await conn.execute(
         """INSERT INTO ingest_executions (mount_id, document_id, kb_id, parse_status,
            execution_epoch, chunking_config_version, pipeline_yaml_version, retry_count, updated_at)
@@ -275,8 +274,7 @@ def _is_permission_service_not_found(exc: Exception) -> bool:
     """检查异常是否由权限服务返回 404（资源未注册）引起。
 
     当 mount_registry 中不存在该挂载时，unlink_resource 返回 404，
-    这表示资源从未在权限服务注册（早期文档/重置后的文档），
-    此时本地清理应正常进行，而非 fail-closed。
+    表示资源从未在权限服务注册，此时本地清理应正常进行，而非 fail-closed。
     """
     import httpx
     cause = exc
@@ -304,11 +302,10 @@ def delete_document_from_kb(
 ) -> dict:
     """从 KB 移除文档。
 
-    purge=false（阶段一）：
+    purge=false：
     - 权限 doc:unmount（带 channel.kb）
     - 同步调 unlink_resource → 删挂载 → 发 DocumentUnmounted
-    purge=true（阶段一返回 501）：
-    - 阶段三实现
+    purge=true：调 _purge_document 彻底删除。
     """
     if purge:
         return _purge_document(user_id, doc_id, tenant_id, request_id, credential)
@@ -428,12 +425,12 @@ def _run_async_safe(coro):
         return asyncio.run(coro)
 
 
-# _purge_document（阶段三：purge=true 四合一 retire）
+# _purge_document（purge=true 四合一 retire）
 # ══════════════════════════════════════════════════════════════════
 
 def _purge_document(user_id: str, doc_id: str, tenant_id: str,
                     request_id: str = "", credential: str = "") -> dict:
-    """彻底删除文档（阶段三 v14.md §13.4.3 + §13.7 先调权限服务后提交本地）。
+    """彻底删除文档（先调权限服务后提交本地）。
 
     操作顺序（不可颠倒）：
     1. 快照——取当前全部挂载
@@ -463,7 +460,7 @@ def _purge_document(user_id: str, doc_id: str, tenant_id: str,
             if mount_count == 0:
                 return {"status": "not_found", "reason": "no mounts for document", "doc_id": doc_id}
 
-            # 2. ★ 先调权限服务 retire_resource（§13.7 + §13.4.3）
+            # 2. ★ 先调权限服务 retire_resource
             #    retire 在权限服务侧原子完成四件事：
             #    a. 回收全部 acl  b. 回收全部 restriction
             #    c. 解除全部挂载镜像（unlinked=true） d. 置 retired=true

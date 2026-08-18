@@ -25,7 +25,7 @@ log = get_logger(__name__)
 async def _dispatch_event(event_type: str, payload: dict, envelope_tenant_id: str = ""):
     """根据事件类型分发到对应的 Celery 任务。
 
-    tenant_id 按设计文档 §3.1 定义在事件信封层（outbox.tenant_id 列），
+    tenant_id 定义在事件信封层（outbox.tenant_id 列），
     不在 payload 字典中。此处显式传入，避免 handler 从 payload 中误读。
     """
     if event_type == "DocumentMounted":
@@ -41,7 +41,7 @@ async def _dispatch_event(event_type: str, payload: dict, envelope_tenant_id: st
 async def _handle_document_mounted(payload: dict, envelope_tenant_id: str = ""):
     """DocumentMounted → 提交 ingest_document_task 到 ingestion_queue。
 
-    这是从注册→解析的唯一触发路径（v14.md §13.3.2）：
+    这是从注册→解析的唯一触发路径：
     trigger_parse 只写 outbox，不直接调 Celery。
     outbox_relay 是 DocumentMounted → B-INGEST 的唯一桥接。
     """
@@ -50,7 +50,7 @@ async def _handle_document_mounted(payload: dict, envelope_tenant_id: str = ""):
     document_id = payload.get("document_id", "")
     mount_id = payload.get("mount_id", "")
     kb_id = payload.get("kb_id", "")
-    # tenant_id 来自事件信封（outbox.tenant_id 列），非 payload 字段（§3.1）
+    # tenant_id 来自事件信封（outbox.tenant_id 列），非 payload 字段
     tenant_id = envelope_tenant_id or payload.get("tenant_id", "")
     chunking_config_version = payload.get("chunking_config_version", "v1")
 

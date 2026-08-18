@@ -1,7 +1,6 @@
 """P-CONFIG：配置模块 — 检索参数级联 + 切分配置版本化。
 
-阶段二升级：
-- resolve_retrieval_config: kb→tenant 两级 → turn→conversation→kb→tenant 四层级联
+- resolve_retrieval_config: turn→conversation→kb→tenant 四层级联
 - resolve_chunking_config: 从 DB chunking_configs 表按版本读取
 """
 
@@ -62,7 +61,7 @@ def resolve_retrieval_config(
     conversation_id: Optional[str] = None,
     turn_id: Optional[str] = None,
 ) -> RetrievalConfig:
-    """检索参数级联解析（阶段二：四层级联 turn→conversation→kb→tenant）。
+    """检索参数级联解析（四层级联 turn→conversation→kb→tenant）。
 
     级联顺序：turn → conversation → kb → tenant，就近覆盖。
     """
@@ -116,7 +115,7 @@ def resolve_retrieval_config(
 
     # 用 run_async_safe 而非裸 asyncio.run：本函数可能被 async 调用方
     # （config 端点 / query 端点）调用，裸 asyncio.run 会抛 RuntimeError 被吞，
-    # 导致静默返回默认值（hybrid+auto）而非 DB 真实配置（慢查询根因）。
+    # 导致静默返回默认值（hybrid+auto）而非 DB 真实配置。
     try:
         from src.platform.async_utils import run_async_safe
         return run_async_safe(_query())
@@ -125,7 +124,7 @@ def resolve_retrieval_config(
 
 
 def resolve_chunking_config(kb_id: str, version: Optional[str] = None) -> ChunkingConfig:
-    """切分配置版本化存取（阶段二：从 chunking_configs 表读取）。
+    """切分配置版本化存取（从 chunking_configs 表读取）。
 
     支持五种 strategy: word / sentence / passage / semantic / hierarchical
     """

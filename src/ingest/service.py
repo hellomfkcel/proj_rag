@@ -1,6 +1,6 @@
 """B-INGEST：摄入管线。
 
-阶段三升级：
+关键机制：
 - execution_epoch 栅栏：每个关键写点前重读 epoch，不匹配则自动退出
 - 协作式取消：parse_status == 'cancelling' 时在途任务自动退出
 - 卸载清理时序：cancelling → 清理 chunk → removed
@@ -37,7 +37,7 @@ def _dsn() -> str:
 # Pipeline selection by chunking strategy
 # ══════════════════════════════════════════════════════════════════
 
-# 策略 -> Pipeline YAML 映射（v14.md §12.2, §14.4）
+# 策略 -> Pipeline YAML 映射
 _STRATEGY_PIPELINE_MAP = {
     "sentence":      "ingest_v1",
     "word":          "ingest_v2",
@@ -53,7 +53,7 @@ VALID_CHUNKING_STRATEGIES = list(_STRATEGY_PIPELINE_MAP.keys())
 def _pipeline_for_strategy(strategy: str) -> str:
     """根据 haystack_strategy 返回对应的摄入 Pipeline 名称。
 
-    完整策略映射（v14.md §12.2, §14.4）：
+    完整策略映射：
     - sentence      → ingest_v1  (DocumentSplitter, split_by=sentence)
     - word          → ingest_v2  (DocumentSplitter, split_by=word)
     - passage       → ingest_v3  (DocumentSplitter, split_by=passage)
@@ -68,7 +68,7 @@ def _pipeline_for_strategy(strategy: str) -> str:
 
 
 # ══════════════════════════════════════════════════════════════════
-# should_abort / _abort_reason（阶段三：epoch 栅栏 + 协作式取消）
+# should_abort / _abort_reason（epoch 栅栏 + 协作式取消）
 # ══════════════════════════════════════════════════════════════════
 
 def _abort_reason(mount_id: str, current_epoch: int) -> str | None:
@@ -155,8 +155,8 @@ def _increment_epoch(mount_id: str) -> int:
     max_retries=3,
     default_retry_delay=30,
     queue="ingestion_queue",
-    # 全局 task_soft_time_limit=600s 对大型文档（hierarchical 数千 chunk，
-    # 嵌入需 ~15 分钟）过短：超时被中断 → 无限重试、status 卡 processing。
+    # 全局 task_soft_time_limit=600s 对大型文档（hierarchical 数千 chunk）
+    # 过短：超时被中断 → 无限重试、status 卡 processing。
     # ingest 独立放宽软/硬超时（30/35 min），检索/盖戳保持全局 600s。
     soft_time_limit=1800,
     time_limit=2100,
@@ -191,7 +191,7 @@ def ingest_document_task(
         # 0. 状态转换：queued → processing（worker 确实开始执行时才设 processing）
         _update_execution_status(mount_id, "processing")
 
-        # 0b. epoch 前置检查（阶段三栅栏 + 协作式取消）
+        # 0b. epoch 前置检查（epoch 栅栏 + 协作式取消）
         if should_abort(mount_id, execution_epoch):
             return {"status": "aborted", "reason": "epoch_mismatch_or_cancelling"}
 
@@ -231,7 +231,7 @@ def ingest_document_task(
             log.error("file_not_found_in_storage", key=storage_path, error=str(e))
             raise RuntimeError(f"Failed to read document from object storage: {storage_path}") from e
 
-        # 1b. Pipeline 执行前再次检查 epoch（阶段三栅栏）
+        # 1b. Pipeline 执行前再次检查 epoch（epoch 栅栏）
         if should_abort(mount_id, execution_epoch):
             return {"status": "aborted", "reason": "epoch_mismatch_before_pipeline"}
 
@@ -282,7 +282,7 @@ def ingest_document_task(
         docs_written = writer_out.get("documents", [])
         chunk_count = len(docs_written)
 
-        # ★ 写点栅栏（设计 §14："每个关键写点前重读 epoch，不匹配则自动退出"）：
+        # ★ 写点栅栏：每个关键写点前重读 epoch，不匹配则自动退出。
         # pipeline 执行期间（切分→嵌入→写 Milvus）文档可能被删除或重摄。
         # 此处是 Milvus 写入后的下一个关键点（提交盖戳前）。已中止时：
         #   - 不提交盖戳任务、不置 completed（文档已不存在，写戳无意义）；
@@ -485,7 +485,7 @@ def _upsert_stamps(
     不加工、不推导、不补全。
 
     allow_empty=True: 当没有 chunk 可更新时视为成功（用于 unmounted 清空）。
-    allow_empty=False: 没有 chunk 时抛异常触发 Celery 重试（§14.5.3 纪律 1）。
+    allow_empty=False: 没有 chunk 时抛异常触发 Celery 重试（纪律 1）。
     """
     from pymilvus import MilvusClient
     s = Settings()
@@ -520,7 +520,7 @@ def _upsert_stamps(
                     doc_id=doc_id, kb_id=kb_id,
                     msg="No chunks to clear — already empty or never ingested.")
             return
-        # 纪律 1（§14.5.3）：失败不落盘、不 ack。
+        # 纪律 1：失败不落盘、不 ack。
         # 没有 chunk 可盖戳 → 抛异常触发 Celery 重试，不做静默跳过。
         #
         # 常见于三种情况：
@@ -540,8 +540,7 @@ def _upsert_stamps(
         batch = results[i:i + batch_size]
         upsert_rows: List[Dict[str, Any]] = []
         for row in batch:
-            # 若存量 chunk 的 tenant_id 为空（Milvus schema 演进前写入的数据），
-            # 用本任务参数覆盖；否则保留已有值
+            # 若存量 chunk 的 tenant_id 为空，用本任务参数覆盖；否则保留已有值
             row_tenant = row.get("tenant_id", "")
             effective_tenant = row_tenant if row_tenant else tenant_id
             upsert_rows.append({
@@ -729,7 +728,7 @@ def _get_execution_status(mount_id: str) -> str | None:
 
 
 # ══════════════════════════════════════════════════════════════════
-# cleanup_mount_chunks（阶段三：卸载时清理 Milvus chunk）
+# cleanup_mount_chunks（卸载时清理 Milvus chunk）
 # ══════════════════════════════════════════════════════════════════
 
 def _delete_document_chunks_in_kb(doc_id: str, kb_id: str) -> int:

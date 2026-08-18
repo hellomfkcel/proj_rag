@@ -1,4 +1,4 @@
-"""Phase 5 设置 REST 端点 — 模型 + 检索配置 + Prompt 模板。"""
+"""设置 REST 端点 — 模型 + 检索配置 + Prompt 模板。"""
 
 import uuid
 from typing import List, Literal, Optional

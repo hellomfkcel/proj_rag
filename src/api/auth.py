@@ -279,7 +279,7 @@ async def refresh_token(body: RefreshRequest):
       5. 签发新本系统 JWT
 
     开发模式（无 refresh_token）：
-      从 Authorization header 解析当前 JWT claims → 重签。
+      重签 dev-user JWT。
     """
     from src.api.oidc import OIDCProvider
 
@@ -341,7 +341,7 @@ async def refresh_token(body: RefreshRequest):
             expires_at=expires_at.isoformat(),
         )
 
-    # ── Dev mode: re-sign from current JWT claims ──
+    # ── Dev mode: 重签 dev-user JWT ──
     try:
         with open(s.jwt_public_key_path) as f:
             _ = f.read()  # ensure key exists
@@ -433,22 +433,11 @@ async def _revoke_refresh_token(token_hash: str) -> None:
         await conn.close()
 
 
-# ── GET /api/v1/auth/callback (SSO placeholder) ──────────────────
-
-# The /auth/callback route is handled by the frontend (Next.js pages router)
-# or a dedicated route in the API. For now, document the expected flow:
-#
-#   1. User clicks "Keycloak Login" → redirected to IdP
-#   2. IdP redirects back to /auth/callback?code=xxx&state=yyy
-#   3. Frontend extracts `code`, calls POST /api/v1/auth/token {code}
-#   4. Receives access_token + refresh_token → stores in localStorage → enters app
-
-
 # ── GET /api/v1/auth/callback (SSO 回调) ─────────────────────────
 
 @router.get("/callback")
 async def sso_callback(code: str = "", state: str = ""):
-    """OAuth2 回调端点 — IdP 登录后重定向至此（P3-15: 完整实现）。
+    """OAuth2 回调端点 — IdP 登录后重定向至此。
 
     GET /api/v1/auth/callback?code=xxx&state=yyy
 
@@ -640,9 +629,7 @@ async def tenant_stats(tenant_id: str):
         await conn.close()
 
 # ── POST /api/v1/auth/check-permission ────────────────────────────
-# P3-14: 前端细粒度按钮权限控制 — 调后端 P-AUTHC check()
-# 设计依据：docs/权限管理系统架构设计.md §6.4 阶段三
-#          + docs/RAG系统设计v14.md §6.3 check
+# 前端细粒度按钮权限控制 — 调后端 P-AUTHC check()
 
 class CheckPermissionRequest(BaseModel):
     action: str
@@ -667,7 +654,6 @@ async def check_permission_endpoint(
     前端在渲染操作按钮（删除/下载/解析等）之前调用此端点，
     获取当前用户对该资源的权限判定结果，实现细粒度按钮条件渲染。
 
-    设计依据：docs/权限管理系统架构设计.md §6.4 阶段三
     本端点不执行任何本地判定 — 所有授权决策经 P-AUTHC → 权限服务。
 
     Raises:

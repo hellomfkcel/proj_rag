@@ -101,7 +101,6 @@ class MilvusSparseRetriever:
             # sparse_vector 字段可能尚未创建（首次摄入前 collection 为空 schema）。
             # 降级返回空结果——Hybrid 检索的 dense 路仍然工作，DocumentJoiner RRF 会将
             # 两路结果融合（dense 结果不受影响）。
-            # 设计依据：docs/RAG系统设计v14.md §15.7 混合检索与融合。
             import logging
             _log = logging.getLogger(__name__)
             _log.warning(

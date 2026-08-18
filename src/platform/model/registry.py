@@ -118,9 +118,8 @@ def _get_db_dsn() -> str:
 def _run_async(coro):
     """统一委托 P-platform run_async_safe（兼容同步/异步调用方）。
 
-    替换原有的 nest_asyncio loop-patch 变通：裸 asyncio.run 在已有 event loop
-    上下文（FastAPI async 端点）会抛 RuntimeError，nest_asyncio 补丁属于
-    绕过逻辑；run_async_safe 在无 loop 时直接 run、有 loop 时线程池桥接。
+    裸 asyncio.run 在已有 event loop 上下文（FastAPI async 端点）会抛
+    RuntimeError；run_async_safe 在无 loop 时直接 run、有 loop 时线程池桥接。
     """
     from src.platform.async_utils import run_async_safe
     return run_async_safe(coro)
@@ -381,7 +380,7 @@ def invoke_llm(prompt: str, model_id: Optional[str] = None,
     """调用 LLM 生成（OpenAI 兼容 API → Ollama / vLLM / DeepSeek / OpenAI）。
 
     生成参数（max_tokens / temperature）缺省取 Settings（env 可覆盖），
-    支持按调用覆盖——所有生成调用必须经此门面（§0.2.3 红线 4）。
+    支持按调用覆盖——所有生成调用必须经此门面。
 
     thinking: "enabled" | "disabled" | None —— 透传给 DeepSeek 思考模式开关
     （extra_body={"thinking": {"type": ...}}）。None = 不发该参数（保持 provider 默认）。
@@ -389,8 +388,8 @@ def invoke_llm(prompt: str, model_id: Optional[str] = None,
     自动产生 OTel span 上报到 Tempo + Langfuse observation（包围实际计算，非后置记录）。
 
     空输出守卫：推理类模型（deepseek 等）reasoning_content 吃满 max_tokens 预算时
-    会返回空 content（finish_reason=length）。此时记录元数据日志（不落 prompt/生成内容，
-    符合 §11.3/§27.1）并抛 ModelOutputError，绝不静默返回空串。
+    会返回空 content（finish_reason=length）。此时记录元数据日志（不落 prompt/生成内容）
+    并抛 ModelOutputError，绝不静默返回空串。
     """
     from openai import OpenAI
     import time as _wall
@@ -459,7 +458,7 @@ def invoke_llm(prompt: str, model_id: Optional[str] = None,
         )
 
     if not answer:
-        # 空输出守卫：只记元数据，绝不落 prompt / 生成内容 / credential（§11.3 / §27.1）
+        # 空输出守卫：只记元数据，绝不落 prompt / 生成内容 / credential
         log.warning(
             "llm_empty_output",
             finish_reason=finish_reason,
@@ -579,7 +578,7 @@ def invoke_llm_stream(prompt: str, model_id: Optional[str] = None,
                 yield LLMStreamChunk(content=_delta.content)
 
         if not answer:
-            # 空输出守卫：只记元数据，绝不落 prompt / 生成内容 / credential（§11.3 / §27.1）
+            # 空输出守卫：只记元数据，绝不落 prompt / 生成内容 / credential
             log.warning(
                 "llm_empty_output",
                 finish_reason=finish_reason,
@@ -651,12 +650,11 @@ def _resolve_local_model_path(model_id: str) -> str:
 def _get_reranker(model_name: str = _DEFAULT_RERANK_MODEL_NAME):
     """Get or create a reranker instance by model name (cached).
 
-    GPU 显存需求约 1500 MiB（fp16 权重 ~1.1 GB + 推理临时空间）。
+    GPU 显存需求约 1500 MiB（fp16 权重 ~1.1 GB + 推理临时空间），
     空闲显存不足时自动降级 CPU。
 
-    ★ 模型常驻：加载后进程生命周期内不卸载（用户指令——共享 embedding-service
-    应常驻模型，避免每次查询重载 20-40s）。共享服务是唯一模型持有者，
-    worker 经 HTTP 调用，不重复加载 → 无资源争夺。
+    ★ 模型常驻：共享服务是唯一模型持有者，worker 经 HTTP 调用，
+    不重复加载 → 无资源争夺。
 
     模型加载：优先从本地 HF/ModelScope 缓存加载（local_files_only=True），
     避免首次调用时联网校验超时。
@@ -679,7 +677,7 @@ def _get_reranker(model_name: str = _DEFAULT_RERANK_MODEL_NAME):
 def invoke_rerank(query: str, documents: List[str], model_name: str = "") -> List[str]:
     """Re-rank documents using BGE Reranker.
 
-    Model resolution order (§11.1):
+    Model resolution order:
     1. model_name parameter (from P-CONFIG rerank_model_id → resolve_model)
     2. DB model_registry (reranker type, is_default=true)
     3. Fallback: BAAI/bge-reranker-v2-m3

@@ -1,7 +1,7 @@
-"""P-TASK：跨系统对账定时任务（阶段三）。
+"""P-TASK：跨系统对账定时任务。
 
-- 结构镜像对账（v14.md §13.7b）：每小时对比本地 mount 表 vs 权限服务
-- 戳记对账（v14.md §14.5c）：strict 库 15min 全量 / 普通库 1h 10% 抽样
+- 结构镜像对账：每小时对比本地 mount 表 vs 权限服务
+- 戳记对账：strict 库 15min 全量 / 普通库 1h 10% 抽样
 
 对账发现缺口 → 自动修复 + 递增 Metric 指标。
 """
@@ -25,14 +25,14 @@ def _dsn() -> str:
 
 
 # ══════════════════════════════════════════════════════════════════
-# 结构镜像对账（v14.md §13.7b）
+# 结构镜像对账
 # ══════════════════════════════════════════════════════════════════
 
 
 def _get_system_credential() -> str:
     """获取对账任务用的系统级 credential。
 
-    对账任务使用专用的系统身份（设计依据 §6.8：对账任务无主体入参），
+    对账任务使用专用的系统身份（无主体入参），
     通过权限服务的 dev-login 端点获取短期 JWT。
     开发模式下使用 dev-login，生产模式切换为 Keycloak client credentials。
 
@@ -72,9 +72,6 @@ async def reconcile_mount_mirror() -> dict:
 
     方向一（我有它无）→ 补调 link，递增 mirror_gap，告警
     方向二（它有我无）→ 补调 unlink 回收孤儿，记录但不告警
-
-    设计依据：docs/RAG系统设计v14.md §13.7b（结构镜像对账）
-              + §6.8（系统主体与内部调用身份——对账任务不需要用户主体身份）
     """
     conn = await asyncpg.connect(_dsn())
     try:
@@ -99,7 +96,7 @@ async def reconcile_mount_mirror() -> dict:
         from src.permission.authz import check, link_resource
         from src.permission.context import RequestContext
 
-        # 对账任务使用系统身份（设计依据 §6.8：对账任务不需要用户主体身份）
+        # 对账任务使用系统身份（不需要用户主体身份）
         sys_ctx = RequestContext(
             request_id="reconcile-mirror",
             user_id="system-reconciler",
@@ -135,7 +132,7 @@ async def reconcile_mount_mirror() -> dict:
 
 
 # ══════════════════════════════════════════════════════════════════
-# 戳记对账（v14.md §14.5c）
+# 戳记对账
 # ══════════════════════════════════════════════════════════════════
 
 async def reconcile_stamps() -> dict:
@@ -231,10 +228,6 @@ async def reconcile_stamps() -> dict:
 
 
 # ══════════════════════════════════════════════════════════════════
-# 定时循环（开发期运行：每分钟一次，而非每小时/15min）
-# ══════════════════════════════════════════════════════════════════
-
-# ══════════════════════════════════════════════════════════════════
 # 陈旧 ingest 任务对账
 # ══════════════════════════════════════════════════════════════════
 
@@ -250,10 +243,9 @@ STALE_QUEUED_SECONDS = 2 * 60 * 60
 async def reconcile_stale_ingest() -> dict:
     """清理卡在 queued/processing 的陈旧 ingest 任务。
 
-    背景：ingest_document_task 的 parse_status 只在开始置 'processing'、
+    ingest_document_task 的 parse_status 只在开始置 'processing'、
     完成置 'completed'/'failed'。worker 崩溃（OOM/被杀）且任务未被 Celery
-    重投、或提交时无 worker 消费，任务会永远卡住（如历史遗留的 8月6日
-    queued 任务）。原先系统无此对账 → 陈旧任务堆积、前端看"一直 processing"。
+    重投、或提交时无 worker 消费，任务会永远卡住。
 
     规则（安全，不误杀活跃任务）：
     - 'processing' 且 updated_at < now-45min → failed(stale_timeout)
@@ -361,10 +353,7 @@ from src.platform.task.celery_app import celery_app
     queue="ingestion_queue",
 )
 def reconcile_mirror_beat(self) -> dict:
-    """Celery beat 任务：每小时执行结构镜像对账。
-
-    生产环境每小时一次，开发环境需要时可加快频率。
-    """
+    """Celery beat 任务：每小时执行结构镜像对账。"""
     try:
         result = asyncio.run(reconcile_mount_mirror())
         if result.get("mirror_gap", 0) > 0:

@@ -7,7 +7,7 @@ BGE-M3 能同时输出 dense_vecs (1024d) 和 lexical_weights (稀疏词权重)�
 设计决策：
 - 模型以模块级全局单例加载（同 registry.py _reranker_cache 模式），
   进程生命周期内所有 Pipeline 实例共享同一份模型权重。
-  避免当前"每次 Pipeline.loads() → 新建 Component → 重新加载 6.4GB 模型"的缺陷。
+  避免"每次 Pipeline.loads() → 新建 Component → 重新加载模型"的缺陷。
 - batch_size=512：控制单次 GPU 峰值分配在 ~80 MiB 以内，消除 OOM。
 - 稠密向量 L2 归一化后写入 Document.embedding，与 Milvus IP(内积) 距离兼容。
 
@@ -40,9 +40,8 @@ def _get_model():
     每次 Pipeline.loads() 创建新的 Component 实例时，
     不会重新加载模型——所有实例共享此单例。
 
-    ★ 模型常驻：加载后进程生命周期内不卸载（用户指令——共享 embedding-service
-    应常驻模型，避免每次查询重载 20-40s）。共享服务是唯一模型持有者，
-    worker 经 HTTP 调用，不重复加载 → 无资源争夺。
+    ★ 模型常驻：共享服务是唯一模型持有者，worker 经 HTTP 调用，
+    不重复加载 → 无资源争夺。
     """
     global _model
 
@@ -103,9 +102,8 @@ class BGE_M3DocumentEmbedder:
     def __init__(self, batch_size: int = 512):
         """batch_size: 每次 HTTP 请求携带的文本数量（客户端主动合批）。
 
-        512：恢复 2026-08-16 之前的值。64 会把单个文档拆成更多请求，放大
-        每次请求的固定开销；服务端本地 BGE-M3 一次前向（稠密+稀疏）在 512
-        批次下吞吐最高。
+        64 会把单个文档拆成更多请求，放大每次请求的固定开销；
+        服务端本地 BGE-M3 一次前向（稠密+稀疏）在 512 批次下吞吐最高。
         """
         self.batch_size = batch_size
 
@@ -117,7 +115,7 @@ class BGE_M3DocumentEmbedder:
         langfuse_obs = _start_embedding_observation(len(texts), self.batch_size)
 
         # 先初始化，避免 embed_documents 抛异常时 finally 引用未绑定变量
-        # （UnboundLocalError 会掩盖真实错误——摄入任务因此无限重试、status 卡 processing）。
+        # （UnboundLocalError 会掩盖真实错误）。
         all_dense: List[Any] = []
         all_sparse: List[Dict[str, float]] = []
         _start = _time.time()

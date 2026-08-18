@@ -2,14 +2,11 @@
 
 提供 detect_and_decode() 函数，按优先级尝试多种编码检测策略：
 1. BOM 检测 (UTF-8-SIG / UTF-16-LE / UTF-16-BE)
-2. UTF-8 严格解码（覆盖 80%+ 现代文件）
+2. UTF-8 严格解码
 3. chardet 高置信度检测 (>= 0.8)
-4. GB18030 回退（中国国标，兼容 GBK/GB2312，覆盖几乎所有中文文本）
+4. GB18030 回退（中国国标，兼容 GBK/GB2312）
 5. chardet 低置信度检测
 6. UTF-8 with replace（最后兜底）
-
-设计依据：常见中文文本文件编码分布 —
-  UTF-8 ~80%, GBK/GB18030 ~15%, UTF-16/Big5/其他 ~5%
 """
 
 from __future__ import annotations

@@ -47,8 +47,8 @@ def embed_documents(
     """文档批量嵌入（通过 HTTP 服务或本地模型）。
 
     batch_size=512：一次 HTTP 请求携带一批文本，服务端本地 BGE-M3 一次前向
-    产出稠密+稀疏。恢复到 2026-08-16 之前的值——更小的 batch_size 会把单个
-    文档拆成更多请求，放大每次请求的固定开销（HTTP + 模型前向）。
+    产出稠密+稀疏。更小的 batch_size 会把单个文档拆成更多请求，放大每次
+    请求的固定开销（HTTP + 模型前向）。
 
     Returns:
         (embeddings, sparse_embeddings, elapsed_ms)

@@ -91,8 +91,6 @@ def build_context_from_claims(
     这是 JWT claims → RequestContext 的共享逻辑，
     供 middleware.py（jose 库验证）和 context.py:build_context()（PyJWT 库验证）共同使用。
     确保 principals 展开逻辑在系统内只有一处权威实现。
-
-    设计依据：docs/RAG系统设计v14.md §1.2 — RequestContext 字段契约。
     """
     user_id = claims.get("sub", "")
     tenant_id = claims.get("tenant", claims.get("tenant_id", ""))
@@ -117,7 +115,7 @@ def build_context_from_claims(
     for r in roles:
         principals.append(f"role:{r}")
 
-    # request_id = OTel trace_id（§1.2/§4：request_id=trace_id，作 Envelope environment.request_id，
+    # request_id = OTel trace_id（作 Envelope environment.request_id，
     # 使 Grafana/Langfuse/audit_log/权限服务审计四方日志可互跳）。无活跃 span 时回退 jti（向后兼容）。
     try:
         from src.platform.obs.tracing import get_current_trace_id

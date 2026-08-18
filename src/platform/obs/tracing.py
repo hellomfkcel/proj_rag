@@ -21,16 +21,15 @@ def init_tracing(service_name: str = "rag-v14"):
     """初始化 OpenTelemetry Tracing + 日志导出。
 
     在应用启动时调用一次（API/worker/embedding-service 统一入口）。
-    将 span 导出到 OTel Collector（HTTP 4318），并启用 OTLP 日志导出（→Loki，
-    §8.2 应用→Collector→Tempo/Loki/Prometheus 单一出口）。
+    将 span 导出到 OTel Collector（HTTP 4318），并启用 OTLP 日志导出（→Loki）。
     ★ 同时启用 Haystack Pipeline 的 OpenTelemetry tracing。
     """
     global _tracing_initialized
     if _tracing_initialized:
         return
 
-    # P-OBS 拥有结构化日志（§8.0）：opt out Haystack 的 structlog 接管，
-    # 须在 import haystack 之前设置，否则 Haystack 会覆盖 structlog 配置。
+    # opt out Haystack 的 structlog 接管，须在 import haystack 之前设置，
+    # 否则 Haystack 会覆盖 structlog 配置。
     os.environ["HAYSTACK_LOGGING_IGNORE_STRUCTLOG"] = "true"
     # 统一各进程（API/worker/embedding）的 structlog JSON + trace_id 配置
     from src.platform.obs.logger import setup_logging
@@ -50,7 +49,7 @@ def init_tracing(service_name: str = "rag-v14"):
     provider = TracerProvider(resource=resource)
 
     otlp_exporter = OTLPSpanExporter(endpoint=f"{otel_endpoint}/v1/traces")
-    # 控制批次大小和发送频率，避免单批 span 过多导致 gRPC 消息体超限（默认 4 MiB → 已调至 32 MiB）
+    # 控制批次大小和发送频率，避免单批 span 过多导致消息体超限
     # max_export_batch_size: 单批最多 256 个 span
     # schedule_delay_millis: 每 2 秒发送一次（更频繁 = 更小批次）
     # max_queue_size: 内存中最多缓冲 2048 个 span
@@ -96,15 +95,14 @@ def init_tracing(service_name: str = "rag-v14"):
 
 
 def init_log_export(service_name: str = "rag-v14") -> None:
-    """P-OBS：OTLP 日志导出（§8.2 应用→Collector→Loki）。
+    """P-OBS：OTLP 日志导出（应用→Collector→Loki）。
 
     structlog 渲染后的 JSON（含 32hex trace_id）经 stdlib LoggingHandler
     作为 OTLP LogRecord 导出；trace_id/span_id 由 OTel 上下文自动附加到
     OTLP 记录结构。Loki 日志行内带 32hex trace_id，供 Grafana derivedField
-    提取并跳转 Tempo（§4 四方互跳）。
+    提取并跳转 Tempo。
 
-    fail-open（§8.5 可观测 fail-open）：Collector 不可达不阻塞业务，
-    由 BatchLogRecordProcessor 缓冲/丢弃。
+    fail-open：Collector 不可达不阻塞业务，由 BatchLogRecordProcessor 缓冲/丢弃。
     """
     global _log_export_initialized
     if _log_export_initialized:

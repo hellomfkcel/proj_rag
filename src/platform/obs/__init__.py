@@ -3,7 +3,7 @@
 提供：
 - structlog 结构化日志
 - OTel tracing（SDK 初始化 + FastAPI 自动埋点 + Haystack Pipeline span）
-- Metric 门面（阶段三接入）
+- Metric 门面
 """
 
 from .logger import get_logger

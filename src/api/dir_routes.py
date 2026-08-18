@@ -1,4 +1,4 @@
-"""Phase 4 目录 + 批量操作 + 文档重命名 REST 端点。"""
+"""目录 + 批量操作 + 文档重命名 REST 端点。"""
 
 import uuid
 from datetime import datetime, timezone
@@ -144,7 +144,6 @@ async def rename_document(doc_id: str, body: DocRenameRequest, ctx: RequestConte
 
 
 # ── 批量删除 ──
-# 已移除：此端点与 kb_routes.py:batch_delete_documents 重复，且缺少权限检查。
 # 批量删除统一使用 kb_routes.py 的 POST /documents/batch/delete（含逐资源 doc:unmount 校验）。
 
 # ── 批量解析 ──

@@ -4,9 +4,6 @@
 - RRFRanker(k=60)        —— 服务端 Reciprocal Rank Fusion
 - WeightedRanker(w1, w2) —— 服务端加权融合（norm_score=True 内部归一）
 
-替代旧的两路独立 client.search + 应用层 DocumentJoiner/WeightedFusionJoiner，
-把 2 次 gRPC 往返收敛为 1 次（Milvus 2.4+ 原生能力）。
-
 权限纪律：
 - 本组件**不含任何权限逻辑**。`filters` 是外部（B-RETRIEVE 入口 compile_filter）
   注入的 Milvus 表达式字符串，两个 AnnSearchRequest 共享同一 filters —— 保证

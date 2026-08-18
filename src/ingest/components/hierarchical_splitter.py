@@ -6,8 +6,6 @@ Creates parent-child relationships between chunks at different granularities:
 
 Each child chunk has a `parent_id` referencing its parent.
 This enables the HierarchicalMerger on the query side to reconstruct context.
-
-Design: v14.md §12.2, §14.4 — hierarchical strategy
 """
 
 import uuid
@@ -53,7 +51,7 @@ class HierarchicalDocumentSplitter:
         log = get_logger(__name__)
 
         # documents 输出包含两级 chunk（父块 + 子块），父块与子块同批嵌入/写库/盖戳
-        # （§14.5.5：父块不因"是上层"而被跳过，与子块同源同新）。
+        # （父块不因"是上层"而被跳过，与子块同源同新）。
         all_chunks: List[Document] = []   # → documents（level 0 + level 1）
         all_parents: List[Document] = []  # → parent_documents（仅 level 0，向后兼容）
 
@@ -73,7 +71,7 @@ class HierarchicalDocumentSplitter:
 
             for p_idx, p_text in enumerate(parent_texts):
                 parent_id = f"{doc.id or uuid.uuid4().hex[:12]}_p{p_idx}"
-                # 显式确定性 id（§14.3：(mount_id, chunk_index) 唯一约束）。
+                # 显式确定性 id（(mount_id, chunk_index) 唯一约束）。
                 # Haystack 默认 id 是内容哈希——重叠切分产生的相同内容子块会撞主键。
                 parent = Document(content=p_text, meta=dict(doc.meta), id=parent_id)
                 parent.meta["level"] = 0

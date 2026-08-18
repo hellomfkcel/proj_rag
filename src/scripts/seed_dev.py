@@ -101,7 +101,7 @@ async def main():
             print(f"  Model registry: {len(models)} models seeded")
 
         # ── 6. 合成角色 Prompt 模板（幂等，模板与 chat/service.py 内联默认一致） ──
-        # 合成逻辑经 resolve_prompt(prompt_id, "v1") 读取，DB 有数据即生效（§16.3）；
+        # 合成逻辑经 resolve_prompt(prompt_id, "v1") 读取，DB 有数据即生效；
         # 前端设置页可直接编辑这些模板，编辑后立即影响生成行为。
         prompt_templates = [
             ("compact", "你是企业知识库助手，请基于以下文档内容回答问题。\n"

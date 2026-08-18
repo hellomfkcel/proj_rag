@@ -67,20 +67,9 @@ def _run_async(coro):
 class CerbosClient:
     """Cerbos PDP HTTP 客户端 + 资源镜像维护。
 
-    .. deprecated:: v14.1
-        此客户端在 AUTHZ_SERVICE_MODE=local 时使用，直接调用 Cerbos PDP。
-        自 v14.1 起推荐使用 PermissionServiceClient（remote 模式），
-        通过外部权限服务后端统一管理 ACL/角色绑定/限制。
-        
-        **移除计划**：v14.3 将移除 local 模式支持。
-        当前状态：deprecated（v14.1），保留向后兼容但默认使用 remote 模式。
-        
-        迁移步骤：
-        1. 部署权限服务后端（permission-service）
-        2. 设置 .env: AUTHZ_SERVICE_MODE=remote
-        3. 设置 .env: AUTHZ_SERVICE_URL=http://<host>:18080
-        4. 重启 RAG 服务
-        5. 验证 prefilter/check/filter 端点正常工作
+    已弃用：在 AUTHZ_SERVICE_MODE=local 时使用，直接调用 Cerbos PDP。
+    推荐使用 PermissionServiceClient（remote 模式），通过外部权限服务后端
+    统一管理 ACL/角色绑定/限制。
     """
 
     def __init__(self, base_url: str = "", timeout_ms: int = 15000):
@@ -104,7 +93,7 @@ class CerbosClient:
     def _build_principal(self, ctx) -> Dict[str, Any]:
         """从 RequestContext 构建 Cerbos principal。
 
-        不再发送 user:unknown —— 使用真实用户身份和 granted_actions。
+        使用真实用户身份和 granted_actions，而非 user:unknown。
         """
         granted = self._resolve_granted_actions(ctx)
         return {
@@ -119,8 +108,7 @@ class CerbosClient:
     def _resolve_granted_actions(self, ctx) -> Dict[str, List[str]]:
         """解析用户在各 KB 上的授权动作。
 
-        开发模式：从 resource_registry 反查用户拥有的 KB，授予 full access。
-        生产模式：应从 JWT claims 或外部授权映射服务获取。
+        从 resource_registry 反查用户拥有的 KB / document，授予对应动作。
         """
         # 开发模式：resource_registry 反查
         async def _query():
@@ -154,7 +142,7 @@ class CerbosClient:
             return {}
 
     # ══════════════════════════════════════════════════════════════
-    # 决策面 — 全部经 Cerbos HTTP API（REAL）
+    # 决策面 — 全部经 Cerbos HTTP API
     # ══════════════════════════════════════════════════════════════
 
     def check(
@@ -340,7 +328,7 @@ class CerbosClient:
         return allowed
 
     # ══════════════════════════════════════════════════════════════
-    # 投影面 — 基于本系统 DB + Cerbos 决策（REAL）
+    # 投影面 — 基于本系统 DB + Cerbos 决策
     # ══════════════════════════════════════════════════════════════
 
     def get_prefilter(
@@ -404,7 +392,6 @@ class CerbosClient:
     ) -> Dict[str, Any]:
         """取戳记 → 基于本地资源镜像计算（等价于外部权限服务 /v1/visibility）。
 
-        设计依据 §6.8、§14.5：
         - /v1/visibility 是投影面端点，返回预计算的戳记列表，不做逐次判定
         - 该端点无主体入参（x-client-id: ingest），结构上不需要用户身份
         - 本系统本地维护资源镜像（resource_registry + mount_registry），
@@ -468,7 +455,7 @@ class CerbosClient:
             log.warning("visibility_compute_failed",
                        doc_id=doc_id, kb_id=kb_id, error=str(exc))
             # 计算失败时返回开放戳记（fail-safe：宁可多展示也不错杀）
-            # 戳记对账（§14.5c）会检测并修正漂移
+            # 戳记对账会检测并修正漂移
             return {"allow_stamps": ["user:*"], "deny_stamps": [],
                     "version": int(time.time() // 60), "unmounted": False}
 
@@ -478,11 +465,11 @@ class CerbosClient:
     ) -> str:
         """铸造异步任务 ctx_token（HMAC-SHA256 签名，带过期时间）。
 
-        开发环境不依赖外部 IdP——用 HMAC 自签名。
+        用 HMAC 自签名。
         ttl_s 上限 600 秒。过期即任务失败，不续期、不降级。
         """
         ttl_s = min(ttl_s, 600)
-        # ctx_token 签名密钥：优先使用独立 secret，否则回退 Redis URL hash（开发兼容）
+        # ctx_token 签名密钥：优先使用独立 secret，否则回退 Redis URL hash
         _cfg = Settings()
         secret = _cfg.ctx_token_secret.encode() if _cfg.ctx_token_secret else _cfg.redis_url.encode()
 
@@ -499,7 +486,7 @@ class CerbosClient:
         return f"ctx.{payload_b64}.{sig}"
 
     # ══════════════════════════════════════════════════════════════
-    # 管理面 — 维护 resource_registry / mount_registry 表（REAL）
+    # 管理面 — 维护 resource_registry / mount_registry 表
     # ══════════════════════════════════════════════════════════════
 
     def register_resource(
@@ -512,7 +499,6 @@ class CerbosClient:
 
         Raises:
             RuntimeError: 注册失败时抛出，调用方必须回滚本地事务。
-            设计依据 §13.7："调用失败即回滚本地业务事务"。
         name: 资源名称（KB 名称 / 文档文件名），供管理台展示。
         """
 
@@ -547,7 +533,6 @@ class CerbosClient:
 
         Raises:
             RuntimeError: 挂载失败时抛出，调用方必须回滚本地事务。
-            设计依据 §13.7："调用失败即回滚本地业务事务"。
         """
 
         async def _do():
@@ -626,7 +611,6 @@ class CerbosClient:
 
         Raises:
             RuntimeError: 退役失败时抛出，调用方必须回滚本地事务。
-            设计依据 §13.7："调用失败即回滚本地业务事务"。
         """
 
         async def _do():
@@ -682,8 +666,6 @@ def get_client() -> Union[CerbosClient, "PermissionServiceClient"]:
     根据 AUTHZ_SERVICE_MODE 返回对应的客户端：
     - local: CerbosClient（直接调 Cerbos PDP + 本地 DB 镜像）
     - remote: PermissionServiceClient（调外部权限服务后端 REST API）
-
-    设计依据：docs/外部系统设计.md §7.3 cerbos_client.py 改造示意。
     """
     from src.config import Settings
 
@@ -701,7 +683,7 @@ def get_client() -> Union[CerbosClient, "PermissionServiceClient"]:
             )
         return _remote_client
 
-    # local mode: use CerbosClient (deprecated since v14.1)
+    # local mode: use CerbosClient (deprecated)
     global _client
     if _client is None:
         import logging

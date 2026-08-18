@@ -1,4 +1,4 @@
-"""Phase 2 KB + 文档管理 REST 端点。"""
+"""KB + 文档管理 REST 端点。"""
 
 import asyncio
 import uuid
@@ -38,13 +38,13 @@ class ChunkingConfigResponse(BaseModel):
     haystack_strategy: str
     split_length: int | None = None
     split_overlap: int | None = None
-    advanced_params: dict | None = None  # P1-7: 策略专属高级参数
+    advanced_params: dict | None = None  # 策略专属高级参数
 
 class ChunkingConfigPatch(BaseModel):
     haystack_strategy: Optional[str] = None
     split_length: Optional[int] = None
     split_overlap: Optional[int] = None
-    advanced_params: Optional[dict] = None  # P1-7: e.g. {breakpoint_threshold_percentile:50, buffer_size:1}
+    advanced_params: Optional[dict] = None  # e.g. {breakpoint_threshold_percentile:50, buffer_size:1}
 
 class KBResponse(BaseModel):
     id: str
@@ -99,12 +99,12 @@ async def create_kb(body: KBCreateRequest, ctx: RequestContext = Depends(get_req
     kb_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc)
 
-    # ★ 权限检查：创建 KB 需要 kb:manage（§2.3 准入矩阵，§6.3 check）
+    # ★ 权限检查：创建 KB 需要 kb:manage
     decision = check(ctx, "kb:manage", "kb", kb_id)
     if decision.get("decision") != "allow":
         raise HTTPException(403, "auth:forbidden — kb:manage required to create a knowledge base")
 
-    # ★ 先调权限服务 register_resource（§13.7）
+    # ★ 先调权限服务 register_resource
     # 失败即中止：不写 knowledge_bases 表
     try:
         register_resource(ctx, "kb", kb_id, f"user:{ctx.user_id}", name=body.name)
@@ -147,7 +147,7 @@ async def create_kb(body: KBCreateRequest, ctx: RequestContext = Depends(get_req
 
 @router.patch("/knowledge-bases/{kb_id}", response_model=KBResponse)
 async def update_kb(kb_id: str, body: KBUpdateRequest, ctx: RequestContext = Depends(get_request_context)):
-    """重命名知识库。需要 kb:manage 权限（§2.3 准入矩阵）。"""
+    """重命名知识库。需要 kb:manage 权限。"""
     from src.permission.authz import check
 
     # ★ 权限检查
@@ -179,7 +179,7 @@ async def update_kb(kb_id: str, body: KBUpdateRequest, ctx: RequestContext = Dep
 
 @router.delete("/knowledge-bases/{kb_id}")
 async def delete_kb(kb_id: str, ctx: RequestContext = Depends(get_request_context)):
-    """删除知识库。需要 kb:manage 权限（§2.3 准入矩阵 + §13.4.3）。"""
+    """删除知识库。需要 kb:manage 权限。"""
     from src.permission.authz import check, retire_resource
 
     # ★ 权限检查
@@ -197,7 +197,7 @@ async def delete_kb(kb_id: str, ctx: RequestContext = Depends(get_request_contex
         if mounts > 0:
             raise HTTPException(409, detail=f"知识库中还有 {mounts} 个文档挂载，请先移除所有文档后再删除")
 
-        # ★ 先调权限服务 retire_resource（§13.7）
+        # ★ 先调权限服务 retire_resource
         try:
             retire_resource(ctx, "kb", kb_id)
         except RuntimeError:
@@ -274,7 +274,7 @@ async def update_chunking_config(kb_id: str, body: ChunkingConfigPatch, ctx: Req
 
         new_length = body.split_length if body.split_length is not None else (current["split_length"] if current else 256)
         new_overlap = body.split_overlap if body.split_overlap is not None else (current["split_overlap"] if current else 32)
-        # P1-7: Merge advanced_params — body overrides current values
+        # Merge advanced_params — body overrides current values
         import json as _json
         curr_adv = current["advanced_params"] if current else {}
         if isinstance(curr_adv, str):
@@ -411,10 +411,10 @@ async def get_document(doc_id: str, ctx: RequestContext = Depends(get_request_co
 
 # ── Document Chunks ──
 #
-# Milvus 读路径的健壮性约定（实测依据）：
-# - Milvus 重启后 collection 回到 recovering/NotLoad，此时 load_collection 会
-#   阻塞等待加载完成，实测即使带 timeout 也可能远超该值，绝不能放进请求路径。
-# - 纯 query 在 Milvus 不可用 / 恢复中都会快速失败（毫秒级），可安全放在请求路径。
+# Milvus 读路径的健壮性约定：
+# - Milvus 重启后 collection 回到 recovering/NotLoad，load_collection 会
+#   阻塞等待加载完成，绝不能放进请求路径。
+# - 纯 query 在 Milvus 不可用 / 恢复中都会快速失败，可安全放在请求路径。
 # - 因此：请求路径只做有界 query；加载集合放到后台线程（单飞、节流）触发。
 
 import time as _time
@@ -502,8 +502,8 @@ async def get_document_chunks(doc_id: str, ctx: RequestContext = Depends(get_req
     # 的 chunk 时才返回空列表（正确的空态）。
     #
     # 阻塞规避：Milvus 调用放到线程池 + asyncio.wait_for 硬超时。向量库是不可靠
-    # 依赖，任何状态下都不能让请求阻塞事件循环（实测 load_collection 即使在
-    # 带 timeout 时也可能远超其值）。
+    # 依赖，任何状态下都不能让请求阻塞事件循环（load_collection 即使在带 timeout
+    # 时也可能超时）。
     s = Settings()
     loop = asyncio.get_running_loop()
     try:
@@ -761,7 +761,7 @@ async def trigger_parse(doc_id: str, ctx: RequestContext = Depends(get_request_c
     return TriggerParseResponse(mount_id=mount_id, parse_status="queued")
 
 
-# ── PATCH /documents/{doc_id} — 重命名文档（P1 #19） ─────────────
+# ── PATCH /documents/{doc_id} — 重命名文档 ───────────────────────
 
 class DocRenameRequest(BaseModel):
     filename: str
@@ -812,7 +812,7 @@ async def rename_document(doc_id: str, body: DocRenameRequest,
         await conn2.close()
 
 
-# ── POST /documents/batch/delete — 批量删除（P1 #27） ─────────────
+# ── POST /documents/batch/delete — 批量删除 ─────────────────────
 
 class BatchDeleteRequest(BaseModel):
     items: List[dict]  # [{"document_id": "...", "kb_id": "..."}]
@@ -825,7 +825,7 @@ async def batch_delete_documents(body: BatchDeleteRequest,
                                  ctx: RequestContext = Depends(get_request_context)):
     """批量删除文档——逐资源独立权限校验、独立执行、独立审计。
 
-    设计依据 §13.4.4：某文档权限不足则该文档单独失败，不影响其余。
+    某文档权限不足则该文档单独失败，不影响其余。
     """
     from src.permission.authz import check
     from src.doc.service import delete_document_from_kb
@@ -857,7 +857,7 @@ async def batch_delete_documents(body: BatchDeleteRequest,
     return BatchDeleteResponse(results=results)
 
 
-# ── POST /documents/batch/parse — 批量解析（P1 #28） ──────────────
+# ── POST /documents/batch/parse — 批量解析 ──────────────────────
 
 class BatchParseRequest(BaseModel):
     mount_ids: List[str]  # list of mount_id to trigger parsing
@@ -870,7 +870,7 @@ async def batch_trigger_parse(body: BatchParseRequest,
                               ctx: RequestContext = Depends(get_request_context)):
     """批量触发文档解析——逐 mount 独立权限校验、独立执行。
 
-    设计依据 §13.4.2：按需而非自动；§13.4.4：某文档失败不影响其余。
+    某文档失败不影响其余。
     """
     from src.permission.authz import check
 

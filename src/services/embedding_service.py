@@ -3,10 +3,7 @@
 独立 FastAPI 服务，单进程持有 BGE-M3 + BGE-Reranker 全局单例，
 所有 worker 通过 HTTP API 共享同一模型实例。
 
-设计依据：
-- RAG系统设计v14.md §11 P-MODEL 模块边界
-- Layer 1: GPU 显存检查 + CPU 降级 (_get_device)
-- ★ 模型常驻：加载后进程生命周期内不卸载（共享服务是唯一模型持有者，
+★ 模型常驻：加载后进程生命周期内不卸载（共享服务是唯一模型持有者，
   worker 经 HTTP 调用，不重复加载 → 无资源争夺）
 
 启动方式:
@@ -139,8 +136,7 @@ app = FastAPI(
 )
 
 # FastAPI 自动埋点：为 /v1/embed、/v1/embed_query、/v1/rerank 创建 OTel server span，
-# 使 embedding_service 的请求链路在 Tempo 可见（此前仅 worker 侧 Haystack span）。
-# 2026-08-16 补齐，满足可观测完整性要求（P-OBS 单一出口）。
+# 使 embedding_service 的请求链路在 Tempo 可见。
 try:
     from src.platform.obs.tracing import instrument_fastapi
     instrument_fastapi(app)
@@ -162,7 +158,7 @@ def _normalize_vector(vec: List[float]) -> List[float]:
 
 # ── 模型访问串行化锁 ──
 # BGE-M3 / BGE-Reranker 的 encode()/compute_score() 是同步、非线程安全的。
-# 处理器改为 def（FastAPI 线程池执行，避免阻塞事件循环）后，并发请求会进入
+# 处理器为 def（FastAPI 线程池执行，避免阻塞事件循环），并发请求会进入
 # 多线程；锁保证同一时刻只有一个模型前向传播，杜绝线程竞争。
 #
 # 锁粒度：BGE-M3（稠密回退 + 稀疏）与 BGE-Reranker 是**不同模型实例**，
@@ -175,15 +171,15 @@ _RERANK_MODEL_LOCK = threading.Lock()
 
 
 # ══════════════════════════════════════════════════════════════════
-# Infinity Embedding Server Adapter（2026-08-16 引入，2026-08-18 收敛用途）
+# Infinity Embedding Server Adapter（仅纯稠密场景）
 # ══════════════════════════════════════════════════════════════════
 # Infinity 只用于"纯稠密"场景：
 #   - /v1/embed、/v1/embed_query 在 need_sparse=false 时走 Infinity（单前向）；
 #   - /v1/rerank 走 Infinity（Cohere 兼容，无稀疏参与）。
 # 默认（need_sparse=true）走本地 BGE-M3 一次前向同时产出稠密+稀疏。
 # 原因：Infinity 的 /embeddings 只回稠密，不能产出 BGE-M3 稀疏 lexical weights，
-# 稠密拆给 Infinity + 稀疏留本地 = 两个模型实例常驻 + 两次 GPU 前向，单卡
-# 12GB 上净收益为负（实测 ingest 嵌入慢 8-10 倍）。纯稠密场景才值得用 Infinity。
+# 稠密拆给 Infinity + 稀疏留本地 = 两个模型实例常驻 + 两次 GPU 前向，净收益为负。
+# 纯稠密场景才值得用 Infinity。
 # Infinity 不可达时 fail-open 回退本地 BGE-M3 / 本地 reranker。
 
 INFINITY_URL = os.getenv("INFINITY_URL", "http://localhost:19501").rstrip("/")
@@ -273,11 +269,9 @@ def _infinity_rerank(query: str, documents: List[str], top_k: int,
 def embed(request: EmbedRequest):
     """文档批量嵌入——默认本地 BGE-M3 一次前向产出稠密 + 稀疏。
 
-    2026-08-18 修复：撤销 2026-08-16 的 Infinity 双模型架构。BGE-M3 一次前向
-    即产出稠密+稀疏（lexical weights 来自同一隐藏态），拆成 Infinity(稠密)+
-    本地(稀疏) 是两次 GPU 前向 + 双模型常驻，单卡 12GB 上净收益为负（实测
-    ingest 嵌入慢 8-10 倍）。纯稠密场景（need_sparse=false，无需稀疏）才走
-    Infinity——单模型单前向，且稀疏本就不需要。
+    BGE-M3 一次前向即产出稠密+稀疏（lexical weights 来自同一隐藏态），
+    拆成 Infinity(稠密)+本地(稀疏) 是两次 GPU 前向 + 双模型常驻，净收益为负。
+    纯稠密场景（need_sparse=false，无需稀疏）才走 Infinity——单模型单前向。
 
     用 def 而非 async def：内部 model.encode() 是同步 CPU/GPU 阻塞调用，
     async def 会阻塞事件循环导致整个服务（含 /healthz）不可响应。
@@ -396,9 +390,8 @@ def embed_query(request: EmbedQueryRequest):
 def rerank(request: RerankRequest):
     """文档重排序——BGE-Reranker-v2-m3。
 
-    2026-08-16 Adapter：优先经 Infinity（Cohere /rerank 兼容）；
-    Infinity 不可达时 fail-open 回退本地 reranker。
-    供检索 Pipeline (BGEReranker) 使用。
+    优先经 Infinity（Cohere /rerank 兼容）；Infinity 不可达时 fail-open
+    回退本地 reranker。供检索 Pipeline (BGEReranker) 使用。
     def（线程池）原因同 /v1/embed：避免同步模型调用阻塞事件循环。
     """
     t0 = time.time()
@@ -449,7 +442,6 @@ async def healthz():
 async def readyz():
     """就绪检查——推理能力可用。
 
-    Adapter 架构（2026-08-16）：稠密 + rerank 由 Infinity 承担，稀疏由本地 BGE-M3。
     就绪条件 = Infinity 可达 或 本地 BGE-M3 已加载（任一可用即可服务）。
     """
     try:

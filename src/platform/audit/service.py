@@ -1,7 +1,7 @@
 """P-AUDIT：审计模块。
 
-阶段二：emit_audit_event 落 audit_logs 表（asyncpg INSERT）。
-阶段三：emit_audit_event_txn 升级为同事务。
+emit_audit_event 落 audit_logs 表（asyncpg INSERT）。
+emit_audit_event_txn 支持传入业务事务连接，同事务写入。
 """
 
 import json
@@ -28,9 +28,9 @@ def emit_audit_event(
     allowed: bool = True,
     **payload,
 ) -> None:
-    """审计事件写入 audit_logs 表（阶段二：落库，fail-open）。
+    """审计事件写入 audit_logs 表（落库，fail-open）。
 
-    普通事件：写库失败记录 WARNING 日志，不抛异常。
+    写库失败记录 WARNING 日志，不抛异常。
     """
 
     async def _insert():
@@ -69,10 +69,10 @@ def emit_audit_event_txn(
     resource_type: str = "",
     resource_id: str = "",
     allowed: bool = True,
-    conn_for_txn=None,  # 阶段三：传入业务事务连接，在同一事务上写审计
+    conn_for_txn=None,  # 传入业务事务连接，在同一事务上写审计
     **payload,
 ) -> None:
-    """高风险同步写入（阶段三：与业务事务同库同事务提交）。
+    """高风险同步写入（与业务事务同库同事务提交）。
 
     高风险事件清单：DOC_DOWNLOAD / DOC_DELETE / AUTHZ_WRITE。
 
@@ -83,7 +83,7 @@ def emit_audit_event_txn(
     import json, asyncio
 
     if conn_for_txn is not None:
-        # 阶段三路径：与业务事务同连接
+        # 与业务事务同连接
         async def _insert_on_shared_conn():
             await conn_for_txn.execute(
                 """INSERT INTO audit_logs

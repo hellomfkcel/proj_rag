@@ -1,6 +1,5 @@
 """P-AUTHC：权限判定门面。
 
-阶段三升级：
 - 所有权限调用包裹熔断器（circuitbreaker 库）
 - 三态映射 + 四类 fail-closed + Metric 埋点
 - 熔断打开时所有调用直接返回 auth:authz_unavailable
@@ -28,7 +27,7 @@ Decision = Dict[str, Any]
 
 
 # ══════════════════════════════════════════════════════════════════
-# 熔断器（v14.md §25.3）
+# 熔断器
 # ══════════════════════════════════════════════════════════════════
 
 # 熔断器由 _with_circuit_breaker 装饰器按函数独立创建（每函数一个 CB 实例）。
@@ -39,7 +38,7 @@ Decision = Dict[str, Any]
 def _with_circuit_breaker(func):
     """装饰器：包裹熔断器 + Metric 埋点。
 
-    熔断打开时返回 E503 auth:authz_unavailable（v14.md §25.3 拒答型降级）。
+    熔断打开时返回 E503 auth:authz_unavailable（拒答型降级）。
     """
 
     @functools.wraps(func)
@@ -82,8 +81,8 @@ def _with_circuit_breaker(func):
 def _circuit_open_fallback(func_name: str):
     """熔断打开时的 fallback：根据函数签名返回正确类型的 deny 值。
 
-    设计依据 §25.3：熔断打开 → 拒答型降级，所有调用直接拒绝。
-    P0-3 修复：新增 get_visibility + 生命周期端口 (register/link/unlink/retire) 的熔断回退。
+    熔断打开 → 拒答型降级，所有调用直接拒绝。
+    覆盖 get_visibility + 生命周期端口 (register/link/unlink/retire) 的熔断回退。
     """
     endpoint = _endpoint_for(func_name)
     logger.error("authz_circuit_open", endpoint=endpoint,
@@ -97,10 +96,10 @@ def _circuit_open_fallback(func_name: str):
         return {}  # check_batch → 空 dict（所有资源判否）
     if func_name == "mint_ctx_token":
         raise RuntimeError("authz_unavailable: circuit breaker open — cannot mint ctx_token")
-    # P0-3: 盖戳管道 — 熔断打开时抛异常，防止写入空戳记（§14.5.3 纪律1）
+    # 盖戳管道 — 熔断打开时抛异常，防止写入空戳记
     if func_name == "get_visibility":
         raise RuntimeError("authz_unavailable: circuit breaker open — stamping cannot proceed")
-    # P0-3: 生命周期端口 — 熔断打开时抛异常，触发 B-DOC 本地事务回滚（§13.7）
+    # 生命周期端口 — 熔断打开时抛异常，触发 B-DOC 本地事务回滚
     if func_name in ("register_resource", "link_resource", "unlink_resource", "retire_resource"):
         raise RuntimeError(
             f"authz_unavailable: circuit breaker open — {func_name} cannot proceed. "
@@ -224,7 +223,7 @@ def filter_items(
     ctx: RequestContext,
     items: List[Tuple[str, str]],
 ) -> List[Tuple[str, str]]:
-    """检索后逐条复核 → /v1/filter（阶段二接入，阶段三加固熔断）。
+    """检索后逐条复核 → /v1/filter。
 
     单批 ≤200；传输失败/超时 → 整批 deny；永久禁止缓存。
     熔断打开 → 返回空列表（整批 deny）。
@@ -248,13 +247,10 @@ def filter_items(
 # get_prefilter（检索前编译，带熔断）
 # ══════════════════════════════════════════════════════════════════
 
-# P1-2 修订（2026-08-16 联调发现）：原实现用模块级 contextvars 做"请求内缓存"，
-# 但 Celery worker 复用线程执行任务时，contextvars 在线程内跨任务泄漏 ——
-# 同一用户在"无权限查询 → 被授予权限"的 30s 内再次查询，会命中陈旧 prefilter，
-# 造成授权已生效但检索仍被拒。违反 §6.6 "不跨请求缓存"（陈旧即越权窗口）。
-# 而 get_prefilter 在每次检索任务中只调用一次，缓存本无同请求复用价值，
-# 故直接移除缓存：每次任务都向权限服务取最新 prefilter（权限服务侧自带
-# 60s 服务端缓存与限流，无性能问题）。
+# 不做请求内缓存：Celery worker 复用线程时 contextvars 会跨任务泄漏，
+# 缓存会造成授权已生效但检索仍命中陈旧 prefilter 的越权窗口。
+# get_prefilter 每次检索任务只调用一次，直接向权限服务取最新状态
+#（权限服务侧自带 60s 服务端缓存与限流）。
 
 
 @_with_circuit_breaker
@@ -262,7 +258,7 @@ def get_prefilter(ctx: RequestContext) -> Dict[str, Any]:
     """检索前编译过滤条件 → /v1/prefilter。
 
     返回 PreFilter 或 SUSPENDED 哨兵（suspended: true）。
-    不缓存 —— 每次检索任务都取最新授权状态（§6.6 不跨请求缓存）。
+    不缓存 —— 每次检索任务都取最新授权状态。
     失败 → 不允许回退到无过滤查询，必须整体拒答。
 
     所有模式（开发/生产）统一走权限服务判定。
@@ -283,7 +279,7 @@ def get_prefilter(ctx: RequestContext) -> Dict[str, Any]:
 # ══════════════════════════════════════════════════════════════════
 
 def compile_filter(pf: Dict[str, Any], ctx: RequestContext, kb_id: str) -> Dict[str, Any]:
-    """六条件 → milvus-haystack filter dict（§15.1, §6A.3）。
+    """六条件 → milvus-haystack filter dict。
 
     条件 1: tenant_id 隔离
     条件 2: kb_id 隔离
@@ -449,8 +445,6 @@ def get_visibility(tenant: str, doc_id: str, kb_id: str) -> Dict[str, Any]:
 
 def require_permission(action: str, resource_type: str, resource_id: str = ""):
     """路由级权限门禁 — FastAPI Depends 工厂。
-
-    设计依据：docs/RAG系统设计v14.md §6.4。
 
     Args:
         action: 动词（如 kb:write）

@@ -55,23 +55,20 @@ def retrieve_and_generate_task(
 
     在 retrieval-worker 中执行。检索 + 生成核心逻辑在 _run_retrieve_generate
     （与评测任务共用，保证线上/评测完全一致）；本任务额外负责副作用：
-    Redis Pub/Sub 流式回传 → 写 conversation_turn → 审计。
+    Redis Streams 流式回传 → 写 conversation_turn → 审计。
 
     流式回传契约（经 on_event 事件汇）：retrieved（检索完成即发，含来源）
     → thinking（推理增量，可配开关）→ token（答案增量/完整答案）→ done。
     compact 模式逐 token 流式；refine/tree/no_synthesis 结束一次性补发。
 
-    阶段一：resolved_query = user_question（直接透传）
-    阶段二：LLM 多轮改写（thinking=disabled，快速）
-    阶段三：检索 + 流式生成（thinking=enabled，保质量）
-    P1-5: 支持 Per-Query 检索参数覆盖（retrieval_mode/fusion_method/strict/top_k）
+    查询改写（_rewrite_query）：多轮改写；支持 Per-Query 检索参数覆盖
+    （retrieval_mode/fusion_method/strict/top_k）。
     """
     s = Settings()
 
     # ── Redis Streams 流式回传：先开连接，检索/生成过程中经 sink 逐事件 XADD ──
-    # 2026-08-16 优化：Pub/Sub（fire-and-forget，订阅方未连接则丢事件）→ Redis Streams
-    # （持久化，SSE 后到可补读，配合 DB 兜底消除丢失）。
-    # 方向四：retrieved（来源）在检索完成后立即发布；真流式：compact 逐 token 发布；
+    # Streams 持久化，SSE 后到可补读（配合 DB 兜底消除丢失）。
+    # retrieved（来源）在检索完成后立即发布；compact 逐 token 发布；
     # 非流式路径（refine/tree/no_synthesis/失败 fallback）结束后补发完整答案。
     import redis as _redis
     rr = _redis.from_url(s.redis_url)
@@ -156,7 +153,7 @@ def retrieve_and_generate_task(
         retrieved_chunks=r["source_meta"],
     )
 
-    # 5. 审计（request_id=ctx.request_id=OTel trace_id，供 audit↔Tempo 四方互跳，§7.3）
+    # 5. 审计（request_id=ctx.request_id=OTel trace_id，供 audit↔Tempo 四方互跳）
     from src.platform.audit.service import emit_audit_event
     try:
         emit_audit_event(
@@ -220,7 +217,7 @@ def _run_retrieve_generate(
     from src.permission.context import build_context, resolve_ctx_token
     from src.platform.config.service import resolve_retrieval_config
 
-    # resolved_query（阶段二：LLM 多轮改写；阶段一为透传）
+    # resolved_query：LLM 多轮改写（首轮透传）
     resolved_query = _rewrite_query(conversation_id, user_question, turn_index)
 
     # 1. 从 ctx_token 提取 credential 后重建 RequestContext（生产路径）
@@ -230,13 +227,13 @@ def _run_retrieve_generate(
     else:
         raise ValueError("ctx_token is required for retrieval tasks")
 
-    # 2. 解析检索配置（P1-6/7: retrieval_mode + rerank_model_id 动态读取）
+    # 2. 解析检索配置（retrieval_mode + rerank_model_id 动态读取）
     #    四层级联：传 conversation_id 使 conversation 级配置（若存在）参与覆盖
     kb_id = kb_ids[0] if kb_ids else ""
     retrieval_cfg = resolve_retrieval_config(
         kb_id=kb_id, tenant_id=tenant_id, conversation_id=conversation_id)
 
-    # P1-5: Per-Query 检索参数覆盖 — turn 级覆盖优先于 DB 配置
+    # Per-Query 检索参数覆盖 — turn 级覆盖优先于 DB 配置
     effective_mode = retrieval_mode or retrieval_cfg.retrieval_mode
     effective_fusion = fusion_method or retrieval_cfg.fusion_method
     effective_strict = strict if strict is not None else retrieval_cfg.strict
@@ -267,7 +264,7 @@ def _run_retrieve_generate(
     chunk_ids = ret.get("chunk_ids", [])
 
     # 来源元数据（doc_name + 截断内容，供前端来源标注与历史持久化）。
-    # 在检索后立即构建：流式路径需在 LLM 生成前把 retrieved 事件回传前端（方向四）。
+    # 在检索后立即构建：流式路径需在 LLM 生成前把 retrieved 事件回传前端。
     doc_names = _resolve_doc_names(documents)
     source_meta = []
     for i, doc in enumerate(documents):
@@ -282,7 +279,7 @@ def _run_retrieve_generate(
             "content": content[:500],
         })
 
-    # 方向四：检索完成即回传 retrieved，用户在 LLM 生成期间即可看到来源
+    # 检索完成即回传 retrieved，用户在 LLM 生成期间即可看到来源
     if on_event is not None:
         on_event("retrieved", {"chunk_ids": chunk_ids, "chunks": source_meta})
 
@@ -299,7 +296,7 @@ def _run_retrieve_generate(
                 mode = effective_synthesis
             else:
                 mode = resolve_synthesis_mode(doc_count, documents)
-            # Per-query overrides（P1-5：合成参数同样支持单查询覆盖）
+            # Per-query overrides（合成参数同样支持单查询覆盖）
             _batch = refine_batch_size or retrieval_cfg.refine_batch_size
             _max_chars = doc_preview_max_chars or retrieval_cfg.doc_preview_max_chars
             _tree_batch = tree_summarize_batch_size or retrieval_cfg.tree_summarize_batch_size
@@ -338,10 +335,10 @@ def _run_retrieve_generate(
                     answer = _synthesize_compact(user_question, documents,
                         max_chars=retrieval_cfg.doc_preview_max_chars)
 
-            # 阶段三：引用校验
+            # 引用校验
             if chunk_ids:
                 answer = validate_citations(answer, set(chunk_ids))
-            # 阶段四：复述守卫
+            # 复述守卫
             if documents:
                 answer = check_verbatim_ratio(answer, documents)
         except Exception as exc:
@@ -447,10 +444,10 @@ def evaluate_query_task(
 
 
 def _rewrite_query(conversation_id: str, user_question: str, turn_index: int) -> str:
-    """LLM 多轮查询改写（阶段二）。
+    """LLM 多轮查询改写。
 
     取最近 3 轮对话历史，将指代/省略/追问等转换为独立可检索的完整问题。
-    阶段一为透传（resolved_query == user_question）。
+    首轮（turn_index<=1）透传，resolved_query == user_question。
     """
     if turn_index <= 1:
         return user_question  # 首轮无需改写
@@ -512,13 +509,13 @@ def _rewrite_query(conversation_id: str, user_question: str, turn_index: int) ->
 
 
 # ══════════════════════════════════════════════════════════════════
-# validate_citations（阶段三：生成层引用校验）
+# validate_citations（生成层引用校验）
 # ══════════════════════════════════════════════════════════════════
 
 def validate_citations(answer: str, candidate_chunk_ids: set) -> str:
     """验证 LLM 生成答案中引用的 chunk_id 是否在候选集内。
 
-    阶段三：确定性 chunk_id 校验——不在候选集的引用 = 幻觉引用，应予过滤。
+    确定性 chunk_id 校验——不在候选集的引用 = 幻觉引用，应予过滤。
     不作语义判断（不验证"chunk 是否真的支撑回答"）。
 
     返回过滤后的 answer，幻觉引用被替换为"[引用已移除]"标记。
@@ -527,7 +524,6 @@ def validate_citations(answer: str, candidate_chunk_ids: set) -> str:
         return answer
 
     # 简单策略：若答案中出现不在候选集中的 UUID，标记为幻觉
-    # 生产环境可升级为 chunk_id 引用正则提取
     cleaned = answer
     found_any = False
 
@@ -546,14 +542,13 @@ def validate_citations(answer: str, candidate_chunk_ids: set) -> str:
 
 
 # ══════════════════════════════════════════════════════════════════
-# check_verbatim_ratio（阶段四：生成层复述守卫 v14.md §16.4）
+# check_verbatim_ratio（生成层复述守卫）
 # ══════════════════════════════════════════════════════════════════
 
 def check_verbatim_ratio(answer: str, documents: list, threshold: float = 0.60) -> str:
     """检测 LLM 是否逐字复述超过 chunk 原文 60%。
 
-    设计依据 §16.4：LLM 不得逐字复述超出必要长度的原文，
-    否则 doc:retrieve 权限被当作 doc:download 用。
+    LLM 不得逐字复述超出必要长度的原文，否则 doc:retrieve 权限被当作 doc:download 用。
 
     对每个候选 chunk 查找最长公共子串，若比率超阈值：
     将超限片段替换为 "[原文引用 #N]" 标记，而非仅追加提示。
@@ -585,7 +580,7 @@ def check_verbatim_ratio(answer: str, documents: list, threshold: float = 0.60) 
                        answer_len=len(cleaned),
                        lcs_start=lcs_start)
 
-            # 截断策略 §16.4：将逐字复述的超限文本替换为引用标记
+            # 截断策略：将逐字复述的超限文本替换为引用标记
             # 保留原文本前 100 字符作为摘要，其余替换为引用提示
             snippet = lcs_text[:100]
             replacement = (
@@ -637,7 +632,7 @@ _longest_common_substring_length = lambda a, b: len(_longest_common_substring(a,
 
 
 # ══════════════════════════════════════════════════════════════════
-# Synthesis modes（v14.md §16）
+# Synthesis modes
 # 使用 resolve_prompt() + build_prompt()（等价于 Haystack PromptBuilder）
 # + invoke_llm()（等价于 Haystack LiteLLMGenerator，经 P-MODEL 防腐）
 # ══════════════════════════════════════════════════════════════════
@@ -766,8 +761,6 @@ def _synthesize_refine(question: str, documents: list, batch_size: int = 3,
     - 初始答案：一次调用处理 batch_size 个 chunk
     - 后续每批 batch_size 个 chunk 一次 refine 调用
     - 答案超过 max_answer_len 字符时自动压缩防 prompt 膨胀
-
-    11 chunks → 1 init(3) + 3 batch(3,3,2) = 4 calls（原 11 calls → 7min 降至 ~3min）
     """
     from src.platform.model.registry import invoke_llm, resolve_prompt, build_prompt
 
@@ -873,8 +866,8 @@ def _synthesize_tree_summarize(question: str, documents: list, batch_size: int =
 def _synthesize_no_synthesis(question: str, documents: list) -> str:
     """No Synthesis 模式：不调 LLM，直接返回检索到的文档原文。
 
-    设计文档 §16.3："只要证据"场景——仅返回 Document 列表文本，
-    不消耗 LLM token。适用于敏感 KB 不允许 LLM 接触文档内容的场景。
+    "只要证据"场景——仅返回 Document 列表文本，不消耗 LLM token。
+    适用于敏感 KB 不允许 LLM 接触文档内容的场景。
     """
     if not documents:
         return "未找到足够信息。"
@@ -905,7 +898,7 @@ def _save_turn(
         conn = await asyncpg.connect(
             s.database_url.replace("postgresql+asyncpg://", "postgresql://")
         )
-        # 当前 OTel span（worker 的 CONSUMER span）= 查询链路 trace_id，落库供前端/审计关联 Tempo（§16.1）
+        # 当前 OTel span（worker 的 CONSUMER span）= 查询链路 trace_id，落库供前端/审计关联 Tempo
         from src.platform.obs.tracing import get_current_trace_id
         trace_id = get_current_trace_id()
         try:

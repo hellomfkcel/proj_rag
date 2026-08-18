@@ -18,7 +18,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 # ═══════════════════════════════════════════════════════════════════════
-# 阶段 0：P-OBS 最早初始化（模块级别）
+# P-OBS 最早初始化（模块级别）
 # ═══════════════════════════════════════════════════════════════════════
 
 # 结构化日志（最早，确保后续所有 import 的日志被 structlog 处理）
@@ -31,7 +31,7 @@ from src.platform.obs.tracing import init_tracing
 init_tracing(_os.getenv("OTEL_SERVICE_NAME", "rag-v14"))
 
 # ═══════════════════════════════════════════════════════════════════════
-# 阶段 1：FastAPI 应用创建 + OTel 自动插桩（必须在 lifespan 之外）
+# FastAPI 应用创建 + OTel 自动插桩（必须在 lifespan 之外）
 # ═══════════════════════════════════════════════════════════════════════
 
 
@@ -93,7 +93,7 @@ app = FastAPI(
 app.add_middleware(OtelTraceCaptureMiddleware)
 
 # ═══════════════════════════════════════════════════════════════════════
-# 阶段 2：业务中间件 + 路由注册
+# 业务中间件 + 路由注册
 # ═══════════════════════════════════════════════════════════════════════
 
 # CORS 先加（处理 preflight），Auth 后加

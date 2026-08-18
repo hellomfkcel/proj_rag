@@ -1,9 +1,7 @@
 """P-AUTHC：外部权限服务 HTTP 客户端。
 
-设计依据：docs/外部系统设计.md §2.6 与 RAG 系统当前实现的对照 + 实施方案步骤 8.3。
-
 当 AUTHZ_SERVICE_MODE=remote 时，CerbosClient 被此客户端替代。
-所有方法将调用从直接调 Cerbos PDP 改为调外部权限服务后端 REST API。
+所有方法通过外部权限服务后端 REST API 完成调用。
 
 接口签名与 CerbosClient 保持一致（防腐层的价值）。
 """
@@ -118,7 +116,6 @@ class PermissionServiceClient:
     ) -> Dict[str, Dict[str, Any]]:
         """批量判定 → POST /v1/check/batch，单次往返。
 
-        设计依据：J-14 联合契约测试 — 批量端点对 interactive-backend 开放。
         单批 ≤200 条，逐资源独立决策。整批传输失败 → 整批判否（fail-closed）。
         """
         if not resources:
@@ -294,8 +291,7 @@ class PermissionServiceClient:
                 error=str(exc)[:200],
             )
             # fail-closed：绝不返回空戳记
-            # 设计依据：§14.5.3 盖戳管道六条纪律第1条 —
-            #   "失败/超时 → 不写任何东西、不 ack"
+            # "失败/超时 → 不写任何东西、不 ack"
             # 返回空 allow_stamps=[] 会导致全部 chunk 对任何人不可见，
             # 比暂时不更新的危害大得多。调用方须捕获此异常并进入重试路径。
             raise RuntimeError(
@@ -337,7 +333,6 @@ class PermissionServiceClient:
                 error=str(exc)[:200],
             )
             # fail-closed：权限服务不可达时抛出异常，不派发任务
-            # 设计依据：§6A.1 mint_ctx_token 失败行为 — "任务不派发，返回503"
             raise RuntimeError(
                 f"Permission service unreachable — cannot mint ctx_token "
                 f"(audience={audience}, request_id={request_id})"
@@ -362,7 +357,7 @@ class PermissionServiceClient:
 
         tenant_id 来自 ctx.tenant_id，由调用方 (P-AUTHC authz.py) 传入。
         name: 资源名称（KB 名称 / 文档文件名），供管理台展示。
-        project_id: 所属项目 ID，必填（权限服务 v2 新增要求）。
+        project_id: 所属项目 ID，必填。
         """
         body: dict = {
             "resource_type": resource_type,
@@ -410,7 +405,7 @@ class PermissionServiceClient:
         """建立挂载 → POST /v1/resources/link。
 
         tenant_id 来自 ctx.tenant_id，由调用方传入。
-        project_id: 所属项目 ID，必填（权限服务 v2 新增要求）。
+        project_id: 所属项目 ID，必填。
         """
         try:
             resp = self._client.post(
@@ -454,7 +449,7 @@ class PermissionServiceClient:
         """解除挂载 → POST /v1/resources/unlink。
 
         tenant_id 来自 ctx.tenant_id，由调用方传入。
-        project_id: 所属项目 ID，必填（权限服务 v2 新增要求）。
+        project_id: 所属项目 ID，必填。
         """
         try:
             resp = self._client.post(
@@ -498,7 +493,7 @@ class PermissionServiceClient:
         """退役资源 → POST /v1/resources/retire。
 
         tenant_id 来自 ctx.tenant_id，由调用方传入。
-        project_id: 所属项目 ID，必填（权限服务 v2 新增要求）。
+        project_id: 所属项目 ID，必填。
         """
         try:
             resp = self._client.post(
@@ -539,12 +534,10 @@ class PermissionServiceClient:
     ) -> Dict[str, str]:
         """构造请求头 — 含 X-Client-Id + W3C Trace Context + 可选 X-Api-Key。
 
-        设计依据：docs/RAG系统设计v14.md §18.2 — AUTHZ_CLIENT_CREDENTIAL
-        用于 RAG 系统与权限服务之间的机器对机器认证。
+        AUTHZ_CLIENT_CREDENTIAL 用于 RAG 系统与权限服务之间的机器对机器认证。
 
-        ★ 2026-08-06: 新增 W3C traceparent 头，使权限服务的 OTel span
-        与 RAG 系统的 span 关联在同一个 trace 中（跨系统分布式追踪）。
-        格式：00-{trace_id}-{span_id}-01
+        W3C traceparent 头使权限服务的 OTel span 与 RAG 系统的 span 关联在同一个 trace 中
+        （跨系统分布式追踪）。格式：00-{trace_id}-{span_id}-01
         """
         headers = {
             "Content-Type": "application/json",

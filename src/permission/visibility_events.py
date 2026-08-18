@@ -1,14 +1,12 @@
 """P-AUTHC：VisibilityChanged 事件订阅与转发。
 
-§6A.8 要求 P-AUTHC 订阅权限服务事件流并转交 B-INGEST 处理。
-
 实现方案：
 1. **Redis Pub/Sub 路径**（remote 模式）：订阅权限服务发布的 "visibility_changed" 频道，
    接收外部权限变更事件（管理台 ACL 授予/回收/角色绑定/封禁等操作）。
 2. **主动触发路径**（local 模式）：生命周期操作完成后立即触发关联文档的盖戳刷新。
 3. **轮询兜底路径**（local/remote 均可）：定期扫描本地表，补齐未覆盖的变更。
 
-三条路径汇聚到同一个 stamp_channel_task，遵守 §14.5.2 的"三个触发源同一实现"原则。
+三条路径汇聚到同一个 stamp_channel_task（三个触发源同一实现）。
 """
 
 import asyncio
@@ -41,7 +39,7 @@ def on_visibility_changed(doc_id: str, kb_id: str, tenant_id: str,
     调用时机：register/link/unlink/retire 完成后。
     不阻塞调用方——stamp_channel_task 异步执行。
 
-    这是 VisibilityChanged 事件的主动触发路径（§14.5.2 触发源 2）。
+    这是 VisibilityChanged 事件的主动触发路径。
     """
     try:
         from src.ingest.service import stamp_channel_task
@@ -64,7 +62,7 @@ def on_kb_visibility_changed(kb_id: str, tenant_id: str,
                               change_type: str = "kb_grant") -> None:
     """KB 粒度权限变更 → 展开为该 KB 下全部文档的盖戳任务。
 
-    设计文档 §14.5.4：权限服务以 KB 粒度聚合发出 VisibilityChanged，
+    权限服务以 KB 粒度聚合发出 VisibilityChanged，
     本系统收到后必须自己展开为逐文档的 stamp_channel_task。
 
     分页查询 document_kb_mount，每 (doc_id, kb_id) 提交一个盖戳任务。
@@ -196,10 +194,10 @@ async def poll_visibility_changes(last_check_time: float = 0.0) -> Dict:
 def run_visibility_event_loop(poll_interval_s: int = 30):
     """启动 VisibilityChanged 事件轮询循环。
 
-    生产环境建议 30s 间隔（权限变更非高频操作，30s 延迟可接受）。
+    默认 30s 间隔（权限变更非高频操作，30s 延迟可接受）。
     可与 reconciliation loop 合并为同一常驻进程。
 
-    设计意图：此循环是 §14.5c 对账的补充——对账是事后修复，此循环是准实时检测。
+    此循环是对账的补充——对账是事后修复，此循环是准实时检测。
     """
     log.info("visibility_event_loop_started",
              poll_interval_s=poll_interval_s,
@@ -245,7 +243,6 @@ def _process_visibility_event(event: dict) -> None:
     """处理单条 VisibilityChanged 事件。
 
     按 KB 粒度展开为逐文档的盖戳任务。
-    设计依据：docs/外部系统设计.md §5.1 VisibilityChanged 事件 + 实施方案步骤 8.2。
     """
     event_id = event.get("event_id", "")
     if _is_duplicate(event_id):
@@ -297,8 +294,6 @@ def _process_visibility_event(event: dict) -> None:
 
 def subscribe_visibility_events(stop_on_idle_sec: int = 0) -> None:
     """订阅权限服务 VisibilityChanged 事件流（Redis Pub/Sub）。
-
-    设计依据：docs/外部系统设计.md §5.1 事件系统 + 实施方案步骤 8.2。
 
     Args:
         stop_on_idle_sec: 如果 > 0，在 N 秒无消息后自动退出（用于测试）。
@@ -373,7 +368,7 @@ def subscribe_visibility_events(stop_on_idle_sec: int = 0) -> None:
 
 
 # ══════════════════════════════════════════════════════════════════
-# P1-1: Redis Stream 消费者（持久化 + 断点续消费）
+# Redis Stream 消费者（持久化 + 断点续消费）
 # ══════════════════════════════════════════════════════════════════
 
 _STREAM_KEY = "visibility_changed_stream"
@@ -467,15 +462,12 @@ def _recover_pending(r: "redis.Redis") -> int:
 def subscribe_visibility_stream(stop_event: threading.Event | None = None) -> None:
     """消费 Redis Stream 中的 VisibilityChanged 事件（可靠消费）。
 
-    P1-1 新增：与 Pub/Sub 订阅并行运行。
+    与 Pub/Sub 订阅并行运行。
     使用 Redis Stream + Consumer Group 实现：
     - 消息持久化（Stream 保留最近 ~100,000 条）
     - 断点续消费（XREADGROUP + ACK）
     - 崩溃恢复（启动时先处理 PEL 中的未确认消息）
     - 消费者负载均衡（同一 group 内的多个消费者自动分配消息）
-
-    设计依据：docs/外部系统设计.md §5.2 事件可靠性保证
-              + docs/RAG系统设计v14.md §6A.8 事件订阅规格。
 
     Args:
         stop_event: 用于优雅关闭的 threading.Event。
@@ -554,13 +546,13 @@ def subscribe_visibility_stream(stop_event: threading.Event | None = None) -> No
 def run_visibility_event_subscriber(poll_fallback_interval_s: int = 60) -> None:
     """启动 VisibilityChanged 事件订阅 + Stream 消费 + 轮询兜底。
 
-    P1-1 升级（三通道）：
+    三通道：
     - remote 模式：Redis Pub/Sub（实时）+ Redis Stream（持久化/可靠消费）+ 轮询兜底
     - local 模式：仅轮询兜底
 
     此函数可作为常驻进程入口，替代 run_visibility_event_loop。
 
-    P2-6 加固：注册 SIGTERM/SIGINT 处理器，优雅关闭 Redis 连接。
+    注册 SIGTERM/SIGINT 处理器，优雅关闭 Redis 连接。
     """
     import signal
 

@@ -1,11 +1,11 @@
 """P-OBS：结构化日志配置。
 
 基于 structlog，输出 JSON 格式到 stdout，并注入 OTel trace_id/span_id。
-日志经 OTLP 导出（init_tracing → init_log_export）送达 Loki（§8.2 单一出口）。
+日志经 OTLP 导出（init_tracing → init_log_export）送达 Loki。
 
-P-OBS 拥有结构化日志（§8.0）：通过 HAYSTACK_LOGGING_IGNORE_STRUCTLOG opt out
-Haystack 对 structlog 的接管，使本配置（JSON + trace_id 32hex）保持权威，
-从而保证 Loki 日志行内包含与 Tempo 一致的 32 位十六进制 trace_id（§4 四方互跳）。
+通过 HAYSTACK_LOGGING_IGNORE_STRUCTLOG opt out Haystack 对 structlog 的接管，
+使本配置（JSON + trace_id 32hex）保持权威，从而保证 Loki 日志行内包含
+与 Tempo 一致的 32 位十六进制 trace_id。
 """
 
 import logging
@@ -18,9 +18,9 @@ def _add_trace_context(logger, method_name, event_dict):
     """为每条日志注入 OTel trace_id/span_id（32hex / 16hex）。
 
     使日志行内直接携带与 Tempo 一致的 32 位十六进制 trace_id，
-    供 Grafana Loki derivedField 正则提取并跳转 Tempo（§4 四方日志可互跳）。
+    供 Grafana Loki derivedField 正则提取并跳转 Tempo。
     fail-open：无活跃 span / OTel 未初始化时不加字段、不抛异常。
-    仅注入 ID，绝不携带 credential 等敏感上下文（§1.4/§27.1）。
+    仅注入 ID，绝不携带 credential 等敏感上下文。
     """
     try:
         from opentelemetry import trace as _otel_trace

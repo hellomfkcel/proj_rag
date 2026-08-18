@@ -32,7 +32,6 @@ REQUIRED_EXPLICIT_FIELDS: Set[str] = {
 def build_schema() -> CollectionSchema:
     """构建 rag_documents 集合 schema（显式字段 + 动态字段兜底）。
 
-    字段契约：docs/RAG系统设计v14.md §14.5.1 chunk payload。
     过滤热字段显式化后可建 INVERTED 标量索引加速 L1 prefilter；
     enable_dynamic_field=True 保留其余 meta（如 content）动态写入。
     """
@@ -49,7 +48,7 @@ def build_schema() -> CollectionSchema:
         FieldSchema(name="deny_stamps", dtype=DataType.JSON),
         FieldSchema(name="vis_version", dtype=DataType.INT64),
         FieldSchema(name="retrievable", dtype=DataType.BOOL),
-        # ── 层级分块元数据（§12.2/§14.3，merger 排序/开窗用）──
+        # ── 层级分块元数据（merger 排序/开窗用）──
         FieldSchema(name="parent_id", dtype=DataType.VARCHAR, max_length=256),
         FieldSchema(name="level", dtype=DataType.INT64),
         FieldSchema(name="chunk_index", dtype=DataType.INT64),
@@ -115,7 +114,7 @@ def ensure_indices(client: MilvusClient, collection_name: str) -> None:
         except Exception as exc:
             # Milvus 2.4 对 JSON 字段（allow_stamps/deny_stamps）不支持 INVERTED 索引。
             # 索引缺失只影响过滤性能，不影响权限语义 —— 失败不阻断 ingest。
-            # 已实测确认（2026-08-16），日志仅告警一次避免刷屏。
+            # 日志仅告警一次避免刷屏。
             if field_name not in _WARNED_INDEX_FIELDS:
                 _WARNED_INDEX_FIELDS.add(field_name)
                 import logging
@@ -154,9 +153,6 @@ class MilvusDocumentStoreWriter:
     def _ensure_collection(self, client: MilvusClient) -> None:
         """确保 collection 存在，不存在则创建（含完整 schema）。
 
-        设计依据：docs/RAG系统设计v14.md §14.3 摄入 Pipeline 结构
-                  + §14.5.1 chunk payload 字段契约
-
         使用显式 CollectionSchema + FieldSchema 创建 collection，
         原因：MilvusClient.create_collection() 简捷 API 存在两个问题——
         (a) auto_id=False 默认创建 INT64 主键（不是 VARCHAR），
@@ -165,8 +161,8 @@ class MilvusDocumentStoreWriter:
             不创建 sparse_vector 字段，导致 MilvusException:
             fieldName(sparse_vector) not found。
 
-        schema 演进：filter 热字段（tenant_id/kb_id/allow_stamps/...）已显式化
-        以便建立 INVERTED 标量索引。旧动态-only 集合缺少这些显式字段 → 自动重建。
+        filter 热字段（tenant_id/kb_id/allow_stamps/...）显式化以便建立
+        INVERTED 标量索引；缺少这些显式字段的旧集合判定为不兼容 → 自动重建。
 
         数据安全底线：drop_collection 会清空集合全部 chunk（数据永久丢失）。
         因此只有在确认集合为空时才允许自动重建；集合里有数据时 schema 不兼容

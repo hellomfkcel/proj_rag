@@ -141,13 +141,13 @@ def upload_document(
 
 
 # ══════════════════════════════════════════════════════════════
-# Query — dispatch-only（§9.1 / §17 红线：API 禁止调 pipeline.run()）
+# Query — dispatch-only（API 禁止调 pipeline.run()）
 # ══════════════════════════════════════════════════════════════
 
 def _build_trace_ui_url(trace_id: str) -> str:
     """构造 Grafana Tempo 按 trace_id 查看的深链（无 trace 时返回空串）。
 
-    §8.2 单一查询出口 = Grafana；tempo 数据源 UID 由 Settings 配置（观测栈 provision 固定 tempo-uid）。
+    tempo 数据源 UID 由 Settings 配置（观测栈 provision 固定 tempo-uid）。
     """
     if not trace_id:
         return ""
@@ -184,8 +184,7 @@ async def query(request: QueryRequest, ctx: RequestContext = Depends(get_request
     实际检索/rerank/LLM 全在 retrieval-worker 内通过 retrieve_and_generate_task 执行。
     结果通过 SSE (GET /conversations/{id}/stream) 流式推送到前端。
 
-    设计依据：§17 "API 进程禁止调 pipeline.run()——计算密集与 I/O 密集抢占同组进程"。
-    响应携带 trace_id / trace_ui_url（§2.1 request_id=trace_id，供前端跳 Tempo 查看链路）。
+    响应携带 trace_id / trace_ui_url（request_id=trace_id，供前端跳 Tempo 查看链路）。
     """
     import uuid as _uuid
     from src.config import Settings
@@ -211,7 +210,7 @@ async def query(request: QueryRequest, ctx: RequestContext = Depends(get_request
     # 3. 铸造 ctx_token（替代 JWT 原文传给 worker，TTL ≤600s）
     ctx_token = mint_ctx_token(ctx, audience="retrieval-worker", ttl_s=600)
 
-    # 4. 从 P-CONFIG 解析 Pipeline 名称（§12.1 haystack_pipeline_name）
+    # 4. 从 P-CONFIG 解析 Pipeline 名称（haystack_pipeline_name）
     #    检索时实际 Pipeline 由 retrieve() 按 retrieval_mode + fusion_mode 动态选择；
     #    haystack_pipeline_name 作为 KB 粒度的默认/后备 Pipeline 标识，
     #    写入 conversation_turn 参数快照供审计追溯。
@@ -297,7 +296,7 @@ async def query_stream(conversation_id: str, turn_index: int = 1):
         pass
 
     async def _stream():
-        # ── Step 1: 检查 DB 中是否已有答案（worker prior-art race condition）──
+        # ── Step 1: 检查 DB 中是否已有答案（处理 worker 与 SSE 的竞态）──
         import asyncpg as _apg
         try:
             db_conn = await _apg.connect(
@@ -313,11 +312,9 @@ async def query_stream(conversation_id: str, turn_index: int = 1):
             if row and row["answer"]:
                 # Worker 已完成——直接返回持久化结果，无需等待 Redis
                 chunk_ids = row["retrieved_chunk_ids"] or []
-                # ★ 前端来源展示必须数据驱动：retrieved_chunks(jsonb) 存的就是
-                #   source_meta 格式（chunk_id/doc_name/content，见 chat/service.py
-                #   _save_turn 落库的 retrieved_chunks=r["source_meta"]）。
-                #   原样回放，不再硬编码 []——否则前端只能拿到空内容显示"原文未加载"。
-                #   asyncpg 对 jsonb 列返回原始 JSON 字符串，需解析为列表。
+                # retrieved_chunks(jsonb) 存的是 source_meta 格式
+                # （chunk_id/doc_name/content，见 chat/service.py _save_turn 落库）。
+                # 原样回放；asyncpg 对 jsonb 列返回原始 JSON 字符串，需解析为列表。
                 chunks = row["retrieved_chunks"] or []
                 if isinstance(chunks, str):
                     try:
@@ -331,7 +328,7 @@ async def query_stream(conversation_id: str, turn_index: int = 1):
         except Exception:
             pass  # DB 不可达时回退到 Redis Pub/Sub
 
-        # ── Step 2: 订阅 Redis Streams 等待 worker 发布（Pub/Sub→Streams 迁移）──
+        # ── Step 2: 订阅 Redis Streams 等待 worker 发布 ──
         # 竞态处理：先 XREAD 从 0 排空已发布事件（覆盖 worker 已完成/先于 SSE 的竞态），
         # 再阻塞读新增；收到 done/error 或空闲超时后 DEL 流键清理。
         r = redis.from_url(s.redis_url)

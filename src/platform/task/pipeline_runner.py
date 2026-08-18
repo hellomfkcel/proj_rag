@@ -202,7 +202,7 @@ def run_pipeline_task(
 
     result = run_pipeline_sync(pipeline_name, pipeline_input)
 
-    # 流式回传（仅检索类任务使用）— 2026-08-16 Pub/Sub→Streams 迁移
+    # 流式回传（仅检索类任务使用，经 Redis Streams）
     task_id = task_metadata.get("task_id", "")
     if task_id:
         import redis

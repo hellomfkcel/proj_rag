@@ -1,6 +1,5 @@
 """BGE-M3 统一文本嵌入器（查询侧）——单次 encode 产出稠密 + 稀疏向量。
 
-替代 OllamaTextEmbedder + BGE_M3SparseTextEmbedder 两个组件。
 复用摄入侧 bge_m3_embedder._get_model() 全局单例，同一进程内不重复加载模型。
 
 可观测性：
@@ -18,10 +17,6 @@ from haystack import component
 @component
 class BGE_M3TextEmbedder:
     """BGE-M3 查询嵌入器——稠密 + 稀疏一次产出。
-
-    Pipeline YAML 中同时替代：
-      - OllamaTextEmbedder (text_embedder)
-      - BGE_M3SparseTextEmbedder (sparse_embedder)
 
     输出接口:
       - embedding: List[float]      1024d L2 归一化稠密向量

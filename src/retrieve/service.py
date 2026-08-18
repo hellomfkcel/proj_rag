@@ -87,7 +87,7 @@ def retrieve(
     # ── Select pipeline template based on retrieval_mode + fusion_method ──
     # 三模式统一为"无 embedder"管线，embeddings 作为 run 输入传入（P0-2）。
     # §15.1: 每个 KB 使用独立的 6-condition filter（不同 kb_id），共享同一管线模板。
-    # P1-1: k_prime = k × 1.5 过采样真正下推为 Milvus limit（不再硬编码 20）。
+    # P1-1: k_prime = k × 1.5 过采样下推为 Milvus limit。
     k_prime = int(top_k * oversample_factor)
 
     if retrieval_mode == "vector_only":

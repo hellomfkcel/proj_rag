@@ -1,7 +1,6 @@
 """OllamaTextEmbedder — Haystack @component for query side.
 
 Delegates to P-MODEL invoke_embedding (Ollama qwen3-embedding:0.6b).
-Replaces FastembedTextEmbedder which doesn't support our model.
 """
 
 from typing import Any, Dict, List

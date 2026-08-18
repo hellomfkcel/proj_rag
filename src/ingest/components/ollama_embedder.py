@@ -1,7 +1,6 @@
 """OllamaDocumentEmbedder — Haystack @component for ingestion side.
 
 Delegates to P-MODEL invoke_embedding (Ollama qwen3-embedding:0.6b).
-Replaces FastembedDocumentEmbedder which doesn't support our model.
 """
 
 from dataclasses import replace
