@@ -1,5 +1,6 @@
 """Phase 2 KB + 文档管理 REST 端点。"""
 
+import asyncio
 import uuid
 from datetime import datetime, timezone
 from typing import Optional, List
@@ -409,6 +410,71 @@ async def get_document(doc_id: str, ctx: RequestContext = Depends(get_request_co
 
 
 # ── Document Chunks ──
+#
+# Milvus 读路径的健壮性约定（实测依据）：
+# - Milvus 重启后 collection 回到 recovering/NotLoad，此时 load_collection 会
+#   阻塞等待加载完成，实测即使带 timeout 也可能远超该值，绝不能放进请求路径。
+# - 纯 query 在 Milvus 不可用 / 恢复中都会快速失败（毫秒级），可安全放在请求路径。
+# - 因此：请求路径只做有界 query；加载集合放到后台线程（单飞、节流）触发。
+
+import time as _time
+import structlog
+
+_chunk_logger = structlog.get_logger(__name__)
+
+# 集合加载节流：两次后台加载尝试的最小间隔。加载是幂等操作，恢复窗口内
+# 节流触发即可，避免每个失败请求都再开一个线程。
+_COLLECTION_LOAD_RETRY_S = 30.0
+_last_collection_load_at: float = 0.0
+
+# 单次 chunk 读取的硬超时：超过即按"向量库暂不可用"处理，绝不让请求无限等待。
+_CHUNK_READ_TIMEOUT_S = 8.0
+
+
+def _sync_load_chunks_collection(uri: str) -> None:
+    """在后台线程中把 rag_documents 加载到内存（阻塞，但不占事件循环）。"""
+    from pymilvus import MilvusClient
+
+    try:
+        client = MilvusClient(uri=uri, timeout=5)
+        client.load_collection("rag_documents", timeout=60)
+    except Exception:
+        # 后台加载失败可接受：下一次查询失败时会再次触发。
+        _chunk_logger.warning("document_chunks_background_load_failed", error="see stderr")
+
+
+def _query_chunks_sync(s: Settings, doc_id: str) -> list[dict]:
+    """同步查询文档 chunk（在线程池中执行，配合 wait_for 有界等待）。
+
+    只做 query、不做 load_collection：load 会等待集合加载完成，可能长时间阻塞，
+    只允许在后台线程中触发。查询本身带 MilvusClient 超时，双保险。
+    """
+    from pymilvus import MilvusClient
+
+    client = MilvusClient(uri=f"http://{s.milvus_host}:{s.milvus_port}", timeout=5)
+    results = client.query(
+        collection_name="rag_documents",
+        filter=f'document_id == "{doc_id}"',
+        output_fields=["id", "content"],
+        limit=100,
+        timeout=5,
+    )
+    return [{"chunk_id": str(r.get("id") or f"c{i}"), "content": str(r.get("content", ""))[:500]}
+            for i, r in enumerate(results)]
+
+
+async def _maybe_background_load_chunks_collection() -> None:
+    """按节流间隔在后台触发一次集合加载，不阻塞请求。"""
+    global _last_collection_load_at
+    if _time.monotonic() - _last_collection_load_at < _COLLECTION_LOAD_RETRY_S:
+        return
+    _last_collection_load_at = _time.monotonic()
+    loop = asyncio.get_running_loop()
+    loop.run_in_executor(
+        None, _sync_load_chunks_collection,
+        f"http://{Settings().milvus_host}:{Settings().milvus_port}",
+    )
+
 
 @router.get("/documents/{doc_id}/chunks")
 async def get_document_chunks(doc_id: str, ctx: RequestContext = Depends(get_request_context)):
@@ -430,26 +496,45 @@ async def get_document_chunks(doc_id: str, ctx: RequestContext = Depends(get_req
     finally:
         await conn.close()
 
-    from pymilvus import connections as _mc, Collection
-
+    # 读取用 MilvusClient（与 ingest 的 milvus_writer 同一套 API，避免两套并存）。
+    # 关键：不把"向量库不可用"伪装成"无 chunk"。容器重启恢复窗口内的读取失败是
+    # 瞬时故障，返回 5xx 让前端展示可重试的错误；只有 Milvus 健康且确无该文档
+    # 的 chunk 时才返回空列表（正确的空态）。
+    #
+    # 阻塞规避：Milvus 调用放到线程池 + asyncio.wait_for 硬超时。向量库是不可靠
+    # 依赖，任何状态下都不能让请求阻塞事件循环（实测 load_collection 即使在
+    # 带 timeout 时也可能远超其值）。
+    s = Settings()
+    loop = asyncio.get_running_loop()
     try:
-        s = Settings()
-        _mc.connect("default", host=s.milvus_host, port=str(s.milvus_port))
-        col = Collection("rag_documents")
-        col.load()
-
-        results = col.query(
-            expr=f'document_id == "{doc_id}"',
-            output_fields=["content"],
-            limit=100,
+        results = await asyncio.wait_for(
+            loop.run_in_executor(None, _query_chunks_sync, s, doc_id),
+            timeout=_CHUNK_READ_TIMEOUT_S,
         )
-        _mc.disconnect("default")
-
-        return [{"chunk_id": str(r.get("id", f"c{i}")), "content": str(r.get("content", ""))[:500]}
-                for i, r in enumerate(results)]
+        return results
+    except asyncio.TimeoutError:
+        _chunk_logger.error(
+            "document_chunks_vector_timeout",
+            doc_id=doc_id, request_id=ctx.request_id,
+            timeout_s=_CHUNK_READ_TIMEOUT_S,
+        )
+        await _maybe_background_load_chunks_collection()
+        raise HTTPException(
+            status_code=503,
+            detail="vector:timeout — 向量库响应超时，请稍后重试",
+        )
     except Exception as e:
-        # Milvus unavailable or collection not found — return empty
-        return []
+        # 向量库不可用 / 集合恢复中 —— 记录日志（带 request_id 供观测追溯），
+        # 触发后台加载（让集合在后台恢复可查），返回 503 而非空数据。
+        _chunk_logger.error(
+            "document_chunks_vector_unavailable",
+            doc_id=doc_id, request_id=ctx.request_id, error=str(e)[:200],
+        )
+        await _maybe_background_load_chunks_collection()
+        raise HTTPException(
+            status_code=503,
+            detail="vector:unavailable — 向量库暂不可用或正在恢复，请稍后重试",
+        )
 
 
 # ── Document Content ──

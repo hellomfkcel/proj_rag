@@ -68,17 +68,19 @@ def _pipeline_for_strategy(strategy: str) -> str:
 
 
 # ══════════════════════════════════════════════════════════════════
-# should_abort（阶段三：epoch 栅栏 + 协作式取消）
+# should_abort / _abort_reason（阶段三：epoch 栅栏 + 协作式取消）
 # ══════════════════════════════════════════════════════════════════
 
-def should_abort(mount_id: str, current_epoch: int) -> bool:
-    """在关键写点前检查是否应中止任务。
+def _abort_reason(mount_id: str, current_epoch: int) -> str | None:
+    """返回应中止的原因；None 表示不应中止。
 
-    条件满足任一即中止：
-    - ingest_execution.execution_epoch != current_epoch（僵尸任务）
-    - ingest_execution.parse_status == 'cancelling'（卸载清理）
+    返回值语义（写点栅栏按原因决定是否做孤儿清理）：
+    - 'removed'     ingest_executions 记录已删除 —— 文档被移除，可安全清理
+                   （文档已不存在，不会有人再写该 KB 的 chunk）
+    - 'epoch'       执行版本不匹配 —— 重摄产生的新任务接管，旧任务不清数据
+    - 'cancelling'  卸载清理中 —— 由 cleanup_mount_chunks 负责清理
+    - 'unknown'     检查失败（fail-safe）—— 中止但不清理，避免误删新数据
     """
-
     async def _check():
         conn = await asyncpg.connect(_dsn())
         try:
@@ -87,25 +89,31 @@ def should_abort(mount_id: str, current_epoch: int) -> bool:
                 "WHERE mount_id = $1", mount_id,
             )
             if not row:
-                return True  # 记录已删除，中止
+                return "removed"
             if row["execution_epoch"] != current_epoch:
-                log.warning("ingest_aborted_epoch_mismatch",
-                           mount_id=mount_id,
-                           current=current_epoch,
-                           db=row["execution_epoch"])
-                return True
+                return "epoch"
             if row["parse_status"] == "cancelling":
-                log.info("ingest_aborted_cancelling", mount_id=mount_id)
-                return True
-            return False
+                return "cancelling"
+            return None
         finally:
             await conn.close()
 
     try:
         return asyncio.run(_check())
     except Exception as exc:
-        log.warning("should_abort_check_failed", mount_id=mount_id, error=str(exc))
-        return True  # 安全侧：检查失败时中止（fail-safe）
+        log.warning("abort_reason_check_failed", mount_id=mount_id, error=str(exc))
+        return "unknown"  # 安全侧：中止但不清理
+
+
+def should_abort(mount_id: str, current_epoch: int) -> bool:
+    """在关键写点前检查是否应中止任务（有中止原因即为真）。"""
+    reason = _abort_reason(mount_id, current_epoch)
+    if reason == "epoch":
+        log.warning("ingest_aborted_epoch_mismatch",
+                    mount_id=mount_id, current=current_epoch)
+    elif reason == "cancelling":
+        log.info("ingest_aborted_cancelling", mount_id=mount_id)
+    return reason is not None
 
 
 def _increment_epoch(mount_id: str) -> int:
@@ -273,6 +281,27 @@ def ingest_document_task(
         writer_out = result.get("writer", {})
         docs_written = writer_out.get("documents", [])
         chunk_count = len(docs_written)
+
+        # ★ 写点栅栏（设计 §14："每个关键写点前重读 epoch，不匹配则自动退出"）：
+        # pipeline 执行期间（切分→嵌入→写 Milvus）文档可能被删除或重摄。
+        # 此处是 Milvus 写入后的下一个关键点（提交盖戳前）。已中止时：
+        #   - 不提交盖戳任务、不置 completed（文档已不存在，写戳无意义）；
+        #   - 若文档已被移除（记录删除，abort='removed'），清理本任务刚写入
+        #     的 chunk —— 文档已不存在，不会有人再写，可安全清理避免孤儿数据；
+        #   - epoch 变化/取消 由新任务或 cleanup_mount_chunks 接管，不清数据。
+        abort = _abort_reason(mount_id, execution_epoch)
+        if abort is not None:
+            if abort == "removed":
+                _delete_document_chunks_in_kb(document_id, kb_id)
+                log.warning("ingest_aborted_removed_cleanup",
+                            mount_id=mount_id, document_id=document_id,
+                            kb_id=kb_id, chunk_count=chunk_count)
+            else:
+                log.warning("ingest_aborted_after_pipeline",
+                            mount_id=mount_id, reason=abort,
+                            chunk_count=chunk_count)
+            return {"status": "aborted", "reason": f"{abort}_after_pipeline",
+                    "mount_id": mount_id, "chunk_count": chunk_count}
 
         # 3. 提交盖戳任务到 stamping_queue
         stamp_channel_task.apply_async(

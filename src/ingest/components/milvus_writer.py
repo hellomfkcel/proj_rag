@@ -167,6 +167,10 @@ class MilvusDocumentStoreWriter:
 
         schema 演进：filter 热字段（tenant_id/kb_id/allow_stamps/...）已显式化
         以便建立 INVERTED 标量索引。旧动态-only 集合缺少这些显式字段 → 自动重建。
+
+        数据安全底线：drop_collection 会清空集合全部 chunk（数据永久丢失）。
+        因此只有在确认集合为空时才允许自动重建；集合里有数据时 schema 不兼容
+        属于异常，必须失败出声（raise）提示人工迁移，绝不静默删数据。
         """
         if client.has_collection(self._collection_name):
             # 验证 collection schema 是否与当前代码预期一致
@@ -174,16 +178,43 @@ class MilvusDocumentStoreWriter:
             present = {f.get("name") for f in desc.get("fields", [])}
             pk_field = next((f for f in desc.get("fields", []) if f.get("is_primary")), None)
             pk_type = pk_field.get("type", pk_field.get("data_type")) if pk_field else None
-            if pk_type in (DataType.INT64, "Int64", 5):
-                # Schema 不兼容：旧 collection 使用了 INT64 主键 → 重建
-                client.drop_collection(self._collection_name)
-            elif not present.issuperset(REQUIRED_EXPLICIT_FIELDS):
-                # Schema 不兼容：缺少显式过滤字段/层级字段 → 重建
+            incompatible = (
+                pk_type in (DataType.INT64, "Int64", 5)
+                or not present.issuperset(REQUIRED_EXPLICIT_FIELDS)
+            )
+            if incompatible:
                 missing = REQUIRED_EXPLICIT_FIELDS - present
                 import logging
-                logging.getLogger(__name__).warning(
+                log = logging.getLogger(__name__)
+                # 先 flush 再查实体数：未落盘(未 flush)的行不会计入 row_count，
+                # 直接计数会把有数据的集合误判为空而重建丢数据。
+                # flush/stats 在 Milvus 异常时抛错 → 同样失败出声，不会走到 drop。
+                client.flush(self._collection_name, timeout=10)
+                row_count = int(
+                    client.get_collection_stats(self._collection_name, timeout=10)
+                    .get("row_count", 0) or 0
+                )
+                if row_count > 0:
+                    log.error(
+                        "collection_schema_incompatible_refusing_drop",
+                        extra={
+                            "missing_fields": sorted(missing),
+                            "pk_type": str(pk_type),
+                            "row_count": row_count,
+                            "hint": "collection has data; manual migration required "
+                                    "to preserve chunks (export/re-ingest before rebuild)",
+                        },
+                    )
+                    raise RuntimeError(
+                        f"collection '{self._collection_name}' schema incompatible "
+                        f"(pk_type={pk_type}, missing={sorted(missing)}) but has "
+                        f"{row_count} entities — refusing to drop to avoid data loss. "
+                        "Migrate manually (export/re-ingest) before schema rebuild."
+                    )
+                # 空集合：允许自动重建（无数据可丢）。
+                log.warning(
                     "collection_schema_rebuild",
-                    extra={"missing_fields": sorted(missing)},
+                    extra={"missing_fields": sorted(missing), "row_count": 0},
                 )
                 client.drop_collection(self._collection_name)
             else:

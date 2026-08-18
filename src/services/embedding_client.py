@@ -41,13 +41,14 @@ def _http_post(endpoint: str, json_data: dict, timeout: int = 120) -> dict:
 
 def embed_documents(
     texts: List[str],
-    batch_size: int = 64,
+    batch_size: int = 512,
     normalize: bool = True,
 ) -> Tuple[List[List[float]], List[Dict[str, float]], int]:
     """文档批量嵌入（通过 HTTP 服务或本地模型）。
 
-    2026-08-16：HTTP 路径改为客户端主动合批——按 batch_size（默认 64）切块，
-    每块一次 HTTP 请求，避免单次请求携带全部文本带来的排队/超时。
+    batch_size=512：一次 HTTP 请求携带一批文本，服务端本地 BGE-M3 一次前向
+    产出稠密+稀疏。恢复到 2026-08-16 之前的值——更小的 batch_size 会把单个
+    文档拆成更多请求，放大每次请求的固定开销（HTTP + 模型前向）。
 
     Returns:
         (embeddings, sparse_embeddings, elapsed_ms)
@@ -149,9 +150,11 @@ def embed_query(text: str) -> Tuple[List[float], Dict[str, float], int]:
 
 
 def rerank(
-    query: str, documents: List[str], top_k: int = 10
+    query: str, documents: List[str], top_k: int = 10, model_name: str = ""
 ) -> Tuple[List[str], List[float], int]:
     """文档重排序（通过 HTTP 服务或本地模型）。
+
+    model_name 非空时透传给服务端（覆盖托管默认重排模型）。
 
     Returns:
         (reranked_documents, scores, elapsed_ms)
@@ -160,11 +163,14 @@ def rerank(
     if service_url:
         t0 = _time.time()
         try:
-            result = _http_post("/v1/rerank", {
+            payload = {
                 "query": query,
                 "documents": documents,
                 "top_k": top_k,
-            }, timeout=60)
+            }
+            if model_name:
+                payload["model"] = model_name
+            result = _http_post("/v1/rerank", payload, timeout=60)
             return (
                 result["documents"],
                 result.get("scores", [0.0] * len(result["documents"])),

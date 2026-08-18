@@ -304,7 +304,7 @@ async def query_stream(conversation_id: str, turn_index: int = 1):
                 s.database_url.replace("postgresql+asyncpg://", "postgresql://")
             )
             row = await db_conn.fetchrow(
-                "SELECT answer, retrieved_chunk_ids FROM conversation_turns "
+                "SELECT answer, retrieved_chunk_ids, retrieved_chunks FROM conversation_turns "
                 "WHERE conversation_id=$1 AND turn_index=$2",
                 conversation_id, turn_index,
             )
@@ -313,7 +313,18 @@ async def query_stream(conversation_id: str, turn_index: int = 1):
             if row and row["answer"]:
                 # Worker 已完成——直接返回持久化结果，无需等待 Redis
                 chunk_ids = row["retrieved_chunk_ids"] or []
-                yield f"event: retrieved\ndata: {json.dumps({'chunk_ids': chunk_ids, 'chunks': []}, default=str)}\n\n"
+                # ★ 前端来源展示必须数据驱动：retrieved_chunks(jsonb) 存的就是
+                #   source_meta 格式（chunk_id/doc_name/content，见 chat/service.py
+                #   _save_turn 落库的 retrieved_chunks=r["source_meta"]）。
+                #   原样回放，不再硬编码 []——否则前端只能拿到空内容显示"原文未加载"。
+                #   asyncpg 对 jsonb 列返回原始 JSON 字符串，需解析为列表。
+                chunks = row["retrieved_chunks"] or []
+                if isinstance(chunks, str):
+                    try:
+                        chunks = json.loads(chunks)
+                    except Exception:
+                        chunks = []
+                yield f"event: retrieved\ndata: {json.dumps({'chunk_ids': chunk_ids, 'chunks': chunks}, default=str)}\n\n"
                 yield f"event: token\ndata: {json.dumps({'content': row['answer']}, default=str)}\n\n"
                 yield f"event: done\ndata: {json.dumps({})}\n\n"
                 return

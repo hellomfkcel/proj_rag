@@ -128,10 +128,39 @@ def _run_async(coro):
 
 # ── resolve_model ───────────────────────────────────────────────
 
+# 各模型类型 api_key 的 env 兜底键。本地部署（ollama/vllm/sentence_transformers）无需 key。
+_MODEL_TYPE_ENV_API_KEY = {
+    "llm": "LLM_API_KEY",
+    "embedding": "EMBEDDING_API_KEY",
+    "reranker": "RERANK_API_KEY",
+}
+
+# 需要真实 api_key 的外部 provider（缺 key 时告警，不阻断）
+_KEY_REQUIRED_PROVIDERS = ("deepseek", "openai", "azure", "anthropic")
+
+
+def _env_api_key_for_type(model_type: str) -> str:
+    """返回该模型类型的 env 秘钥兜底（无则空串）。
+
+    llm 用 Settings().llm_api_key（含本地 ollama 默认哨兵）；embedding/reranker
+    按各自 env 键读取。使 .env 秘钥轮换后无需改 DB 即生效。
+    """
+    import os
+    s = Settings()
+    key_name = _MODEL_TYPE_ENV_API_KEY.get(model_type or "llm")
+    if not key_name:
+        return ""
+    if key_name == "LLM_API_KEY":
+        return s.llm_api_key
+    return os.getenv(key_name) or ""
+
+
 def resolve_model(model_id: str) -> ModelConfig:
     """解析模型配置。
 
-    优先级：DB model_registry 表 → Settings 环境变量。
+    优先级：DB model_registry 表 → Settings 环境变量（秘钥按类型回落）。
+    DB 是唯一权威源；api_key 为空时回落对应类型 env 秘钥，使 .env 秘钥轮换生效。
+    可观测：resolve 时记录生效秘钥来源（db/env/none，不落 key 明文）。
     """
     s = Settings()
 
@@ -148,13 +177,29 @@ def resolve_model(model_id: str) -> ModelConfig:
                     "FROM model_registry WHERE model_id = $1 LIMIT 1", model_id)
             if row:
                 mtype = row["model_type"] or "llm"
-                # embedding 类型默认用 embedding_base_url，llm 类型默认用 llm_base_url
+                # embedding 类型默认用 embedding_base_url，其余用 llm_base_url
                 default_url = s.embedding_base_url if mtype == "embedding" else s.llm_base_url
+                db_key = (row["api_key"] or "").strip()
+                env_key = _env_api_key_for_type(mtype)
+                effective_key = db_key or env_key
+                source = "db" if db_key else ("env" if env_key else "none")
+                provider = row["provider"] or "ollama"
+                log.debug(
+                    "model_resolved",
+                    model_id=model_id, model_type=mtype, provider=provider,
+                    model_name=row["model_name"], key_source=source,
+                    base_url=(row["base_url"] or default_url),
+                )
+                if not effective_key and provider in _KEY_REQUIRED_PROVIDERS:
+                    log.warning(
+                        "model_missing_api_key",
+                        model_id=model_id, model_type=mtype, provider=provider,
+                    )
                 return ModelConfig(
                     model_name=row["model_name"],
                     base_url=row["base_url"] or default_url,
-                    api_key=row["api_key"] or s.llm_api_key,
-                    provider=row["provider"] or "ollama",
+                    api_key=effective_key,
+                    provider=provider,
                     model_type=mtype,
                 )
         finally:
@@ -165,10 +210,53 @@ def resolve_model(model_id: str) -> ModelConfig:
     if db_result:
         return db_result
 
-    # fallback: Settings 环境变量
+    # fallback: Settings 环境变量（秘钥按类型回落）
     if model_id == "qwen3-embed":
-        return ModelConfig(s.embedding_model, s.embedding_base_url, s.llm_api_key, "ollama", "embedding")
+        return ModelConfig(
+            s.embedding_model, s.embedding_base_url,
+            _env_api_key_for_type("embedding"), "ollama", "embedding",
+        )
     return ModelConfig(s.llm_model, s.llm_base_url, s.llm_api_key, "ollama", "llm")
+
+
+def resolve_managed_model_name(model_type: str, env_key: str = "", default: str = "") -> str:
+    """解析某类型"默认模型"的 model_name（供 embedding_service 等运行时消费）。
+
+    优先级：model_registry 该类型 is_default=true 行 → env_key → default。
+    使管理台改默认 embedding/reranker 模型后，embedding_service 重启即生效。
+    """
+    import os
+
+    async def _query():
+        conn = await asyncpg.connect(_get_db_dsn())
+        try:
+            row = await conn.fetchrow(
+                "SELECT model_name FROM model_registry "
+                "WHERE model_type = $1 AND is_default = true LIMIT 1", model_type)
+            if row:
+                return row["model_name"] or ""
+            # 兼容历史数据：reranker 类型可能存在 rerank 旧值
+            if model_type == "reranker":
+                row = await conn.fetchrow(
+                    "SELECT model_name FROM model_registry "
+                    "WHERE model_type = 'rerank' AND is_default = true LIMIT 1")
+                if row:
+                    return row["model_name"] or ""
+            return ""
+        finally:
+            await conn.close()
+
+    try:
+        name = _run_async(_query())
+    except Exception:
+        name = ""
+    if name:
+        return name
+    if env_key:
+        env_val = os.getenv(env_key)
+        if env_val:
+            return env_val
+    return default
 
 
 def _resolve_default_reranker() -> Optional[ModelConfig]:
@@ -184,10 +272,12 @@ def _resolve_default_reranker() -> Optional[ModelConfig]:
                 "FROM model_registry WHERE model_type='reranker' AND is_default=true "
                 "LIMIT 1")
             if row:
+                db_key = (row["api_key"] or "").strip()
+                env_key = _env_api_key_for_type("reranker")
                 return ModelConfig(
                     model_name=row["model_name"],
                     base_url=row["base_url"] or "",
-                    api_key=row["api_key"] or "",
+                    api_key=db_key or env_key,
                     provider=row["provider"] or "",
                     model_type=row["model_type"] or "reranker",
                 )

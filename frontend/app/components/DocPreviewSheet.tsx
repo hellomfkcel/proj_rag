@@ -17,29 +17,42 @@ export default function DocPreviewSheet({ docId, kbId, onClose }: Props) {
   const [content, setContent] = useState<string>("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  // 重试计数器：错误态点击"重试"时自增，重新触发加载 effect。
+  const [retryKey, setRetryKey] = useState(0);
 
   useEffect(() => {
     if (!docId) return;
+    let cancelled = false;
     setLoading(true);
     setError("");
     setChunks([]);
     setContent("");
 
-    Promise.all([
-      getDocumentDetail(docId).catch(() => null),
-      tab === "chunks"
-        ? getDocumentChunks(docId).catch(() => [] as { chunk_id: string; content: string }[])
-        : getDocumentContent(docId).then(r => r.content).catch(() => ""),
-    ]).then(([det, chunkOrContent]) => {
-      setDetail(det);
-      if (tab === "chunks") setChunks(chunkOrContent as any[]);
-      else setContent(chunkOrContent as string);
-      setLoading(false);
-    }).catch(() => {
-      setError("加载失败");
-      setLoading(false);
-    });
-  }, [docId, tab]);
+    const load = async () => {
+      try {
+        const [det, chunkOrContent] = await Promise.all([
+          // 详情失败可容忍（回退到通用标题）；chunks/content 失败必须上报，
+          // 否则"向量库暂不可用"会被伪装成"暂无 Chunk 数据"。
+          getDocumentDetail(docId).catch(() => null),
+          tab === "chunks"
+            ? getDocumentChunks(docId)
+            : getDocumentContent(docId).then(r => r.content),
+        ]);
+        if (cancelled) return;
+        setDetail(det);
+        if (tab === "chunks") setChunks(chunkOrContent as any[]);
+        else setContent(chunkOrContent as string);
+      } catch {
+        if (cancelled) return;
+        setError("加载失败");
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    };
+
+    load();
+    return () => { cancelled = true; };
+  }, [docId, tab, retryKey]);
 
   if (!docId) return null;
 
@@ -94,7 +107,12 @@ export default function DocPreviewSheet({ docId, kbId, onClose }: Props) {
           {error && (
             <div className="p-6 text-center">
               <p className="text-red-500 text-sm">{error}</p>
-              <button onClick={() => { setTab(tab); }} className="mt-2 text-sm text-blue-600 hover:underline">重试</button>
+              <button
+                onClick={() => setRetryKey(k => k + 1)}
+                className="mt-2 text-sm text-blue-600 hover:underline"
+              >
+                重试
+              </button>
             </div>
           )}
 

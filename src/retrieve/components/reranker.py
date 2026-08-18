@@ -21,12 +21,15 @@ class BGEReranker:
         self.min_score = min_score  # None = 不过滤，向后兼容
 
     @component.output_types(documents=List[Document])
-    def run(self, query: str, documents: List[Document]) -> Dict[str, Any]:
+    def run(self, query: str, documents: List[Document], model_name: str = "") -> Dict[str, Any]:
         """Re-rank documents by relevance to query.
 
         If fewer than 2 documents, returns them as-is.
         Otherwise invokes the reranker via embedding_client (HTTP or local).
         Attaches rerank_score to doc.meta; drops docs below min_score threshold.
+
+        model_name 为可选的管线输入（per-KB rerank_model_id 解析出的模型名，
+        空则用 embedding_service 托管默认重排模型）。
         """
         if len(documents) <= 1:
             return {"documents": documents}
@@ -34,7 +37,8 @@ class BGEReranker:
         from src.services.embedding_client import rerank
 
         contents = [d.content for d in documents]
-        reranked_contents, scores, _ = rerank(query, contents, top_k=self.top_k)
+        reranked_contents, scores, _ = rerank(
+            query, contents, top_k=self.top_k, model_name=model_name)
 
         # Map reranked contents back to Document objects, preserving order
         content_to_doc = {d.content: d for d in documents}

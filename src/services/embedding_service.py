@@ -61,6 +61,11 @@ class EmbedRequest(BaseModel):
     normalize: bool = Field(default=True, description="是否 L2 归一化稠密向量")
     batch_size: int = Field(default=512, ge=32, le=2048,
                             description="内部编码批次大小")
+    need_sparse: bool = Field(
+        default=True,
+        description="是否需要稀疏向量。默认本地 BGE-M3 一次前向同时产出稠密+稀疏；"
+                    "纯稠密场景传 false 走 Infinity（单模型单前向）。",
+    )
 
 
 class EmbedResponse(BaseModel):
@@ -72,6 +77,11 @@ class EmbedResponse(BaseModel):
 
 class EmbedQueryRequest(BaseModel):
     text: str = Field(..., min_length=1, description="查询文本")
+    need_sparse: bool = Field(
+        default=True,
+        description="是否需要稀疏向量。默认本地 BGE-M3 一次前向（稠密+稀疏）；"
+                    "纯稠密场景传 false 走 Infinity。",
+    )
 
 
 class EmbedQueryResponse(BaseModel):
@@ -85,6 +95,7 @@ class RerankRequest(BaseModel):
     documents: List[str] = Field(..., min_length=1, max_length=500,
                                  description="待重排序文档列表")
     top_k: int = Field(default=10, ge=1, le=100)
+    model: str = Field("", description="重排模型名（可选；空则用默认/托管模型）")
 
 
 class RerankResponse(BaseModel):
@@ -106,6 +117,8 @@ class HealthResponse(BaseModel):
 async def lifespan(app: FastAPI):
     """服务启动/关闭生命周期。模型惰性加载，不在启动时占用 GPU。"""
     log.info("embedding_service_starting", port=19500)
+    # 从 model_registry 解析默认 embedding/reranker 模型名（管理台可切换，重启生效）
+    _resolve_managed_models()
     yield
     # 关闭时释放 GPU 资源
     try:
@@ -162,16 +175,47 @@ _RERANK_MODEL_LOCK = threading.Lock()
 
 
 # ══════════════════════════════════════════════════════════════════
-# Infinity Embedding Server Adapter（2026-08-16）
+# Infinity Embedding Server Adapter（2026-08-16 引入，2026-08-18 收敛用途）
 # ══════════════════════════════════════════════════════════════════
-# 稠密嵌入 + rerank 转发给 Infinity（内置动态 batching、OpenAI/Cohere 兼容）；
-# 稀疏向量（BGE-M3 lexical weights）Infinity 不提供，由本地 BGE-M3 生成。
-# 契约不变：调用方（embedding_client / Haystack 组件）零改动。
+# Infinity 只用于"纯稠密"场景：
+#   - /v1/embed、/v1/embed_query 在 need_sparse=false 时走 Infinity（单前向）；
+#   - /v1/rerank 走 Infinity（Cohere 兼容，无稀疏参与）。
+# 默认（need_sparse=true）走本地 BGE-M3 一次前向同时产出稠密+稀疏。
+# 原因：Infinity 的 /embeddings 只回稠密，不能产出 BGE-M3 稀疏 lexical weights，
+# 稠密拆给 Infinity + 稀疏留本地 = 两个模型实例常驻 + 两次 GPU 前向，单卡
+# 12GB 上净收益为负（实测 ingest 嵌入慢 8-10 倍）。纯稠密场景才值得用 Infinity。
 # Infinity 不可达时 fail-open 回退本地 BGE-M3 / 本地 reranker。
 
 INFINITY_URL = os.getenv("INFINITY_URL", "http://localhost:19501").rstrip("/")
+# Infinity 模型名：启动时从 model_registry 默认行解析（管理台可切换），
+# 回落 env（INFINITY_EMBED_MODEL/INFINITY_RERANK_MODEL）→ 硬编码默认。
 INFINITY_EMBED_MODEL = os.getenv("INFINITY_EMBED_MODEL", "BAAI/bge-m3")
 INFINITY_RERANK_MODEL = os.getenv("INFINITY_RERANK_MODEL", "BAAI/bge-reranker-v2-m3")
+
+
+def _resolve_managed_models() -> None:
+    """从 model_registry 解析默认 embedding/reranker 模型名，覆盖 Infinity 模型名。
+
+    使管理台改默认模型后，embedding_service 重启即生效（本地 BGE-M3 加载路径
+    保持默认 bge-m3，模型类不可动态替换）。
+    """
+    global INFINITY_EMBED_MODEL, INFINITY_RERANK_MODEL
+    try:
+        from src.platform.model.registry import resolve_managed_model_name
+        managed_embed = resolve_managed_model_name(
+            "embedding", env_key="INFINITY_EMBED_MODEL", default="BAAI/bge-m3")
+        managed_rerank = resolve_managed_model_name(
+            "reranker", env_key="INFINITY_RERANK_MODEL", default="BAAI/bge-reranker-v2-m3")
+        if managed_embed:
+            INFINITY_EMBED_MODEL = managed_embed
+        if managed_rerank:
+            INFINITY_RERANK_MODEL = managed_rerank
+        log.info(
+            "embedding_managed_models_resolved",
+            embed_model=INFINITY_EMBED_MODEL, rerank_model=INFINITY_RERANK_MODEL,
+        )
+    except Exception as exc:
+        log.warning("embedding_managed_models_resolve_failed", error=str(exc)[:200])
 
 
 def _infinity_dense(texts: List[str]) -> List[List[float]]:
@@ -200,23 +244,16 @@ def _local_dense(texts: List[str]) -> List[List[float]]:
     return [v.tolist() if hasattr(v, "tolist") else list(v) for v in output["dense_vecs"]]
 
 
-def _local_sparse(texts: List[str]) -> List[Dict[str, float]]:
-    """本地 BGE-M3 稀疏词权重（唯一权威源，Infinity 不提供稀疏）。"""
-    from src.ingest.components.bge_m3_embedder import _get_model
-    with _BGE_MODEL_LOCK:
-        model = _get_model()
-        output = model.encode(
-            texts, return_dense=False, return_sparse=True, batch_size=len(texts)
-        )
-    return output.get("lexical_weights", [{}] * len(texts))
+def _infinity_rerank(query: str, documents: List[str], top_k: int,
+                     model: str = "") -> Tuple[List[str], List[float]]:
+    """经 Infinity rerank（Cohere /rerank 兼容）。返回 (排序后文档, 分数)。
 
-
-def _infinity_rerank(query: str, documents: List[str], top_k: int) -> Tuple[List[str], List[float]]:
-    """经 Infinity rerank（Cohere /rerank 兼容）。返回 (排序后文档, 分数)。"""
+    model 为空时用托管默认模型（INFINITY_RERANK_MODEL，源自 model_registry）。
+    """
     import httpx
     resp = httpx.post(
         f"{INFINITY_URL}/rerank",
-        json={"model": INFINITY_RERANK_MODEL, "query": query,
+        json={"model": model or INFINITY_RERANK_MODEL, "query": query,
               "documents": documents, "top_n": top_k},
         timeout=60.0,
     )
@@ -234,35 +271,59 @@ def _infinity_rerank(query: str, documents: List[str], top_k: int) -> Tuple[List
 
 @app.post("/v1/embed", response_model=EmbedResponse)
 def embed(request: EmbedRequest):
-    """文档批量嵌入——稠密 + 稀疏一次产出。
+    """文档批量嵌入——默认本地 BGE-M3 一次前向产出稠密 + 稀疏。
 
-    2026-08-16 Adapter：稠密经 Infinity（/embeddings），稀疏经本地 BGE-M3。
-    Infinity 不可达时 fail-open 回退本地稠密。
-    供摄入 Pipeline (BGE_M3DocumentEmbedder) 和语义分割器使用。
+    2026-08-18 修复：撤销 2026-08-16 的 Infinity 双模型架构。BGE-M3 一次前向
+    即产出稠密+稀疏（lexical weights 来自同一隐藏态），拆成 Infinity(稠密)+
+    本地(稀疏) 是两次 GPU 前向 + 双模型常驻，单卡 12GB 上净收益为负（实测
+    ingest 嵌入慢 8-10 倍）。纯稠密场景（need_sparse=false，无需稀疏）才走
+    Infinity——单模型单前向，且稀疏本就不需要。
 
     用 def 而非 async def：内部 model.encode() 是同步 CPU/GPU 阻塞调用，
     async def 会阻塞事件循环导致整个服务（含 /healthz）不可响应。
-    def 由 FastAPI 放入线程池执行，事件循环保持可用；模型访问由 _MODEL_LOCK 串行化。
+    def 由 FastAPI 放入线程池执行，事件循环保持可用；模型访问由 _BGE_MODEL_LOCK 串行化。
     """
     t0 = time.time()
-    all_embeddings: List[List[float]] = []
-    all_sparse: List[Dict[str, float]] = []
-
     try:
-        # ── 稠密：Infinity 优先，失败回退本地 BGE-M3 ──
-        try:
-            all_embeddings = _infinity_dense(request.texts)
-            dense_source = "infinity"
-        except Exception as exc:
-            log.warning("infinity_dense_failed_fallback_local", error=str(exc)[:200],
-                        text_count=len(request.texts))
-            all_embeddings = _local_dense(request.texts)
-            dense_source = "local"
-        if request.normalize:
-            all_embeddings = [_normalize_vector(v) for v in all_embeddings]
+        if not request.need_sparse:
+            # ── 纯稠密场景：Infinity（单模型单前向），失败回退本地稠密 ──
+            try:
+                all_embeddings = _infinity_dense(request.texts)
+                dense_source = "infinity"
+            except Exception as exc:
+                log.warning("infinity_dense_failed_fallback_local", error=str(exc)[:200],
+                            text_count=len(request.texts))
+                all_embeddings = _local_dense(request.texts)
+                dense_source = "local"
+            if request.normalize:
+                all_embeddings = [_normalize_vector(v) for v in all_embeddings]
+            return EmbedResponse(
+                embeddings=all_embeddings,
+                sparse_embeddings=[{} for _ in all_embeddings],
+                count=len(all_embeddings),
+                elapsed_ms=int((time.time() - t0) * 1000),
+            )
 
-        # ── 稀疏：本地 BGE-M3（唯一权威源）──
-        all_sparse = _local_sparse(request.texts)
+        # ── 默认：本地 BGE-M3 一次前向（稠密 + 稀疏一次产出）──
+        from src.ingest.components.bge_m3_embedder import _get_model
+        with _BGE_MODEL_LOCK:
+            model = _get_model()
+            output = model.encode(
+                request.texts,
+                return_dense=True,
+                return_sparse=True,
+                batch_size=request.batch_size,
+            )
+        dense_vecs = output["dense_vecs"]
+        lexical_weights = output.get("lexical_weights", [{}] * len(request.texts))
+        all_embeddings = []
+        for vec in dense_vecs:
+            vec_list = vec.tolist() if hasattr(vec, "tolist") else list(vec)
+            if request.normalize:
+                vec_list = _normalize_vector(vec_list)
+            all_embeddings.append(vec_list)
+        all_sparse = [dict(w) if isinstance(w, dict) else {} for w in lexical_weights]
+        dense_source = "local"
     except Exception as exc:
         log.error("embedding_encode_failed", error=str(exc), text_count=len(request.texts))
         raise HTTPException(status_code=500, detail=f"Embedding failed: {exc}")
@@ -280,23 +341,44 @@ def embed(request: EmbedRequest):
 
 @app.post("/v1/embed_query", response_model=EmbedQueryResponse)
 def embed_query(request: EmbedQueryRequest):
-    """查询嵌入——稠密 + 稀疏一次产出。
+    """查询嵌入——默认本地 BGE-M3 一次前向（稠密 + 稀疏）。
 
-    2026-08-16 Adapter：稠密经 Infinity，稀疏经本地 BGE-M3；Infinity 不可达回退本地。
-    供检索 Pipeline (BGE_M3TextEmbedder) 使用。
+    检索 Pipeline 混合检索同时用稠密 + 稀疏（BGE_M3TextEmbedder 消费两者），
+    故默认走本地单次前向（同一隐藏态一次产出）。纯稠密场景
+    （need_sparse=false）走 Infinity，稀疏本就不需要。
     def（线程池）原因同 /v1/embed：避免同步模型调用阻塞事件循环。
     """
     t0 = time.time()
     try:
-        try:
-            dense_raw = _infinity_dense([request.text])
-            dense_source = "infinity"
-        except Exception as exc:
-            log.warning("infinity_query_dense_failed_fallback_local", error=str(exc)[:200])
-            dense_raw = _local_dense([request.text])
-            dense_source = "local"
-        vec_list = _normalize_vector(dense_raw[0])
-        sparse = _local_sparse([request.text])[0]
+        if not request.need_sparse:
+            # ── 纯稠密场景：Infinity，失败回退本地稠密 ──
+            try:
+                dense_raw = _infinity_dense([request.text])
+                dense_source = "infinity"
+            except Exception as exc:
+                log.warning("infinity_query_dense_failed_fallback_local", error=str(exc)[:200])
+                dense_raw = _local_dense([request.text])
+                dense_source = "local"
+            vec_list = _normalize_vector(dense_raw[0])
+            return EmbedQueryResponse(
+                embedding=vec_list,
+                sparse_embedding={},
+                elapsed_ms=int((time.time() - t0) * 1000),
+            )
+
+        # ── 默认：本地 BGE-M3 一次前向（稠密 + 稀疏）──
+        from src.ingest.components.bge_m3_embedder import _get_model
+        with _BGE_MODEL_LOCK:
+            model = _get_model()
+            output = model.encode(
+                [request.text], return_dense=True, return_sparse=True,
+            )
+        vec = output["dense_vecs"][0]
+        vec_list = vec.tolist() if hasattr(vec, "tolist") else list(vec)
+        vec_list = _normalize_vector(vec_list)
+        sparse_raw = output.get("lexical_weights", [{}])
+        sparse = dict(sparse_raw[0]) if sparse_raw and isinstance(sparse_raw[0], dict) else {}
+        dense_source = "local"
     except Exception as exc:
         log.error("embedding_query_failed", error=str(exc))
         raise HTTPException(status_code=500, detail=f"Query embedding failed: {exc}")
@@ -323,7 +405,7 @@ def rerank(request: RerankRequest):
     try:
         try:
             result_docs, result_scores = _infinity_rerank(
-                request.query, request.documents, request.top_k
+                request.query, request.documents, request.top_k, model=request.model
             )
             rerank_source = "infinity"
         except Exception as exc:

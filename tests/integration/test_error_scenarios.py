@@ -83,11 +83,14 @@ def test_nonexistent_document_content():
 @requires_api
 @requires_postgres
 def test_nonexistent_document_chunks():
-    """Chunks endpoint for non-existent doc doesn't crash."""
+    """Chunks endpoint for non-existent doc doesn't crash.
+
+    Milvus 不可用时返回 503（向量库暂不可用），属预期诚实失败，一并允许。
+    """
     fake_id = str(uuid.uuid4())
     resp = httpx.get(f"{V1}/documents/{fake_id}/chunks",
                      headers=admin_headers(), timeout=10)
-    assert resp.status_code in (200, 404, 500)
+    assert resp.status_code in (200, 404, 500, 503)
 
 
 @requires_api
