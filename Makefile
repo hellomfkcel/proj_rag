@@ -1,18 +1,20 @@
-.PHONY: infra infra-down infra-reset db-init db-seed dev-api dev-ingest dev-retrieve dev-stamp dev-relay dev-frontend deploy deploy-restart-app deploy-frontend
+.PHONY: infra infra-down infra-reset db-init db-seed dev-api dev-ingest dev-retrieve dev-stamp dev-relay dev-frontend deploy deploy-stop deploy-restart deploy-status deploy-frontend
 
 # ── 基础设施 ──────────────────────────────────────────────────────────
+# 注：docker-compose 命令为 v1 写法，本机已使用 docker compose（v2），
+#     统一改用 `docker compose`。生产/全栈部署请使用 scripts/start.sh。
 
 # 启动基础设施（首次或重启后执行）
 infra:
-	docker-compose -f docker-compose.infra.yml up -d
+	docker compose -f docker-compose.infra.yml up -d
 
 # 停止基础设施（保留数据）
 infra-down:
-	docker-compose -f docker-compose.infra.yml down
+	docker compose -f docker-compose.infra.yml down
 
 # 完全重置（删除所有数据，慎用）
 infra-reset:
-	docker-compose -f docker-compose.infra.yml down -v
+	docker compose -f docker-compose.infra.yml down -v
 
 # ── 数据库初始化 ──────────────────────────────────────────────────────
 
@@ -20,7 +22,7 @@ infra-reset:
 db-init:
 	python -m src.scripts.init_db
 
-# 写入开发期测试数据（admin / reader / writer）
+# 写入开发期测试数据（admin / reader / writer，仅开发）
 db-seed:
 	python -m src.scripts.seed_dev
 
@@ -79,15 +81,24 @@ dev-frontend:
 	cd frontend && npm run dev
 
 # ── 上线部署 ─────────────────────────────────────────────────────────
+# Docker 全栈部署统一走 scripts/start.sh（负责启动顺序、健康等待、init-db、日志）。
+
+# 启动全栈（infra → init-db → app，上线使用）
+deploy:
+	bash scripts/start.sh start
+
+# 停止全栈（保留数据卷）
+deploy-stop:
+	bash scripts/start.sh stop
+
+# 重启全栈
+deploy-restart:
+	bash scripts/start.sh restart
+
+# 查看状态/日志
+deploy-status:
+	bash scripts/start.sh status
 
 # 构建前端 Docker 镜像
 deploy-frontend:
 	docker build -t rag-v14-frontend ./frontend
-
-# 启动全栈（infra + app，上线使用）
-deploy:
-	docker-compose -f docker-compose.infra.yml -f docker-compose.app.yml up -d
-
-# 只重启计算层（上线后更新代码用）
-deploy-restart-app:
-	docker-compose -f docker-compose.app.yml restart

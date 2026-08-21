@@ -1,8 +1,7 @@
-version: "3.9"
 
 networks:
-  rag-network-v14:
-    name: rag-network-v14
+  rag-network:
+    name: rag-network
     driver: bridge
 
 volumes:
@@ -36,7 +35,7 @@ services:
     ports:
       - "25432:5432"
     networks:
-      - rag-network-v14
+      - rag-network
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U rag"]
       interval: 5s
@@ -63,7 +62,7 @@ services:
     ports:
       - "16379:6379"
     networks:
-      - rag-network-v14
+      - rag-network
     healthcheck:
       test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
       interval: 5s
@@ -92,7 +91,7 @@ services:
       --listen-client-urls=http://0.0.0.0:2379
       --data-dir=/etcd
     networks:
-      - rag-network-v14
+      - rag-network
     healthcheck:
       test: ["CMD", "etcdctl", "endpoint", "health"]
       interval: 10s
@@ -116,7 +115,7 @@ services:
       - minio_data:/data
     command: minio server /data --console-address ":9001"
     networks:
-      - rag-network-v14
+      - rag-network
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
       interval: 10s
@@ -142,7 +141,7 @@ services:
       - "19530:19530"
       - "9091:9091"
     networks:
-      - rag-network-v14
+      - rag-network
     depends_on:
       etcd:
         condition: service_healthy
@@ -173,7 +172,7 @@ services:
     ports:
       - "18333:8333"
     networks:
-      - rag-network-v14
+      - rag-network
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8333/"]
       interval: 10s
@@ -200,14 +199,21 @@ services:
     command: server --config=/config/.cerbos.yaml
     volumes:
       - ./cerbos/.cerbos.yaml:/config/.cerbos.yaml:ro
-      - /home/mfkcel/permission-system/cerbos/policies:/policies:ro
+      # 策略目录默认使用本仓库副本；如与权限平台共用策略，可用
+      # CERBOS_POLICIES_DIR 指向权限系统 cerbos/policies（例：../permission-system/cerbos/policies）
+      - ${CERBOS_POLICIES_DIR:-./cerbos/policies}:/policies:ro
       - ./cerbos/schemas:/schemas:ro
       - cerbos_audit:/audit
     ports:
       - "13592:3592"
       - "13593:3593"
     networks:
-      - rag-network-v14
+      - rag-network
+    healthcheck:
+      test: ["CMD", "/cerbos", "healthcheck", "--config=/config/.cerbos.yaml"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     restart: unless-stopped
 
   # ════════════════════════════════════════════════════════════════
@@ -243,11 +249,12 @@ services:
       # 模型本体挂载宿主缓存：transformers 首次启动需做一次 cache 迁移（写操作），
       # 故 hub 挂载为可写；宿主机缓存已含新式 hub 布局，迁移为幂等 no-op。
       - infinity_hf:/models
-      - /home/mfkcel/.cache/huggingface/hub:/models/hub
+      # 模型缓存目录（默认当前用户 HF 缓存；多机部署用 HF_HUB_CACHE_DIR 覆盖）
+      - ${HF_HUB_CACHE_DIR:-/home/mfkcel/.cache/huggingface/hub}:/models/hub
     ports:
       - "19501:7997"
     networks:
-      - rag-network-v14
+      - rag-network
     restart: unless-stopped
     deploy:
       resources:

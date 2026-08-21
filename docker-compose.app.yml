@@ -1,9 +1,8 @@
-version: "3.9"
 
 networks:
   rag-network:
     name: rag-network
-    external: true    # 复用 infra 已创建的网络
+    driver: bridge    # 与 docker-compose.infra.yml 定义同一网络，避免服务间 DNS 割裂
 
 volumes:
   model_cache:        # BGE-M3 等模型缓存，ingestion-worker 和 retrieval-worker 共享
@@ -30,22 +29,61 @@ services:
       S3_BUCKET: rag-files
       AUTHZ_BASE_URL: http://cerbos:3592
       AUTHZ_TIMEOUT_MS: ${AUTHZ_TIMEOUT_MS:-2000}
+      # 权限判定模式：go-live 走外部权限服务后端（remote）；local 为直连 Cerbos 调试
+      AUTHZ_SERVICE_MODE: ${AUTHZ_SERVICE_MODE:-remote}
+      # 外部权限服务后端（宿主机 18080；跨主机部署用 env 覆盖）
+      AUTHZ_SERVICE_URL: ${AUTHZ_SERVICE_URL:-http://host.docker.internal:18080}
       AUTHZ_EVENT_STREAM_URL: ${AUTHZ_EVENT_STREAM_URL:-}
       AUTHZ_CLIENT_CREDENTIAL: ${AUTHZ_CLIENT_CREDENTIAL:-}
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL}
       OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:7b}
       JWT_PUBLIC_KEY_URL: ${JWT_PUBLIC_KEY_URL}
       EMBEDDING_SERVICE_URL: ${EMBEDDING_SERVICE_URL:-http://embedding-service:19500}
+      # Infinity 推理引擎（infra 容器内网络名）
+      INFINITY_URL: ${INFINITY_URL:-http://infinity:7997}
+      # 统一可观测：OTel 采集（宿主机 4318） + Langfuse 模型观测（宿主机 13000，key 缺省 fail-open）
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://host.docker.internal:4318}
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+      LANGFUSE_HOST: ${LANGFUSE_HOST:-http://host.docker.internal:13000}
+      # LLM / Embedding 模型（从 .env 透传；缺省回退本地 Ollama 端口，需显式配置）
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+      LLM_MAX_TOKENS: ${LLM_MAX_TOKENS:-8192}
+      LLM_TEMPERATURE: ${LLM_TEMPERATURE:-0.1}
+      EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-}
+      # 权限平台项目 ID 与 ctx_token 签名密钥（生产必须显式配置）
+      AUTHZ_PROJECT_ID: ${AUTHZ_PROJECT_ID:-rag-v14}
+      CTX_TOKEN_SECRET: ${CTX_TOKEN_SECRET:-}
+      # IdP（Keycloak 密码授权登录；生产 SSO 配 OIDC_DISCOVERY_URL）
+      KEYCLOAK_SERVER_URL: ${KEYCLOAK_SERVER_URL:-}
+      KEYCLOAK_REALM: ${KEYCLOAK_REALM:-rag-v14}
+      KEYCLOAK_CLIENT_ID: ${KEYCLOAK_CLIENT_ID:-rag-frontend}
+      OIDC_DISCOVERY_URL: ${OIDC_DISCOVERY_URL:-}
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-}
+      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-}
+      # CORS 与前端外部链接（浏览器可达地址）
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-}
+      GRAFANA_URL: ${GRAFANA_URL:-}
+      CERBOS_PUBLIC_URL: ${CERBOS_PUBLIC_URL:-}
+      LANGFUSE_PUBLIC_URL: ${LANGFUSE_PUBLIC_URL:-}
+      ADMIN_CONSOLE_URL: ${ADMIN_CONSOLE_URL:-}
       OTEL_SERVICE_NAME: api
       PIPELINE_YAML_DIR: /app/pipelines
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    # JWT 校签/签发密钥（dev-login 需要私钥；生产 SSO 可改用 JWT_JWKS_URL 后移除）
     volumes:
       - ./pipelines:/app/pipelines
+      - ./config/jwt_public.pem:/app/config/jwt_public.pem:ro
+      - ./config/jwt_private.pem:/app/config/jwt_private.pem:ro
     ports:
       - "8000:8000"
     networks:
       - rag-network
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     restart: unless-stopped
 
   # 用途：摄入任务 worker，消费 ingestion_queue
@@ -71,6 +109,8 @@ services:
       - model_cache:/models
     networks:
       - rag-network
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     restart: unless-stopped
     deploy:
       resources:
@@ -112,6 +152,8 @@ services:
       - model_cache:/models
     networks:
       - rag-network
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     restart: unless-stopped
     deploy:
       resources:
@@ -151,6 +193,8 @@ services:
       - ./pipelines:/app/pipelines
     networks:
       - rag-network
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     restart: unless-stopped
     deploy:
       resources:
@@ -196,6 +240,8 @@ services:
       - "19500:19500"
     networks:
       - rag-network
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     restart: unless-stopped
     deploy:
       resources:
@@ -224,6 +270,8 @@ services:
       OTEL_SERVICE_NAME: outbox-relay
     networks:
       - rag-network
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     restart: unless-stopped
 
   # ════════════════════════════════════════════════════════════
@@ -246,11 +294,14 @@ services:
       <<: *app_env
       OTEL_SERVICE_NAME: visibility-events
       AUTHZ_SERVICE_MODE: ${AUTHZ_SERVICE_MODE:-remote}
-      AUTHZ_SERVICE_URL: ${AUTHZ_SERVICE_URL:-http://permission-service:8080}
+      # 权限服务后端与事件流 Redis 均以 host-gateway 访问宿主端口
+      AUTHZ_SERVICE_URL: ${AUTHZ_SERVICE_URL:-http://host.docker.internal:18080}
       AUTHZ_EVENT_STREAM_REDIS_URL: ${AUTHZ_EVENT_STREAM_REDIS_URL}
       AUTHZ_CLIENT_CREDENTIAL: ${AUTHZ_CLIENT_CREDENTIAL:-}
     networks:
       - rag-network
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     restart: unless-stopped
     # P1-2: 健康检查 — 验证 Redis 连接和 Stream 消费是否正常
     # 进程存活即标记 healthy（内部错误会通过 OTel 指标暴露）
