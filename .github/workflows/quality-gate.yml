@@ -19,23 +19,7 @@ jobs:
       - run: pip install -r requirements.txt
       - run: pytest tests/contract/ -v --tb=short
 
-  ragas-eval:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: { python-version: '3.11' }
-      - run: pip install -r requirements.txt
-      - name: Run RAGAS evaluation
-        id: eval
-        run: |
-          python scripts/eval_ragas.py \
-            --eval-set tests/eval_sets/ \
-            --baseline metrics/baseline.json \
-            --threshold-recall 0.70 \
-            --threshold-faithfulness 0.75
-      - name: Fail on regression
-        if: failure()
-        run: |
-          echo "Quality gate failed: Context Recall or Faithfulness below threshold."
-          exit 1
+# 说明：RAGAS 离线评测（scripts/eval_ragas.py）需要 LLM API 密钥，
+# 无法在 CI 中无密钥运行，且此前引用的 metrics/baseline.json 已不存在。
+# 已从 PR/push 门禁移除，保留为本地/手动评测工具：
+#   python scripts/eval_ragas.py --eval-set tests/eval_sets/ --threshold-recall 0.70

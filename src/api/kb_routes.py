@@ -564,17 +564,7 @@ async def get_document_content(doc_id: str, ctx: RequestContext = Depends(get_re
                 raise HTTPException(status_code=403, detail="auth:forbidden — 您没有查看此文档内容的权限（需要 doc:view）")
 
         storage_path = row["storage_path"]
-        # Dev mode: try local filesystem if DEV_DOCS_DIR is configured
-        import os as _os
-        s = Settings()
-        dev_dir = s.dev_docs_dir
-        if dev_dir:
-            test_path = _os.path.join(dev_dir, row["filename"])
-            if _os.path.exists(test_path):
-                with open(test_path, encoding="utf-8") as f:
-                    return {"content": f.read()[:50000]}
-
-        # Production: read from SeaweedFS via P-STORE
+        # 读原文一律走 P-STORE（SeaweedFS），无本地文件 fallback
         from src.platform.store.service import read_file
         content = read_file(storage_path or f"documents/{doc_id}")
         return {"content": content[:50000] if content else ""}
@@ -609,16 +599,7 @@ async def download_document(doc_id: str, ctx: RequestContext = Depends(get_reque
             if decision.get("decision") != "allow":
                 raise HTTPException(status_code=403, detail="auth:forbidden — 您没有下载此文档的权限（需要 doc:download）")
 
-        # Dev mode: try local file if DEV_DOCS_DIR is configured
-        import os as _os
-        s = Settings()
-        dev_dir = s.dev_docs_dir
-        if dev_dir:
-            test_path = _os.path.join(dev_dir, row["filename"])
-            if _os.path.exists(test_path):
-                from fastapi.responses import FileResponse
-                return FileResponse(test_path, filename=row["filename"])
-
+        # 下载一律走 P-STORE（SeaweedFS 签名 URL），无本地文件 fallback
         # Production: generate presigned URL from SeaweedFS S3
         from src.config import Settings as _S
         import boto3

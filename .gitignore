@@ -24,6 +24,9 @@ node_modules/
 htmlcov/
 .coverage
 
+# Celery beat 运行时产物
+celerybeat-schedule*
+
 # OS
 .DS_Store
 Thumbs.db

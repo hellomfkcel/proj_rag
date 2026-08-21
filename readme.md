@@ -522,7 +522,7 @@ make dev-frontend   # 终端 6：Next.js :3001
 | embedding-service | 19500 | 19500 | BGE-M3 共享推理 |
 | etcd / MinIO | 内网 | 2379 / 9000 | Milvus 元数据与持久化，不对外暴露 |
 
-`docs/DEV-SETUP.md` 中的端口表记录的是容器内端口（5432 / 6379 / 3592）。本地连接以上表的宿主机端口为准，`.env.example` 中同样使用宿主机端口。
+`.env.example` 中的连接地址使用宿主机偏移端口（25432 / 16379 / 19530 / 18333 / 13592），容器内端口见上方表格。
 
 ### 5.5 生产部署
 
@@ -564,7 +564,7 @@ KB=$(curl -s -X POST http://localhost:8000/api/v1/knowledge-bases \
 # 3. 上传文档，自动触发解析 → 摄入 → 盖戳
 curl -s -X POST http://localhost:8000/api/v1/documents/upload \
   -H "Authorization: Bearer $TOKEN" \
-  -F "file=@test_docs/<文件名>.md" -F "kb_id=$KB" -F "auto_parse=true"
+  -F "file=@<本机任一文本文件>" -F "kb_id=$KB" -F "auto_parse=true"
 
 # 4. 确认已可检索：chunk 的 vis_version 须大于 0
 curl -s -H "Authorization: Bearer $TOKEN" \
@@ -725,17 +725,17 @@ pytest tests/unit/ -v           # 单元测试
 │   │   └── components/            Haystack 查询 Component（嵌入 / 双路召回 / 融合 / rerank / 层级合并）
 │   ├── chat/                    B-CHAT：对话编排、四种合成模式、引用校验
 │   ├── services/                embedding_service（GPU 模型共享）与客户端
-│   └── scripts/                 init_db / seed_dev / warmup_models / reset / backfill
-├── pipelines/                   Haystack Pipeline YAML（ingest_v1–v5 / query_v1–v5 / retrieval_v1）
+│   └── scripts/                 init_db / seed_dev / warmup_models
+├── pipelines/                   Haystack Pipeline YAML（ingest_v1–v5 / query_v1–v7 / retrieval_v2）
 ├── cerbos/                      Cerbos 策略：derived_roles、resource_policies、schemas
 ├── scripts/init.sql             建表 SQL
-├── scripts/eval_ragas.py        RAGAS 离线评测
+├── scripts/eval_ragas.py        RAGAS 离线评测（本地/手动）
+├── scripts/start.sh             启动/停止/状态/日志 运维脚本
 ├── frontend/                    Next.js 14 前端（login / kb / chat / dashboard / settings / 403）
 ├── tests/                       contract / integration / unit / eval_sets
-├── metrics/                     Prometheus 配置与告警规则
+├── docs/archive/                历史诊断/阶段/参考拓扑文档归档
 ├── docker-compose.infra.yml     基础设施，开发期常驻
 ├── docker-compose.app.yml       计算层，部署使用
-├── docker-compose.prod.yml      生产编排
 └── Makefile                     常用命令
 ```
 
@@ -788,14 +788,14 @@ pytest tests/unit/ -v           # 单元测试
 
 | 文档 | 内容 |
 |------|------|
+| [`docs/ops/RAG上线运维手册.md`](docs/ops/RAG上线运维手册.md) | 上线运维：日常参数设置、启停/升级、日志观测、备份、排障、权限联调、安全清单 |
 | [`docs/RAG系统设计v14.md`](docs/RAG系统设计v14.md) | 主设计规格：模块注册表、共享契约、七个平台模块与四个业务模块章节、三层检索、盖戳管道 |
 | [`docs/RAG系统设计v14落地方案.md`](docs/RAG系统设计v14落地方案.md) | 四阶段落地路径，compose、Dockerfile、requirements、Cerbos 配置全文 |
 | [`docs/权限管理系统架构设计.md`](docs/权限管理系统架构设计.md) | 权限四方协作、16 动词、准入矩阵、五条权限数据流、已实现清单、文件索引 |
 | [`docs/外部系统设计.md`](docs/外部系统设计.md) | 外部权限服务后端与管理台的设计规格 |
 | [`docs/外部系统实施方案.md`](docs/外部系统实施方案.md) | 外部系统实施细则 |
-| [`docs/DEV-SETUP.md`](docs/DEV-SETUP.md) | 开发环境搭建，端口以本文 §5.4 为准 |
-| [`docs/frontend-design.md`](docs/frontend-design.md) · [`docs/frontend_implement.md`](docs/frontend_implement.md) | 前端架构与实现 |
-| [`docs/test_cases.md`](docs/test_cases.md) · [`docs/execute_test_cases_report.md`](docs/execute_test_cases_report.md) | 测试用例与执行报告 |
-| [`docs/AUDIT-REPORT.md`](docs/AUDIT-REPORT.md) · `docs/project_diagnose_v*.md` | 架构审计与历次诊断记录 |
+| [`docs/frontend-design.md`](docs/frontend-design.md) | 前端架构与实现 |
+| [`docs/统一观测使用指南_跨域trace链路_20260817.md`](docs/统一观测使用指南_跨域trace链路_20260817.md) | 跨域 trace 链路使用指南（Tempo/Loki/Langfuse） |
 | [`docs/deploy/security-checklist.md`](docs/deploy/security-checklist.md) | 上线安全检查清单 |
+| [`docs/archive/`](docs/archive/) | 历史诊断/阶段/测试报告文档归档（git 历史同步可查） |
 | [`CLAUDE.md`](CLAUDE.md) | 仓库开发约定 |

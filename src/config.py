@@ -39,8 +39,9 @@ class Settings:
 
     # 权限服务模式：local（直接调 Cerbos PDP）| remote（调外部权限服务后端）
     authz_service_mode: str = os.getenv("AUTHZ_SERVICE_MODE", "local")
-    # 外部权限服务后端地址（remote 模式使用）
-    authz_service_url: str = os.getenv("AUTHZ_SERVICE_URL", "http://192.168.1.127:18080")
+    # 外部权限服务后端地址（remote 模式使用）。上线必须显式配置，
+    # 不提供默认值 —— 缺省即 remote 模式不可用，避免静默连到过期地址。
+    authz_service_url: str = os.getenv("AUTHZ_SERVICE_URL", "")
     # VisibilityChanged 事件流 Redis URL（remote 模式使用）
     authz_event_stream_redis_url: str = os.getenv(
         "AUTHZ_EVENT_STREAM_REDIS_URL",
@@ -94,8 +95,9 @@ class Settings:
     jwt_public_key_path: str = os.getenv("JWT_PUBLIC_KEY_PATH", "./config/jwt_public.pem")
     jwt_algorithm: str = os.getenv("JWT_ALGORITHM", "RS256")
     jwt_expire_seconds: int = int(os.getenv("JWT_EXPIRE_SECONDS", "3600"))
-    # Keycloak IdP 配置（所有登录均通过 Keycloak 验证用户名密码）
-    keycloak_server_url: str = os.getenv("KEYCLOAK_SERVER_URL", "http://192.168.1.127:8080")
+    # Keycloak IdP 配置（所有登录均通过 Keycloak 验证用户名密码）。
+    # 上线必须显式配置（KEYCLOAK_SERVER_URL），缺省为空 → 登录返回明确的 503。
+    keycloak_server_url: str = os.getenv("KEYCLOAK_SERVER_URL", "")
     keycloak_realm: str = os.getenv("KEYCLOAK_REALM", "rag-v14")
     keycloak_client_id: str = os.getenv("KEYCLOAK_CLIENT_ID", "rag-frontend")
 
@@ -121,9 +123,6 @@ class Settings:
 
     # ── JWT JWKS（生产环境从 IdP 自动获取公钥，取代本地 PEM 文件） ──
     jwt_jwks_url: str = os.getenv("JWT_JWKS_URL", "")
-
-    # ── 开发期本地文件目录（生产环境为空，跳过本地文件 fallback） ──
-    dev_docs_dir: str = os.getenv("DEV_DOCS_DIR", "")
 
     # ── CORS 允许来源（逗号分隔，生产必须配置为具体域名） ──
     cors_allowed_origins: str = os.getenv(
