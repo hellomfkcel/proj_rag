@@ -527,10 +527,15 @@ make dev-frontend   # 终端 6：Next.js :3001
 ### 5.5 生产部署
 
 ```bash
-make deploy               # infra + app 全栈启动
-make deploy-restart-app   # 仅重启计算层，用于代码更新后
-make deploy-frontend      # 单独构建前端镜像
+make deploy             # 全栈部署（= scripts/start.sh start，按序 infra→init-db→app）
+make deploy-stop        # 停止全部（保留数据卷）
+make deploy-restart     # 重启全部
+make deploy-status      # 查看健康状态
+make deploy-frontend    # 单独构建前端镜像
 ```
+
+> Docker 化部署统一使用 `scripts/start.sh`（负责启动顺序、健康等待、init-db、日志），
+> 详见 `docs/ops/RAG上线运维手册.md`。
 
 生产与开发的差异：
 
@@ -538,7 +543,7 @@ make deploy-frontend      # 单独构建前端镜像
 |--------|------|------|
 | 登录 | `POST /api/v1/auth/dev-login`（Keycloak password grant + 本系统签发 JWT） | SSO 授权码流（`/api/v1/auth/callback`） |
 | JWT 校签 | 本地 PEM（`config/jwt_public.pem`） | JWKS URL（`JWT_JWKS_URL`，PyJWKClient 自动拉取） |
-| 权限服务地址 | `http://localhost:13592` | 容器内 `http://cerbos:3592` 或 `http://permission-service:8080` |
+| 权限服务地址 | `http://localhost:13592`（local） | `remote`：`AUTHZ_SERVICE_URL=http://host.docker.internal:18080`（同机）或权限平台真实地址 |
 | `AUTHZ_SERVICE_MODE` | `local`（直连 Cerbos PDP） | `remote`（走外部权限服务后端） |
 | `CTX_TOKEN_SECRET` | 未配置时回退为 Redis URL hash | 必须显式配置独立 secret |
 | `CORS_ALLOWED_ORIGINS` | `localhost:3001,localhost:3000` | 必须收敛至具体域名 |
