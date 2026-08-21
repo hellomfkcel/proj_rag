@@ -44,8 +44,8 @@ frontend/out/
 # Claude
 .claude/
 
-# Metrics
-metrics/
-
 # Docs
 docs/
+
+# 安全：JWT 密钥不进构建上下文（运行期由 compose 单文件挂载）
+config/
