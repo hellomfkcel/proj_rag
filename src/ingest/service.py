@@ -22,7 +22,6 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set
 
 from src.platform.task.celery_app import celery_app
-from src.platform.task.pipeline_runner import run_pipeline_sync
 from src.config import Settings
 from src.platform.obs.logger import get_logger
 
@@ -270,6 +269,12 @@ def ingest_document_task(
             "${CHUNK_PARENT_LENGTH}": str(adv.get("parent_split_length", 1024)),
             "${CHUNK_CHILD_LENGTH}": str(adv.get("child_split_length", 256)),
         }
+
+        # 惰性导入：避免 celery_app 模块级导入 ingest.service 时连带拉入
+        # haystack（pipeline_runner 顶层 from haystack import Pipeline）。
+        # api/stamping/outbox/visibility 等不执行 Pipeline 的进程因此无需安装
+        # haystack/torch；此处仅在摄入任务真正执行时（worker 内）才导入。
+        from src.platform.task.pipeline_runner import run_pipeline_sync
 
         result = run_pipeline_sync(
             pipeline_name,

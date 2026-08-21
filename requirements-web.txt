@@ -1,0 +1,27 @@
+# ========================================================
+# requirements-web.txt — API 特有依赖（milvus 层 + 本文件）
+# 适用：api（FastAPI 唯一对外入口；kb_routes 经 pymilvus 读 chunk）
+# 说明：api 需要 pymilvus（kb_routes），故 web 从 milvus 层继承；
+#       boto3/sqlalchemy/openai/langfuse 亦被 worker 使用，故 haystack 层重复安装。
+# Python 3.11
+# ========================================================
+
+# ── Web 框架 ─────────────────────────────────────────────
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+python-multipart==0.0.12
+
+# ── FastAPI 自动埋点（instrument_fastapi 需要；硬依赖 fastapi） ──
+opentelemetry-instrumentation-fastapi==0.54b1
+
+# ── 对象存储（上传/读文件经 P-STORE S3） ─────────────────
+boto3==1.35.0
+
+# ── ORM models（doc/chat models，api 路由使用） ──────────
+sqlalchemy[asyncio]==2.0.35
+
+# ── LLM 客户端（test_model_connection 惰性使用） ─────────
+openai==2.50.0   # 版本须满足 haystack-ai>=2.19 的 openai>=1.99.2
+
+# ── 模型观测（lifespan init_langfuse） ───────────────────
+langfuse==4.14.0

@@ -1,0 +1,12 @@
+# ========================================================
+# requirements-milvus.txt — 直连 Milvus 的服务（base + 本文件）
+# 适用：stamping-worker（_upsert_stamps）、outbox-relay（mount enabled 更新）
+#       以及 web/haystack 层的基础（api kb_routes、worker 检索/摄入均写读 Milvus）
+# 说明：pymilvus 硬依赖 pandas（约 76M）→ numpy（约 73M），
+#       故只给真正触碰 Milvus 的服务安装，visibility-events / embedding-service 不装。
+# JWT 已入 base 层（src.permission 包模块级 import context → jwt，全服务共用）。
+# Python 3.11
+# ========================================================
+
+# ── 向量库客户端（直连 Milvus，无需 haystack） ───────────
+pymilvus==2.6.17   # 3.x 有 breaking changes，暂持观望

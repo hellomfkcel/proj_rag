@@ -11,7 +11,9 @@ from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor, ConsoleSpanExporter
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 from opentelemetry.sdk.resources import Resource, SERVICE_NAME
-from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+# 注意：不在此处模块级 import FastAPIInstrumentor——
+# 它硬依赖 fastapi，而只有 api/embedding-service 装 fastapi。
+# 惰性导入见 instrument_fastapi()，其余服务无需安装 fastapi。
 
 _tracing_initialized = False
 _log_export_initialized = False
@@ -214,5 +216,8 @@ def instrument_fastapi(app):
     """对 FastAPI 应用进行自动埋点。
 
     自动为每个 HTTP 请求创建 span，记录 method/path/status_code。
+    惰性导入 FastAPIInstrumentor：该包硬依赖 fastapi，只有 api/embedding-service
+    安装 fastapi 才会走到这里（其余服务不调用本函数）。
     """
+    from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
     FastAPIInstrumentor.instrument_app(app)

@@ -17,6 +17,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      target: web                   # api 特有：FastAPI + boto3/sqlalchemy/openai/langfuse + pymilvus
     command: uvicorn src.main:app --host 0.0.0.0 --port 8000
     environment: &app_env
       DATABASE_URL: postgresql+asyncpg://rag:${POSTGRES_PASSWORD}@postgres:5432/rag
@@ -27,7 +28,6 @@ services:
       S3_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
       S3_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
       S3_BUCKET: rag-files
-      AUTHZ_BASE_URL: http://cerbos:3592
       AUTHZ_TIMEOUT_MS: ${AUTHZ_TIMEOUT_MS:-2000}
       # 权限判定模式：go-live 走外部权限服务后端（remote）；local 为直连 Cerbos 调试
       AUTHZ_SERVICE_MODE: ${AUTHZ_SERVICE_MODE:-remote}
@@ -94,6 +94,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      target: haystack               # 无 torch：嵌入/重排走 embedding-service HTTP
     command: >
       celery -A src.platform.task.celery_app worker
       -Q ingestion_queue
@@ -126,7 +127,7 @@ services:
       test:
         [
           "CMD-SHELL",
-          "celery -A src.platform.task.celery_app inspect ping -d ingestion-worker@$$(hostname) --timeout=5 2>/dev/null | grep -q 'ingestion-worker.*ok' || exit 1",
+          "celery -A src.platform.task.celery_app inspect ping -d ingestion-worker@$$(hostname) --timeout=5 2>/dev/null | grep -qi 'ingestion-worker.*ok' || exit 1",
         ]
       interval: 30s
       timeout: 10s
@@ -141,6 +142,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      target: haystack               # 无 torch：嵌入/重排走 embedding-service HTTP
     command: >
       celery -A src.platform.task.celery_app worker
       -Q retrieval_queue
@@ -173,7 +175,7 @@ services:
       test:
         [
           "CMD-SHELL",
-          "celery -A src.platform.task.celery_app inspect ping -d retrieval-worker@$$(hostname) --timeout=5 2>/dev/null | grep -q 'retrieval-worker.*ok' || exit 1",
+          "celery -A src.platform.task.celery_app inspect ping -d retrieval-worker@$$(hostname) --timeout=5 2>/dev/null | grep -qi 'retrieval-worker.*ok' || exit 1",
         ]
       interval: 30s
       timeout: 10s
@@ -188,6 +190,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      target: milvus                # 盖戳经 pymilvus 写 Milvus，不走模型推理
     command: >
       celery -A src.platform.task.celery_app worker
       -Q stamping_queue
@@ -216,7 +219,7 @@ services:
       test:
         [
           "CMD-SHELL",
-          "celery -A src.platform.task.celery_app inspect ping -d stamping-worker@$$(hostname) --timeout=5 2>/dev/null | grep -q 'stamping-worker.*ok' || exit 1",
+          "celery -A src.platform.task.celery_app inspect ping -d stamping-worker@$$(hostname) --timeout=5 2>/dev/null | grep -qi 'stamping-worker.*ok' || exit 1",
         ]
       interval: 30s
       timeout: 10s
@@ -236,6 +239,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      target: gpu
+      args:
+        TORCH_INSTALL: torch==2.13.0+cu126   # GPU torch（唯一持有模型的服务，BGE-M3 一次前向）
     command: uvicorn src.services.embedding_service:app --host 0.0.0.0 --port 19500
     environment:
       <<: *app_env
@@ -277,6 +283,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      target: milvus                # mount enabled 更新直连 pymilvus
     command: python -m src.platform.task.outbox_relay
     environment:
       <<: *app_env
@@ -302,6 +309,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      target: base                  # 仅真共享依赖，无 web/milvus/模型
     command: python -m src.permission.visibility_events
     environment:
       <<: *app_env

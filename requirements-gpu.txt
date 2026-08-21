@@ -1,0 +1,25 @@
+# ========================================================
+# requirements-gpu.txt — 模型加载栈 + embedding-service 的 web 服务器（base 层 + 本文件）
+# 适用：embedding-service（单进程持有 BGE-M3 + BGE-Reranker 全局单例）
+# 说明：
+#   - 不安装 torch——由 Dockerfile gpu 阶段离线安装：
+#       pip install --no-index --find-links /wheels ${TORCH_INSTALL}
+#       （torch==2.13.0+cu126 GPU / torch==2.13.0 CPU）
+#   - embedding-service 不跑完整 Haystack Pipeline、不直连 Milvus/DB，
+#     但模型加载走 P-MODEL 防腐层（haystack.components.embedders/rankers）
+#     → 需要 haystack-ai（仅此；无需 milvus-haystack/splitters/celery）。
+# Python 3.11
+# ========================================================
+
+# ── Web 服务器（embedding-service 对外 HTTP 服务） ────────
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+opentelemetry-instrumentation-fastapi==0.54b1   # instrument_fastapi 需要
+
+# ── Haystack 组件（模型加载经 P-MODEL 防腐层需要） ────────
+haystack-ai==2.31.0
+haystack-experimental==0.19.0.post1
+
+# ── 嵌入与重排序模型 ─────────────────────────────────────
+sentence-transformers==3.1.1
+FlagEmbedding==1.4.0

@@ -1,0 +1,44 @@
+# ========================================================
+# requirements-base.txt — 真·共享依赖（全部服务基座）
+# 适用：visibility-events（仅此层）、以及 milvus/web/haystack/gpu 层的基础
+# 原则：不含任何"服务特有"依赖——无 fastapi/uvicorn（web）、无 pymilvus、
+#       无 boto3/sqlalchemy/openai/langfuse（api/worker 业务）。
+# Python 3.11
+# ========================================================
+
+# ── 异步任务（全部服务经 celery_app 分发/消费任务） ───────
+celery==5.4.0
+redis==5.0.7
+kombu==5.4.0
+
+# ── 数据库客户端 ─────────────────────────────────────────
+asyncpg==0.29.0
+
+# ── 权限服务客户端（P-AUTHC） ────────────────────────────
+httpx==0.27.2
+tenacity==8.5.0        # ← 从 9.0.0 降级，满足 ragas->langchain-community 的要求
+circuitbreaker==2.0.0
+
+# ── 可观测（OTel，所有服务 init_tracing 经 obs.tracing 导入） ──
+# 注意：instrumentation-fastapi 硬依赖 fastapi，仅 api/embedding 需要，放 web/gpu 层。
+opentelemetry-sdk==1.33.1
+opentelemetry-distro==0.54b1
+opentelemetry-exporter-otlp==1.33.1
+opentelemetry-instrumentation-celery==0.54b1
+opentelemetry-instrumentation-asyncpg==0.54b1
+opentelemetry-instrumentation-httpx==0.54b1
+
+# ── JWT（ctx_token 校验） ────────────────────────────────
+# src/permission/__init__.py 模块级 import context → jwt；
+# 所有服务（含 visibility-events，位于 src.permission 包内）都会触发。
+python-jose[cryptography]==3.3.0
+PyJWT==2.9.0
+
+# ── 日志 ─────────────────────────────────────────────────
+structlog==24.4.0
+
+# ── 工具 ─────────────────────────────────────────────────
+pydantic==2.9.2
+python-dotenv==1.0.1
+requests==2.32.0
+jinja2==3.1.4

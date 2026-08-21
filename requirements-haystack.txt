@@ -1,0 +1,32 @@
+# ========================================================
+# requirements-haystack.txt — Haystack 检索/摄入栈（milvus 层 + 本文件，无 torch）
+# 适用：ingestion-worker / retrieval-worker
+# 说明：嵌入/重排全部走外部 embedding-service（HTTP），worker 本地不加载
+#       任何模型 → 无需 torch / FlagEmbedding / sentence-transformers。
+#       haystack-ai 的 torch 导入均由 LazyImport 包裹，缺失时优雅延迟。
+#       含 worker 业务依赖：boto3（P-STORE 读文件）、sqlalchemy（chat/doc models）、
+#       openai（invoke_llm）、langfuse（组件观测）——与 web 层重复安装，各自独立。
+# Python 3.11
+# ========================================================
+
+# ── Haystack 核心 ────────────────────────────────────────
+haystack-ai==2.31.0
+haystack-experimental==0.19.0.post1
+
+# ── Haystack Milvus 集成 ─────────────────────────────────
+milvus-haystack==0.0.18
+
+# ── 文本切分 ─────────────────────────────────────────────
+langchain-text-splitters==0.2.4
+numpy>=1.26              # semantic_splitter 模块级 import numpy（haystack-ai 亦依赖）
+nltk>=3.9.1
+
+# ── Haystack 可观测集成（可选，缺装 fail-open） ───────────
+opentelemetry-haystack==1.0.0
+openinference-instrumentation-haystack==0.1.0
+
+# ── worker 业务依赖（与 web 层相同，worker 独立进程需要） ──
+boto3==1.35.0            # P-STORE 读原文件（摄入）
+sqlalchemy[asyncio]==2.0.35   # chat/doc ORM models
+openai==2.50.0           # invoke_llm 生成
+langfuse==4.14.0         # embedder 组件 Langfuse observation
