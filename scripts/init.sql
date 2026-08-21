@@ -188,4 +188,33 @@ CREATE TABLE IF NOT EXISTS refresh_token_hashes (
 CREATE INDEX IF NOT EXISTS idx_refresh_hash ON refresh_token_hashes(token_hash);
 CREATE INDEX IF NOT EXISTS idx_refresh_sub ON refresh_token_hashes(sub);
 
+-- ── P-MODEL：模型注册表（LLM / embedding / reranker） ─────────────
+-- 由 make db-seed 或管理台设置→模型管理填充；api_key 明文存于本表
+-- （生产建议仅存掩码 + env 兜底，见 docs/deploy/deployment-diagnosis.md）
+CREATE TABLE IF NOT EXISTS model_registry (
+    id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    model_id   VARCHAR(64) NOT NULL,
+    model_type VARCHAR(32) NOT NULL,              -- llm | embedding | reranker
+    provider   VARCHAR(32) DEFAULT 'ollama',
+    model_name VARCHAR(128) NOT NULL,
+    base_url   VARCHAR(256) DEFAULT '',
+    api_key    VARCHAR(256) DEFAULT '',
+    is_default BOOLEAN DEFAULT false,
+    created_at TIMESTAMPTZ DEFAULT now(),
+    UNIQUE (model_id, model_type)
+);
+
+-- ── P-MODEL：Prompt 模板版本池 ────────────────────────────────────
+-- resolve_prompt 按 (prompt_id, version) 取模板；is_active 标记当前生效版
+CREATE TABLE IF NOT EXISTS prompt_templates (
+    id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    prompt_id     VARCHAR(64) NOT NULL,
+    version       VARCHAR(32) NOT NULL,
+    template_text TEXT NOT NULL,
+    description   TEXT DEFAULT '',
+    is_active     BOOLEAN DEFAULT true,
+    created_at    TIMESTAMPTZ DEFAULT now(),
+    UNIQUE (prompt_id, version)
+);
+
 COMMIT;
