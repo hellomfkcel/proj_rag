@@ -1,12 +1,13 @@
 -- ============================================================================
 -- RAG 系统 v14 数据库初始化
 -- 所有表按最终形态创建，部分字段阶段一填默认值，后续阶段使用
+-- 幂等：所有 DDL 均使用 IF NOT EXISTS，可安全重复执行（启动脚本每次 start 都会跑）
 -- ============================================================================
 
 BEGIN;
 
 -- ── 知识库 ──────────────────────────────────────────────────────────
-CREATE TABLE knowledge_bases (
+CREATE TABLE IF NOT EXISTS knowledge_bases (
     id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id   VARCHAR(64) NOT NULL,
     name        VARCHAR(128) NOT NULL,
@@ -18,7 +19,7 @@ CREATE TABLE knowledge_bases (
 );
 
 -- ── 文档 ────────────────────────────────────────────────────────────
-CREATE TABLE documents (
+CREATE TABLE IF NOT EXISTS documents (
     id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id           VARCHAR(64) NOT NULL,
     filename            VARCHAR(256) NOT NULL,
@@ -32,7 +33,7 @@ CREATE TABLE documents (
 );
 
 -- ── 挂载关系 ─────────────────────────────────────────────────────────
-CREATE TABLE document_kb_mounts (
+CREATE TABLE IF NOT EXISTS document_kb_mounts (
     id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     document_id UUID NOT NULL REFERENCES documents(id),
     kb_id       UUID NOT NULL REFERENCES knowledge_bases(id),
@@ -43,7 +44,7 @@ CREATE TABLE document_kb_mounts (
 );
 
 -- ── 摄入执行状态 ─────────────────────────────────────────────────────
-CREATE TABLE ingest_executions (
+CREATE TABLE IF NOT EXISTS ingest_executions (
     mount_id                UUID PRIMARY KEY REFERENCES document_kb_mounts(id),
     document_id             UUID NOT NULL,
     kb_id                   UUID NOT NULL,
@@ -56,10 +57,10 @@ CREATE TABLE ingest_executions (
     retry_count             INTEGER DEFAULT 0,
     updated_at              TIMESTAMPTZ DEFAULT now()
 );
-CREATE INDEX idx_ingest_executions_kb_status ON ingest_executions(kb_id, parse_status);
+CREATE INDEX IF NOT EXISTS idx_ingest_executions_kb_status ON ingest_executions(kb_id, parse_status);
 
 -- ── 对话 ─────────────────────────────────────────────────────────────
-CREATE TABLE conversations (
+CREATE TABLE IF NOT EXISTS conversations (
     id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id     VARCHAR(64) NOT NULL,
     user_id       VARCHAR(64) NOT NULL,
@@ -68,7 +69,7 @@ CREATE TABLE conversations (
 );
 
 -- ── 对话轮次 ─────────────────────────────────────────────────────────
-CREATE TABLE conversation_turns (
+CREATE TABLE IF NOT EXISTS conversation_turns (
     id                       UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     conversation_id          UUID NOT NULL REFERENCES conversations(id),
     turn_index               INTEGER NOT NULL,
@@ -85,7 +86,7 @@ CREATE TABLE conversation_turns (
 );
 
 -- ── 目录 ─────────────────────────────────────────────────────────────
-CREATE TABLE directories (
+CREATE TABLE IF NOT EXISTS directories (
     id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id        VARCHAR(64) NOT NULL,
     name             VARCHAR(128) NOT NULL,
@@ -97,7 +98,7 @@ CREATE TABLE directories (
 );
 
 -- ── Outbox（B-DOC 分区） ─────────────────────────────────────────────
-CREATE TABLE outbox (
+CREATE TABLE IF NOT EXISTS outbox (
     id                   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     event_type           VARCHAR(64) NOT NULL,
     payload              JSONB NOT NULL,
@@ -106,10 +107,10 @@ CREATE TABLE outbox (
     status               VARCHAR(16) DEFAULT 'pending',  -- pending / sent
     created_at           TIMESTAMPTZ DEFAULT now()
 );
-CREATE INDEX idx_outbox_pending ON outbox(status, created_at) WHERE status = 'pending';
+CREATE INDEX IF NOT EXISTS idx_outbox_pending ON outbox(status, created_at) WHERE status = 'pending';
 
 -- ── 审计日志（阶段一建表，阶段二开始落数据） ──────────────────────────
-CREATE TABLE audit_logs (
+CREATE TABLE IF NOT EXISTS audit_logs (
     id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     event_type         VARCHAR(64) NOT NULL,
     request_id         VARCHAR(64) NOT NULL,
@@ -126,13 +127,13 @@ CREATE TABLE audit_logs (
     payload            JSONB,
     created_at         TIMESTAMPTZ DEFAULT now()
 );
-CREATE INDEX idx_audit_tenant_time ON audit_logs(tenant_id, created_at DESC);
-CREATE INDEX idx_audit_request    ON audit_logs(request_id);
-CREATE INDEX idx_audit_decision   ON audit_logs(authz_decision_ref)
+CREATE INDEX IF NOT EXISTS idx_audit_tenant_time ON audit_logs(tenant_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_audit_request    ON audit_logs(request_id);
+CREATE INDEX IF NOT EXISTS idx_audit_decision   ON audit_logs(authz_decision_ref)
     WHERE authz_decision_ref IS NOT NULL;
 
 -- ── P-CONFIG：检索参数（阶段一用默认值，阶段二开始级联生效） ────────────
-CREATE TABLE retrieval_configs (
+CREATE TABLE IF NOT EXISTS retrieval_configs (
     id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     scope_type        VARCHAR(16) NOT NULL,   -- tenant / kb / conversation / turn
     scope_id          VARCHAR(128) NOT NULL,
@@ -159,7 +160,7 @@ CREATE TABLE retrieval_configs (
 );
 
 -- ── P-CONFIG：切分配置 ───────────────────────────────────────────────
-CREATE TABLE chunking_configs (
+CREATE TABLE IF NOT EXISTS chunking_configs (
     id                   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     kb_id                UUID NOT NULL REFERENCES knowledge_bases(id),
     version              VARCHAR(32) NOT NULL,

@@ -57,6 +57,8 @@ apply_docker_overrides() {
     export AUTHZ_SERVICE_MODE="${AUTHZ_SERVICE_MODE:-remote}"
     export OTEL_EXPORTER_OTLP_ENDPOINT="http://host.docker.internal:4318"
     export LANGFUSE_HOST="http://host.docker.internal:13000"
+    # Keycloak 是服务端调用（api 容器→宿主机 IdP），容器内 localhost 指向自身
+    export KEYCLOAK_SERVER_URL="${KEYCLOAK_SERVER_URL:-http://host.docker.internal:8080}"
 
     # 事件流 Redis 是权限系统的 perm-redis；从 .env 提取密码并换 host-gateway 宿主地址
     local perm_pwd

@@ -25,8 +25,13 @@ RUN pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple && 
     rm -rf /wheels && \
     pip install --no-cache-dir -r requirements.txt
 
+# 文件编码检测（src/platform/store/encoding.py 运行时 import；独立层避免重跑大依赖层）
+RUN pip install --no-cache-dir chardet==7.5.1
+
 COPY src/ ./src/
 COPY pipelines/ ./pipelines/
+# 建表 SQL（init_db 依赖 scripts/init.sql）
+COPY scripts/init.sql ./scripts/init.sql
 
 RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
 USER appuser

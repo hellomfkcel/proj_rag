@@ -104,9 +104,13 @@ services:
       <<: *app_env
       OTEL_SERVICE_NAME: ingestion-worker
       SENTENCE_TRANSFORMERS_HOME: /models
+      HF_HOME: /models
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
     volumes:
       - ./pipelines:/app/pipelines
       - model_cache:/models
+      - ${HF_HUB_CACHE_DIR:-/home/mfkcel/.cache/huggingface/hub}:/models/hub:ro
     networks:
       - rag-network
     extra_hosts:
@@ -147,9 +151,13 @@ services:
       <<: *app_env
       OTEL_SERVICE_NAME: retrieval-worker
       SENTENCE_TRANSFORMERS_HOME: /models
+      HF_HOME: /models
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
     volumes:
       - ./pipelines:/app/pipelines
       - model_cache:/models
+      - ${HF_HUB_CACHE_DIR:-/home/mfkcel/.cache/huggingface/hub}:/models/hub:ro
     networks:
       - rag-network
     extra_hosts:
@@ -233,9 +241,14 @@ services:
       <<: *app_env
       OTEL_SERVICE_NAME: embedding-service
       SENTENCE_TRANSFORMERS_HOME: /models
+      # 离线加载宿主预下载的 BGE-M3/reranker（挂载点见 volumes），避免联网下载
+      HF_HOME: /models
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
     volumes:
       - ./pipelines:/app/pipelines
       - model_cache:/models
+      - ${HF_HUB_CACHE_DIR:-/home/mfkcel/.cache/huggingface/hub}:/models/hub:ro
     ports:
       - "19500:19500"
     networks:
