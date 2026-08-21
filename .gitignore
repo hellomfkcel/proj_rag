@@ -27,6 +27,9 @@ htmlcov/
 # Celery beat 运行时产物
 celerybeat-schedule*
 
+# 构建缓存（预下载的 wheel 等，勿提交）
+build_cache/
+
 # OS
 .DS_Store
 Thumbs.db
