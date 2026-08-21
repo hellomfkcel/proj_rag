@@ -6,17 +6,23 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential curl git \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
+# GPU torch 依赖 wheelhouse 预下载到宿主机 build_cache/wheels/（国内源，避免构建时
+# buildkit 对超大文件下载停滞）。生成方式（宿主机执行，网络快）：
+#   mkdir -p build_cache && curl -o "build_cache/torch-2.13.0+cu126-cp311-cp311-manylinux_2_28_x86_64.whl" \
+#     "https://mirrors.aliyun.com/pytorch-wheels/cu126/torch-2.13.0%2Bcu126-cp311-cp311-manylinux_2_28_x86_64.whl"
+#   pip download "build_cache/torch-2.13.0+cu126-cp311-cp311-manylinux_2_28_x86_64.whl" \
+#     -d build_cache/wheels/ --index-url https://pypi.tuna.tsinghua.edu.cn/simple
+# 说明：摄入 embedding 默认走本地 BGE-M3 一次前向(dense+sparse)，必须 GPU torch；
+#       cu130 国内镜像未同步 2.13.0，用 cu126（驱动向下兼容）。
+COPY requirements.txt ./
+COPY build_cache/wheels/ /wheels/
 # 如无法访问清华镜像源，可改为默认 PyPI：
 #   RUN pip install --no-cache-dir -r requirements.txt
 RUN pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple && \
     pip config set global.trusted-host pypi.tuna.tsinghua.edu.cn && \
-    # torch 先行安装（版本与本地开发一致 2.13.0，走清华源 CPU wheel）。
-    # 理由：① requirements.txt 的 sentence-transformers 依赖 torch，不先装会隐式
-    #          拉取巨型 wheel（境外源慢/易超时）；② GPU 稠密嵌入/重排由 Infinity
-    #          (GPU 容器) 承担，镜像内 torch 仅用于稀疏向量等 CPU 侧推理；
-    #        ③ 如需容器内 GPU torch，改用 aliyun pytorch-wheels 或 download.pytorch.org。
-    pip install --no-cache-dir torch==2.13.0 && \
+    # torch + nvidia 依赖离线安装（wheelhouse 已含完整闭包），避免构建时大文件下载停滞
+    pip install --no-index --find-links /wheels torch==2.13.0+cu126 && \
+    rm -rf /wheels && \
     pip install --no-cache-dir -r requirements.txt
 
 COPY src/ ./src/
