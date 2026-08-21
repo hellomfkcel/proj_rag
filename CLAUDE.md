@@ -146,7 +146,7 @@ Every table has exactly one writer module. Key ownerships:
 | Reranker | BGE Reranker v2 | sentence-transformers==3.1.1 |
 | LLM gateway | LiteLLM (dev: Ollama/Qwen2.5) | litellm==1.42.0 |
 | Web framework | FastAPI | fastapi==0.115.0, uvicorn[standard]==0.31.0 |
-| Permission service | Cerbos PDP | ghcr.io/cerbos/cerbos:0.39.0 |
+| Permission service | 外部权限平台（含 Cerbos PDP，RAG 不部署） | 经 P-AUTHC `AUTHZ_SERVICE_URL` 调用 |
 | Auth (JWT) | IdP (Keycloak or enterprise) + local validation | python-jose[cryptography]==3.3.0 |
 | Observability | OTel Collector + Tempo/Loki/Prometheus + Grafana | opentelemetry-sdk==1.27.0 |
 | Model observability | Langfuse | langfuse==2.43.3 |

@@ -11,7 +11,6 @@ volumes:
   minio_data:
   milvus_data:
   seaweedfs_data:
-  cerbos_audit:
   infinity_hf:          # Infinity 可写缓存（.infinity_cache），模型本体以只读挂载
 
 services:
@@ -175,42 +174,6 @@ services:
       - rag-network
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8333/"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    restart: unless-stopped
-
-  # ════════════════════════════════════════════════════════
-  # 权限服务（Cerbos PDP）
-  # ════════════════════════════════════════════════════════
-
-  # 用途：外部权限服务，承担本系统全部授权判定（本系统零判定）
-  #   /v1/check       → P-AUTHC 交互端点门禁（api 调用）
-  #   /v1/check/batch → P-AUTHC 批量权限判定（api 调用）
-  #   /v1/filter      → P-AUTHC 检索后逐条复核，strict 库专用（retrieval-worker 调用）
-  #   /v1/prefilter   → P-AUTHC 检索前编译六条件过滤器（retrieval-worker 调用）
-  #   /v1/context     → P-AUTHC 铸造异步任务主体 token（api 调用）
-  #   /v1/visibility  → B-INGEST 盖戳管道取 allow_stamps/deny_stamps（stamping-worker 调用）
-  #   管理面 register/link/unlink/retire → P-AUTHC 写路径同步调用（api 调用）
-  # 本地连接：http://localhost:3592
-  # 使用方：api / retrieval-worker / stamping-worker
-  cerbos:
-    image: ghcr.io/cerbos/cerbos:0.39.0
-    command: server --config=/config/.cerbos.yaml
-    volumes:
-      - ./cerbos/.cerbos.yaml:/config/.cerbos.yaml:ro
-      # 策略目录默认使用本仓库副本；如与权限平台共用策略，可用
-      # CERBOS_POLICIES_DIR 指向权限系统 cerbos/policies（例：../permission-system/cerbos/policies）
-      - ${CERBOS_POLICIES_DIR:-./cerbos/policies}:/policies:ro
-      - ./cerbos/schemas:/schemas:ro
-      - cerbos_audit:/audit
-    ports:
-      - "13592:3592"
-      - "13593:3593"
-    networks:
-      - rag-network
-    healthcheck:
-      test: ["CMD", "/cerbos", "healthcheck", "--config=/config/.cerbos.yaml"]
       interval: 10s
       timeout: 5s
       retries: 5

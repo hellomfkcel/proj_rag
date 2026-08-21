@@ -52,13 +52,14 @@ load_env() {
 apply_docker_overrides() {
     export EMBEDDING_SERVICE_URL="http://embedding-service:19500"
     export INFINITY_URL="http://infinity:7997"
-    export AUTHZ_BASE_URL="http://cerbos:3592"
+    # 权限判定统一走外部权限平台（remote）；无内部 Cerbos
     export AUTHZ_SERVICE_URL="http://host.docker.internal:18080"
     export AUTHZ_SERVICE_MODE="${AUTHZ_SERVICE_MODE:-remote}"
     export OTEL_EXPORTER_OTLP_ENDPOINT="http://host.docker.internal:4318"
     export LANGFUSE_HOST="http://host.docker.internal:13000"
-    # Keycloak 是服务端调用（api 容器→宿主机 IdP），容器内 localhost 指向自身
-    export KEYCLOAK_SERVER_URL="${KEYCLOAK_SERVER_URL:-http://host.docker.internal:8080}"
+    # Keycloak 是服务端调用（api 容器→宿主机 IdP），容器内 localhost 指向自身，
+    # 必须无条件覆盖（.env 的 localhost 值仅供宿主机 dev 进程用）
+    export KEYCLOAK_SERVER_URL="http://host.docker.internal:8080"
 
     # 事件流 Redis 是权限系统的 perm-redis；从 .env 提取密码并换 host-gateway 宿主地址
     local perm_pwd
