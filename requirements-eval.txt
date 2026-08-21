@@ -1,0 +1,10 @@
+# RAGAS 离线评测依赖（独立于运行时 requirements.txt）
+#
+# ragas 依赖较重的 langchain 全家桶，且其 langchain-openai 0.1.x 与
+# haystack 要求的 openai>=2.0 存在版本冲突，故从运行依赖中剥离。
+# 仅在需要跑 scripts/eval_ragas.py 时安装：
+#   pip install -r requirements.txt -r requirements-eval.txt
+# 安装顺序：先装 requirements.txt（含 openai>=2），再装本文件（--no-deps 方式
+# 或接受 pip 尝试解析；必要时单独 pip install ragas==0.1.21）。
+
+ragas==0.1.21

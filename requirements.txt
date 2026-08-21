@@ -5,24 +5,29 @@
 # ========================================================
 
 # ── Haystack 核心 ────────────────────────────────────────
-haystack-ai>=2.19.0
+# 钉死到本地开发一致版本：避免 pip 对 >= 区间大量回溯（构建极慢）且保证可复现
+haystack-ai==2.31.0
 
 # ── Haystack 官方 Integration ────────────────────────────
-haystack-experimental>=0.19.0
+haystack-experimental==0.19.0.post1
 FlagEmbedding==1.4.0
 
 # ── 向量库客户端 ──────────────────────────────────────────
 milvus-haystack==0.0.18
-pymilvus>=2.6.15,<3.0.0   # 3.x 有 breaking changes，暂持观望
+pymilvus==2.6.17   # 3.x 有 breaking changes，暂持观望
 
 # ── LLM 网关 ─────────────────────────────────────────────
 litellm==1.42.0
-openai==1.40.0
+# openai 版本须满足 haystack-ai>=2.19 的 openai>=1.99.2（旧钉 1.40.0 会导致 pip 解析冲突）
+openai==2.50.0
 
 # ── 嵌入与重排序模型 ─────────────────────────────────────
 sentence-transformers==3.1.1
-# ⚠️ torch GPU 版本请单独安装：
+# ⚠️ torch GPU 版本请单独安装（见 Dockerfile）：
 #   pip install torch==2.13.0 --index-url https://download.pytorch.org/whl/cu130
+
+# ── 文本切分（langchain-text-splitters，独立小包） ────────
+langchain-text-splitters==0.2.4
 
 # ── 异步任务 ─────────────────────────────────────────────
 celery==5.4.0
@@ -64,14 +69,11 @@ opentelemetry-instrumentation-httpx==0.54b1
 structlog==24.4.0
 
 # ── Haystack OTel Tracing（替代已弃用的内置版） ──────────
-opentelemetry-haystack>=1.0.0
+opentelemetry-haystack==1.0.0
 
 # ── 模型观测（阶段二接入） ───────────────────────────────
 langfuse==4.14.0
 openinference-instrumentation-haystack==0.1.0
-
-# ── RAG 质量评估（阶段二使用） ───────────────────────────
-ragas==0.1.21
 
 # ── 工具 ─────────────────────────────────────────────────
 pydantic==2.9.2
