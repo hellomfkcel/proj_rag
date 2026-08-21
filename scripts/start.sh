@@ -53,19 +53,19 @@ apply_docker_overrides() {
     export EMBEDDING_SERVICE_URL="http://embedding-service:19500"
     export INFINITY_URL="http://infinity:7997"
     # 权限判定统一走外部权限平台（remote）；无内部 Cerbos
-    export AUTHZ_SERVICE_URL="http://host.docker.internal:18080"
+    export AUTHZ_SERVICE_URL="http://host.docker.internal:${PERMISSION_SERVICE_HOST_PORT:-18080}"
     export AUTHZ_SERVICE_MODE="${AUTHZ_SERVICE_MODE:-remote}"
     export OTEL_EXPORTER_OTLP_ENDPOINT="http://host.docker.internal:4318"
     export LANGFUSE_HOST="http://host.docker.internal:13000"
     # Keycloak 是服务端调用（api 容器→宿主机 IdP），容器内 localhost 指向自身，
     # 必须无条件覆盖（.env 的 localhost 值仅供宿主机 dev 进程用）
-    export KEYCLOAK_SERVER_URL="http://host.docker.internal:8080"
+    export KEYCLOAK_SERVER_URL="http://host.docker.internal:${KEYCLOAK_HOST_PORT:-8080}"
 
     # 事件流 Redis 是权限系统的 perm-redis；从 .env 提取密码并换 host-gateway 宿主地址
     local perm_pwd
     perm_pwd="$(sed -nE 's#^AUTHZ_EVENT_STREAM_REDIS_URL=redis://:([^@]+)@.*#\1#p' .env)"
     if [[ -n "$perm_pwd" ]]; then
-        export AUTHZ_EVENT_STREAM_REDIS_URL="redis://:${perm_pwd}@host.docker.internal:16380/0"
+        export AUTHZ_EVENT_STREAM_REDIS_URL="redis://:${perm_pwd}@host.docker.internal:${PERM_REDIS_HOST_PORT:-16380}/0"
     else
         warn ".env 未配置 AUTHZ_EVENT_STREAM_REDIS_URL，visibility-events 将无法订阅权限事件"
     fi
@@ -145,9 +145,9 @@ cmd_start() {
 
     # 5. 等待 API 就绪
     local waited=0
-    info "等待 API http://localhost:8000/healthz ..."
+    info "等待 API http://localhost:${API_HOST_PORT:-8000}/healthz ..."
     while (( waited < APP_TIMEOUT )); do
-        if curl -fsS -m 3 http://localhost:8000/healthz >/dev/null 2>&1; then
+        if curl -fsS -m 3 http://localhost:${API_HOST_PORT:-8000}/healthz >/dev/null 2>&1; then
             ok "API 就绪"
             break
         fi
@@ -160,8 +160,8 @@ cmd_start() {
     echo ""
     echo "══════ RAG 系统已启动 ══════"
     echo "  统一入口   http://localhost          (nginx :80)"
-    echo "  后端 API   http://localhost:8000     (/healthz)"
-    echo "  前端       http://localhost:3001"
+    echo "  后端 API   http://localhost:${API_HOST_PORT:-8000}     (/healthz)"
+    echo "  前端       http://localhost:${FRONTEND_HOST_PORT:-3001}"
     echo "  日志       scripts/start.sh logs [-f] [服务名]"
     echo "  状态       scripts/start.sh status"
     echo "  观测       Grafana http://localhost:3000 · Langfuse http://localhost:13000"
