@@ -28,6 +28,34 @@ def _dsn() -> str:
     return Settings().database_url.replace("postgresql+asyncpg://", "postgresql://")
 
 
+async def _fetch_doc_kbs(doc_id: str) -> List[str]:
+    """异步查询文档的活跃挂载 KB 列表。"""
+    import asyncpg as _apg
+    conn = await _apg.connect(_dsn())
+    try:
+        rows = await conn.fetch(
+            "SELECT kb_id FROM document_kb_mounts "
+            "WHERE document_id=$1 AND is_enabled=true",
+            doc_id,
+        )
+        return [str(r["kb_id"]) for r in rows]
+    finally:
+        await conn.close()
+
+
+def _lookup_doc_kbs(doc_id: str) -> List[str]:
+    """按文档反查其挂载的 KB 列表（供事件无 kb 信息时派发盖戳）。
+
+    权限平台对文档的资源级限制/封禁事件可能不带 channel.kb（kb_id=null），
+    订阅器需从 RAG 侧 document_kb_mounts 反查该文档的活跃挂载，逐 KB 派发盖戳。
+    """
+    try:
+        return asyncio.run(_fetch_doc_kbs(doc_id))
+    except Exception as exc:
+        log.warning("doc_kb_lookup_failed", doc_id=doc_id, error=str(exc)[:200])
+        return []
+
+
 # ══════════════════════════════════════════════════════════════════
 # 主动触发：生命周期操作后立即刷新戳记
 # ══════════════════════════════════════════════════════════════════
@@ -281,6 +309,15 @@ def _process_visibility_event(event: dict) -> None:
                 resource_id, kb_id, tenant_id,
                 change_type=f"redis_event_{event.get('event_type', 'unknown')}",
             )
+        elif resource_type == "document":
+            # 文档粒度但事件不带 kb（权限平台资源级限制/封禁事件 channel.kb 可为 null）：
+            # 从 RAG 侧 document_kb_mounts 反查该文档挂载的 KB，逐个派发盖戳，
+            # 否则资源级封禁不会落到 chunk 戳记上（检索仍会召回）。
+            for kb in _lookup_doc_kbs(resource_id):
+                on_visibility_changed(
+                    resource_id, kb, tenant_id,
+                    change_type=f"redis_event_{event.get('event_type', 'unknown')}",
+                )
 
         _mark_processed(event_id)
     except Exception as exc:

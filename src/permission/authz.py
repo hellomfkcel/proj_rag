@@ -306,6 +306,8 @@ def compile_filter(pf: Dict[str, Any], ctx: RequestContext, kb_id: str) -> Dict[
                    for p in expanded]
 
     # deny_stamps MUST_NOT → AND(NOT json_contains(p1), NOT json_contains(p2), ...)
+    # 注意：Milvus json_contains 不接受裸 "*" 值（保留字符），资源级限制的 deny 戳记
+    # 由权限服务以 {type}:* 通配（如 user:*）下发，本展开的 {type}:* 即可命中。
     deny_conds = [{"field": "deny_stamps", "operator": "not_json_contains", "value": p}
                   for p in expanded]
 
