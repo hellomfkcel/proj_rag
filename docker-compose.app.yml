@@ -359,6 +359,9 @@ services:
     environment:
       NODE_ENV: production
       PORT: "3001"
+      # SSE 流代理后端地址：容器内必须用服务名 api:8000。
+      # 默认 localhost:8000 在容器内指向自身 → /stream 路由代理连接拒绝 → 前端"流式传输中断"。
+      BACKEND_BASE_URL: http://api:8000
     # 不直接暴露端口（通过 nginx 访问）
     networks:
       - rag-network
