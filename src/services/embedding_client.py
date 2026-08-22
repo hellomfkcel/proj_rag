@@ -15,7 +15,7 @@ def _get_service_url() -> Optional[str]:
     return os.getenv("EMBEDDING_SERVICE_URL", "").strip() or None
 
 
-def _http_post(endpoint: str, json_data: dict, timeout: int = 120) -> dict:
+def _http_post(endpoint: str, json_data: dict, timeout: int = 300) -> dict:
     """向 Embedding Service 发送 HTTP POST 请求。
 
     ★ 传播 OTel trace context（W3C traceparent）：

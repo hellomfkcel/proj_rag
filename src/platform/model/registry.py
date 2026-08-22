@@ -16,6 +16,7 @@
 import asyncio
 import asyncpg
 import os
+import threading
 import time as _time
 from typing import Any, Dict, Generator, List, Optional
 from dataclasses import dataclass
@@ -611,6 +612,8 @@ def invoke_llm_stream(prompt: str, model_id: Optional[str] = None,
 # ── invoke_rerank ───────────────────────────────────────────────
 
 _reranker_cache: Dict[str, Any] = {}
+# 加载锁：防止 warmup 线程与请求并发加载 reranker（双检锁）
+_reranker_lock = threading.Lock()
 _DEFAULT_RERANK_MODEL_NAME = "BAAI/bge-reranker-v2-m3"
 
 
@@ -661,16 +664,29 @@ def _get_reranker(model_name: str = _DEFAULT_RERANK_MODEL_NAME):
     """
     global _reranker_cache
 
-    if model_name not in _reranker_cache:
-        from FlagEmbedding import FlagReranker
+    if model_name in _reranker_cache:
+        return _reranker_cache[model_name]
 
-        model_path = _resolve_local_model_path(model_name)
-        _reranker_cache[model_name] = FlagReranker(
-            model_path,
-            use_fp16=True,
-            devices=_get_device(required_mb=1500),
-            local_files_only=(model_path != model_name),
-        )
+    # 双检锁：warmup 线程与请求并发时只允许一个加载，其余等待
+    with _reranker_lock:
+        if model_name not in _reranker_cache:
+            from FlagEmbedding import FlagReranker
+
+            model_path = _resolve_local_model_path(model_name)
+            _device = _get_device(required_mb=1500)
+            log.info(
+                "bge_reranker_model_loading",
+                model=model_name,
+                device=_device,
+                model_path=model_path,
+            )
+            _reranker_cache[model_name] = FlagReranker(
+                model_path,
+                use_fp16=True,
+                devices=_device,
+                local_files_only=(model_path != model_name),
+            )
+            log.info("bge_reranker_model_loaded", model=model_name, device=_device)
     return _reranker_cache[model_name]
 
 

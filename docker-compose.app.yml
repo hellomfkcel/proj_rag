@@ -268,6 +268,12 @@ services:
           memory: 8G
         reservations:
           memory: 3G
+          # GPU 保留：BGE-M3 必须在 GPU 上跑（一次前向同时出 dense+sparse）。
+          # 缺此项 → torch.cuda.is_available()=False → 自动降级 CPU → 大文档嵌入极慢。
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:19500/healthz"]
       interval: 15s

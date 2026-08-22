@@ -20,11 +20,16 @@ BGE-M3 能同时输出 dense_vecs (1024d) 和 lexical_weights (稀疏词权重)�
 
 import math
 import os as _os
+import threading
 import time as _time
 from dataclasses import replace
 from typing import Any, Dict, List, Optional
 
 from haystack import component, Document
+
+from src.platform.obs.logger import get_logger
+
+log = get_logger(__name__)
 
 # ══════════════════════════════════════════════════════════════════
 # 模块级全局单例（同 registry.py _reranker_cache 模式）
@@ -32,6 +37,9 @@ from haystack import component, Document
 # ══════════════════════════════════════════════════════════════════
 
 _model: Any = None
+# 模型加载锁：防止 warmup 线程与首个请求并发加载（_model is None 时双线程各载一遍
+# → 双重加载 + 锁竞争导致请求挂起）。双检锁：只允许一个线程加载，其余等待。
+_model_lock = threading.Lock()
 
 
 def _get_model():
@@ -45,36 +53,49 @@ def _get_model():
     """
     global _model
 
-    if _model is None:
-        from FlagEmbedding import BGEM3FlagModel
+    if _model is not None:
+        return _model
 
-        model_path = "BAAI/bge-m3"
-        hf_cache = _os.path.expanduser(
-            "~/.cache/huggingface/hub/models--BAAI--bge-m3/snapshots"
-        )
-        if _os.path.isdir(hf_cache):
-            try:
-                versions = sorted(_os.listdir(hf_cache), reverse=True)
-                for v in versions:
-                    p = _os.path.join(hf_cache, v)
-                    cfg = _os.path.join(p, "config.json")
-                    if _os.path.isfile(cfg):
-                        import json
-                        with open(cfg) as f:
-                            if json.load(f).get("model_type"):
-                                model_path = p
-                                break
-            except Exception:
-                pass
+    # 双检锁：warmup 线程与首个请求并发时只允许一个加载，其余等待
+    with _model_lock:
+        if _model is None:
+            from FlagEmbedding import BGEM3FlagModel
 
-        from src.platform.model.registry import _get_device
+            model_path = "BAAI/bge-m3"
+            hf_cache = _os.path.expanduser(
+                "~/.cache/huggingface/hub/models--BAAI--bge-m3/snapshots"
+            )
+            if _os.path.isdir(hf_cache):
+                try:
+                    versions = sorted(_os.listdir(hf_cache), reverse=True)
+                    for v in versions:
+                        p = _os.path.join(hf_cache, v)
+                        cfg = _os.path.join(p, "config.json")
+                        if _os.path.isfile(cfg):
+                            import json
+                            with open(cfg) as f:
+                                if json.load(f).get("model_type"):
+                                    model_path = p
+                                    break
+                except Exception:
+                    pass
 
-        _model = BGEM3FlagModel(
-            model_path,
-            use_fp16=True,
-            devices=_get_device(required_mb=2500),
-            local_files_only=True,
-        )
+            from src.platform.model.registry import _get_device
+
+            _device = _get_device(required_mb=2500)
+            log.info(
+                "bge_m3_model_loading",
+                model="BAAI/bge-m3",
+                device=_device,
+                model_path=model_path,
+            )
+            _model = BGEM3FlagModel(
+                model_path,
+                use_fp16=True,
+                devices=_device,
+                local_files_only=True,
+            )
+            log.info("bge_m3_model_loaded", model="BAAI/bge-m3", device=_device)
 
     return _model
 

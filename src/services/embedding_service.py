@@ -112,10 +112,18 @@ class HealthResponse(BaseModel):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """服务启动/关闭生命周期。模型惰性加载，不在启动时占用 GPU。"""
+    """服务启动/关闭生命周期。后台线程预热模型（BGE-M3 + Reranker）。
+
+    预热必须在后台线程执行：同步模型加载 30-90s，若在 async lifespan 内同步调用
+    会阻塞事件循环，uvicorn 无法对外服务 → 健康检查失败 → 容器被反复重启。
+    后台线程预热则 uvicorn 立即就绪，模型在首请求前加载好（避免首次懒加载
+    耗尽 worker HTTP 超时）。
+    """
     log.info("embedding_service_starting", port=19500)
     # 从 model_registry 解析默认 embedding/reranker 模型名（管理台可切换，重启生效）
     _resolve_managed_models()
+    # 后台线程预热：不阻塞事件循环/uvicorn 启动，healthcheck 立即可达
+    threading.Thread(target=_warmup_models, daemon=True, name="model-warmup").start()
     yield
     # 关闭时释放 GPU 资源
     try:
@@ -212,6 +220,30 @@ def _resolve_managed_models() -> None:
         )
     except Exception as exc:
         log.warning("embedding_managed_models_resolve_failed", error=str(exc)[:200])
+
+
+def _warmup_models() -> None:
+    """启动时预热本地模型（BGE-M3 + BGE-Reranker）。
+
+    原为首次请求才懒加载：CPU / 高负载下首次加载需 30-60s，会耗尽 worker 的
+    HTTP 超时（120s）导致回退本地 FlagEmbedding 而失败。启动预热后请求直达
+    （毫秒级）。设备信息由 _get_model / _get_reranker 加载时打日志。
+    预热失败仅告警不阻断启动（模型仍会在首个请求时尝试加载）。
+    """
+    t0 = time.time()
+    try:
+        from src.ingest.components.bge_m3_embedder import _get_model
+        _get_model()
+        log.info("bge_m3_warmup_complete", elapsed_ms=int((time.time() - t0) * 1000))
+    except Exception as exc:
+        log.warning("bge_m3_warmup_failed", error=str(exc)[:200])
+
+    try:
+        from src.platform.model.registry import _get_reranker
+        _get_reranker()
+        log.info("bge_reranker_warmup_complete", elapsed_ms=int((time.time() - t0) * 1000))
+    except Exception as exc:
+        log.warning("bge_reranker_warmup_failed", error=str(exc)[:200])
 
 
 def _infinity_dense(texts: List[str]) -> List[List[float]]:
