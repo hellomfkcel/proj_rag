@@ -25,3 +25,6 @@ openai==2.50.0   # 版本须满足 haystack-ai>=2.19 的 openai>=1.99.2
 
 # ── 模型观测（lifespan init_langfuse） ───────────────────
 langfuse==4.14.0
+
+# ── 认证端点限流（防暴力破解；/dev-login 等） ─────────
+slowapi==0.1.10

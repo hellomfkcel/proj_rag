@@ -66,14 +66,20 @@ class AuthMiddleware(BaseHTTPMiddleware):
         except _AuthError as e:
             return JSONResponse(status_code=e.status, content={"error_code": e.error_code, "message": e.message})
 
-        # 检查用户是否被型一封禁（subject_ban）
-        if _is_user_suspended(token):
+        # 检查用户是否被型一封禁（subject_ban）；权限服务不可达时 fail-closed（503）
+        try:
+            if _is_user_suspended(token):
+                return JSONResponse(
+                    status_code=403,
+                    content={
+                        "error_code": "auth:suspended",
+                        "message": "您的账号已被封禁，无法访问系统",
+                    },
+                )
+        except _AuthError as e:
             return JSONResponse(
-                status_code=403,
-                content={
-                    "error_code": "auth:suspended",
-                    "message": "您的账号已被封禁，无法访问系统",
-                },
+                status_code=e.status,
+                content={"error_code": e.error_code, "message": e.message},
             )
 
         request.state.ctx = ctx
@@ -84,7 +90,8 @@ def _is_user_suspended(token: str) -> bool:
     """检查用户是否被型一封禁（subject_ban）。
 
     通过权限服务 prefilter 端点查询——被封禁用户返回 suspended=true。
-    失败时 fail-open（不阻止正常用户）。
+    ★ fail-closed：权限服务不可达 / 非 200 时抛 _AuthError(503)，拒绝请求。
+      （权限服务为外部授权源，授权绕过不可逆，必须 fail-closed——见 CLAUDE.md 失败语义）
     """
     from src.config import Settings
     s = Settings()
@@ -103,11 +110,17 @@ def _is_user_suspended(token: str) -> bool:
             timeout=5.0,
         )
         if resp.status_code == 200:
-            data = resp.json()
-            return data.get("suspended", False)
+            return resp.json().get("suspended", False)
+        # 非 200（权限服务明确拒绝/降级）→ fail-closed
+        raise RuntimeError(f"prefilter returned HTTP {resp.status_code}")
+    except _AuthError:
+        raise
     except Exception:
-        pass  # fail-open: 权限服务不可达时不阻止用户
-    return False
+        # fail-closed: 权限服务不可达 → 拒绝（授权绕过不可逆）
+        raise _AuthError(
+            503, "authz:unavailable",
+            "权限服务不可达，请求被拒绝（fail-closed）",
+        )
 
 
 class _AuthError(Exception):

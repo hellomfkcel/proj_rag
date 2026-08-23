@@ -56,15 +56,36 @@ def build_context(
         raise ValueError("credential is required when enforce_jwt=True")
 
     # 本地校签
+    from src.config import Settings as _Settings
+    _s = _Settings()
+
+    def _verify_with_pem() -> dict:
+        """用共享 PEM 公钥验签（RAG 自签 token 的权威校验路径）。"""
+        with open(_s.jwt_public_key_path) as _pf:
+            _public_key = _pf.read()
+        return jwt.decode(
+            credential, _public_key,
+            algorithms=[_s.jwt_algorithm],
+            options={"verify_exp": True},
+        )
+
     try:
         if jwks_url:
-            from jwt import PyJWKClient
-            jwks_client = PyJWKClient(jwks_url)
-            signing_key = jwks_client.get_signing_key_from_jwt(credential)
-            claims = jwt.decode(credential, signing_key.key, algorithms=["RS256"], options={"verify_exp": True})
+            try:
+                from jwt import PyJWKClient
+                jwks_client = PyJWKClient(jwks_url)
+                signing_key = jwks_client.get_signing_key_from_jwt(credential)
+                claims = jwt.decode(credential, signing_key.key, algorithms=["RS256"], options={"verify_exp": True})
+            except Exception:
+                # JWKS 无法匹配（如 RAG 自签 token 无 kid）→ 回退共享 PEM 验签；
+                # production 下 PEM 验签是强制的，不降级为不验签
+                claims = _verify_with_pem()
         else:
-            # 无 JWKS URL 时只解码不验签（开发期）
-            claims = jwt.decode(credential, options={"verify_signature": False, "verify_exp": True})
+            # 无 JWKS URL：production 必须用本地 PEM 验签；development 仅校验过期
+            if _s.production:
+                claims = _verify_with_pem()
+            else:
+                claims = jwt.decode(credential, options={"verify_signature": False, "verify_exp": True})
     except ExpiredSignatureError:
         raise PermissionError("JWT expired")
     except InvalidTokenError as e:
@@ -177,6 +198,33 @@ def resolve_ctx_token(ctx_token: str) -> str:
         import time
         if payload.get("exp", 0) < int(time.time()):
             raise PermissionError("ctx_token expired")
+
+        # 生产模式：必须校验 HMAC 签名。ctx_token 由权限服务 /v1/context 用共享
+        # ctx_token_secret 铸造，格式 ctx.{header}.{payload}.{sig}，
+        # sig = HMAC-SHA256(canonical_payload).hexdigest() 的 b64。
+        # 本地 legacy 3 段格式（非 canonical、截断签名）仅在 development 允许。
+        from src.config import Settings as _Settings
+        _s = _Settings()
+        if _s.production:
+            if len(parts) != 4:
+                raise PermissionError(
+                    "ctx_token 4-part format required in production (legacy 3-part is dev-only)"
+                )
+            if not _s.ctx_token_secret:
+                raise PermissionError(
+                    "ctx_token verification requires CTX_TOKEN_SECRET in production"
+                )
+            _canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+            _expected = hmac.new(
+                _s.ctx_token_secret.encode(), _canonical.encode(), hashlib.sha256
+            ).hexdigest()
+            _sig_b64 = parts[3]
+            _pad = 4 - len(_sig_b64) % 4
+            if _pad != 4:
+                _sig_b64 += "=" * _pad
+            _actual = base64.urlsafe_b64decode(_sig_b64).decode()
+            if not hmac.compare_digest(_expected, _actual):
+                raise PermissionError("ctx_token signature mismatch")
 
         credential = payload.get("credential", "")
         if not credential:

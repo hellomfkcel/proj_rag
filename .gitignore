@@ -37,6 +37,9 @@ Thumbs.db
 # Docker volumes
 *_data/
 
-# Secrets
+# Secrets — JWT 私钥等一律不提交（deploy 脚本生成/校验，见 scripts/deploy.sh）
 *.pem
-!config/jwt_*.pem
+
+# Claude Code 本地设置（含权限命令清单，可能含口令明文）
+.claude/settings.local.json
+backups/

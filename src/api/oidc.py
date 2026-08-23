@@ -214,7 +214,10 @@ class OIDCProvider:
             claims = jose_jwt.decode(
                 id_token, signing_key,
                 algorithms=["RS256"],
-                options={"verify_exp": True, "verify_aud": False},
+                # verify_at_hash=False：id_token 含 at_hash 但此流程不持有 access_token
+                # （我们基于 id_token claims 自签本系统 JWT，不依赖 at_hash 绑定）；
+                # 签名 + iss + exp 均已验证，安全不降级。
+                options={"verify_exp": True, "verify_aud": False, "verify_at_hash": False},
             )
         except JWTError as exc:
             log.warning("oidc_id_token_validation_failed", error=str(exc))

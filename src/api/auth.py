@@ -20,10 +20,11 @@ import os
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Header
+from fastapi import APIRouter, HTTPException, Header, Request
 from pydantic import BaseModel
 
 from src.config import Settings
+from src.permission.limiter import limiter
 
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
 tenant_router = APIRouter(prefix="/api/v1", tags=["tenants"])
@@ -77,7 +78,8 @@ def _sign_jwt(sub: str, tenant: str, roles: list[str]) -> tuple[str, datetime]:
 # ── POST /api/v1/auth/dev-login ─────────────────────────────────
 
 @router.post("/dev-login", response_model=DevLoginResponse)
-async def dev_login(body: DevLoginRequest):
+@limiter.limit("5/minute")  # 防暴力破解
+async def dev_login(request: Request, body: DevLoginRequest):
     """用户登录：Keycloak 验证用户名密码 + 后端验证租户成员资格。
 
     流程：
@@ -90,6 +92,13 @@ async def dev_login(body: DevLoginRequest):
     from jose import jwt as jose_jwt
 
     s = Settings()
+
+    # 生产模式禁用 dev-login：SSO 是唯一登录入口
+    if s.production:
+        raise HTTPException(
+            status_code=501,
+            detail="dev-login is disabled in production mode; use SSO login.",
+        )
 
     # ── Step 1: Keycloak 密码验证 ──
     try:
@@ -202,7 +211,8 @@ class RefreshResponse(BaseModel):
 
 
 @router.post("/token", response_model=TokenResponse)
-async def exchange_token(body: TokenRequest):
+@limiter.limit("20/minute")
+async def exchange_token(request: Request, body: TokenRequest):
     """OAuth2 authorization_code → 本系统 JWT + refresh_token。
 
     通用 OIDC 协议层，不绑定特定 IdP：
@@ -226,7 +236,15 @@ async def exchange_token(body: TokenRequest):
         )
 
     # 1. Exchange authorization_code for tokens
-    tokens = provider.exchange_code(body.code, body.redirect_uri)
+    # redirect_uri 缺失时从 PUBLIC_BASE_URL 推导前端回调地址（Keycloak 要求与注册 redirect 精确匹配）
+    s = Settings()
+    redirect_uri = body.redirect_uri or f"{s.public_base_url}/auth/callback"
+    if not redirect_uri.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="Missing redirect_uri. Set PUBLIC_BASE_URL or pass redirect_uri in the request.",
+        )
+    tokens = provider.exchange_code(body.code, redirect_uri)
     if not tokens:
         raise HTTPException(
             status_code=400,
@@ -268,7 +286,8 @@ async def exchange_token(body: TokenRequest):
 
 
 @router.post("/refresh", response_model=RefreshResponse)
-async def refresh_token(body: RefreshRequest):
+@limiter.limit("10/minute")
+async def refresh_token(request: Request, body: RefreshRequest):
     """刷新 access_token。
 
     生产模式（有 refresh_token）：
@@ -342,6 +361,12 @@ async def refresh_token(body: RefreshRequest):
         )
 
     # ── Dev mode: 重签 dev-user JWT ──
+    # 无 refresh_token 即签发 dev JWT 是无认证铸造 token 的后门，生产必须禁用
+    if s.production:
+        raise HTTPException(
+            status_code=501,
+            detail="Token refresh without a refresh_token is disabled in production mode.",
+        )
     try:
         with open(s.jwt_public_key_path) as f:
             _ = f.read()  # ensure key exists
@@ -670,7 +695,7 @@ async def check_permission_endpoint(
     from src.permission.context import build_context
 
     try:
-        ctx = build_context(credential=token)
+        ctx = build_context(credential=token, jwks_url=Settings().jwt_jwks_url)
         result = authz_check(
             ctx=ctx,
             action=body.action,

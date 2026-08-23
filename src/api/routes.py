@@ -262,13 +262,16 @@ async def query(request: QueryRequest, ctx: RequestContext = Depends(get_request
 
 
 @router.get("/conversations/{conversation_id}/stream")
-async def query_stream(conversation_id: str, turn_index: int = 1):
+async def query_stream(conversation_id: str, turn_index: int = 1, req: Request = None):
     """SSE 流式订阅查询结果。
 
     1. 首先检查 DB 中该 turn 是否已有答案（worker 在 SSE 订阅前已完成）
     2. 若有 → 直接以 SSE 事件返回（retrieved + token + done）
     3. 若无 → 订阅 Redis Pub/Sub 等待 worker 发布
     §9.3: 设 60s 空闲超时——无消息即发 error 断开。
+
+    ★ 会话归属校验（IDOR）：conversation 必须属于当前 ctx.user_id/tenant_id，
+    防止越权订阅他人会话的流式回答。
     """
     from src.config import Settings
     import redis
@@ -277,6 +280,12 @@ async def query_stream(conversation_id: str, turn_index: int = 1):
     s = Settings()
     SSE_IDLE_TIMEOUT = 60  # 秒 — 匹配 LLM 生成最长等待时间
 
+    # 会话归属校验：conversation 必须属于当前用户/租户
+    ctx = getattr(getattr(req, "state", None), "ctx", None)
+    if not ctx:
+        from fastapi import HTTPException as _HE
+        raise _HE(status_code=401, detail="auth:unauthenticated")
+
     # 取该 turn 已持久化的 trace_id（= 查询链路 trace_id），作为响应头供前端关联 Tempo。
     # worker 尚未完成时 turn 未落库 → 为空，此时前端已从 POST 响应拿到 trace_id。
     persisted_trace_id = ""
@@ -284,6 +293,20 @@ async def query_stream(conversation_id: str, turn_index: int = 1):
         import asyncpg as _apg
         _conn = await _apg.connect(
             s.database_url.replace("postgresql+asyncpg://", "postgresql://"))
+        # 归属校验：conversations 表存在且 owner 匹配当前用户/租户
+        _conv = await _conn.fetchrow(
+            "SELECT user_id, tenant_id FROM conversations WHERE id=$1",
+            conversation_id,
+        )
+        if not _conv:
+            await _conn.close()
+            from fastapi import HTTPException as _HE
+            raise _HE(status_code=404, detail="conversation not found")
+        if _conv["user_id"] != ctx.user_id or _conv["tenant_id"] != ctx.tenant_id:
+            await _conn.close()
+            from fastapi import HTTPException as _HE
+            raise _HE(status_code=403, detail="auth:forbidden — conversation does not belong to this user")
+
         _row = await _conn.fetchrow(
             "SELECT trace_id FROM conversation_turns "
             "WHERE conversation_id=$1 AND turn_index=$2",
@@ -292,6 +315,8 @@ async def query_stream(conversation_id: str, turn_index: int = 1):
         if _row:
             persisted_trace_id = _row["trace_id"] or ""
         await _conn.close()
+    except HTTPException:
+        raise
     except Exception:
         pass
 
@@ -459,10 +484,7 @@ async def ping():
     return {"ping": "pong"}
 
 
-@router.get("/readyz")
-async def readyz():
-    """就绪检查：依赖就绪（不含权限服务）。"""
-    return {"status": "ok"}
+# 注：readyz 已移至 src/main.py 根路径（无认证，供就绪探针用）。
 
 
 # ══════════════════════════════════════════════════════════════

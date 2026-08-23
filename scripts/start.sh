@@ -10,6 +10,10 @@
 #   scripts/start.sh logs [服务名]    # 查看日志（-f 跟随）
 #   scripts/start.sh init-db         # 手动执行建表（幂等）
 #   scripts/start.sh db-seed         # 写入开发期测试数据（仅开发）
+#   scripts/start.sh wheels          # 冻结/补齐 embedding-service 离线 wheelhouse（build_cache/wheels/）
+#   scripts/start.sh backup          # 数据备份（PG + 卷快照，见 scripts/backup.sh）
+#
+#   BUILD=1 scripts/start.sh start   # 强制重建镜像（代码有变更时）；默认 BUILD=0 复用已有镜像秒起
 #
 # 依赖：
 #   - .env 已配置（cp .env.example .env 后填写必需变量）
@@ -27,6 +31,7 @@ ALL="docker compose -f docker-compose.infra.yml -f docker-compose.app.yml"
 
 INFRA_TIMEOUT="${INFRA_TIMEOUT:-300}"   # 基础设施健康等待上限（秒）
 APP_TIMEOUT="${APP_TIMEOUT:-120}"       # app 就绪等待上限（秒）
+BUILD="${BUILD:-0}"                     # 1=强制重建镜像(带代码变更)，0=复用已有镜像（默认）
 
 info() { echo -e "\033[36m[i]\033[0m $*"; }
 ok()   { echo -e "\033[32m[✓]\033[0m $*"; }
@@ -60,6 +65,19 @@ apply_docker_overrides() {
     # Keycloak 是服务端调用（api 容器→宿主机 IdP），容器内 localhost 指向自身，
     # 必须无条件覆盖（.env 的 localhost 值仅供宿主机 dev 进程用）
     export KEYCLOAK_SERVER_URL="http://host.docker.internal:${KEYCLOAK_HOST_PORT:-8080}"
+    # OIDC/JWKS：服务端调用（token 交换 + IdP 验签）必须与浏览器侧 issuer 一致——
+    # Keycloak 按请求 Host 派生 issuer，若 api 经 host-gateway 拉 discovery 而浏览器经
+    # EXTERNAL_HOST，iss 不匹配导致 id_token 验签失败。因此这里用 EXTERNAL_HOST 基址
+    # （容器需能访问该地址；单机 host-gateway 场景下 192.168.1.127 等 LAN IP 可达）。
+    if [[ -z "${EXTERNAL_HOST:-}" ]]; then
+        export EXTERNAL_HOST="$(grep -E '^EXTERNAL_HOST=' .env | cut -d= -f2- || true)"
+    fi
+    if [[ -z "${OIDC_DISCOVERY_URL:-}" || "$OIDC_DISCOVERY_URL" == http://localhost* || "$OIDC_DISCOVERY_URL" == http://127.0.0.1* ]]; then
+        export OIDC_DISCOVERY_URL="http://${EXTERNAL_HOST}:${KEYCLOAK_HOST_PORT:-8080}/realms/${KEYCLOAK_REALM:-rag-v14}/.well-known/openid-configuration"
+    fi
+    if [[ -z "${JWT_JWKS_URL:-}" || "$JWT_JWKS_URL" == http://localhost* || "$JWT_JWKS_URL" == http://127.0.0.1* ]]; then
+        export JWT_JWKS_URL="http://${EXTERNAL_HOST}:${KEYCLOAK_HOST_PORT:-8080}/realms/${KEYCLOAK_REALM:-rag-v14}/protocol/openid-connect/certs"
+    fi
 
     # 事件流 Redis 是权限系统的 perm-redis；从 .env 提取密码并换 host-gateway 宿主地址
     local perm_pwd
@@ -129,6 +147,10 @@ cmd_start() {
     load_env
     apply_docker_overrides
 
+    # 计算层是否重建镜像：BUILD=1 强制 --build（代码变更后需要）；默认复用已有镜像
+    local build_flag=""
+    [[ "$BUILD" == "1" ]] && build_flag="--build"
+
     # 1. 基础设施（内部按 depends_on healthy 排序）
     info "启动基础设施..."
     $INFRA up -d
@@ -140,8 +162,9 @@ cmd_start() {
     init_db
 
     # 4. 计算层（api / workers / embedding-service / relay / visibility / frontend / nginx）
-    info "启动计算层（app）..."
-    $ALL up -d --build
+    #    默认 BUILD=0 复用已有镜像；BUILD=1 才 --build 重建
+    info "启动计算层（app）${build_flag:+（BUILD 强制重建）}..."
+    $ALL up -d $build_flag
 
     # 5. 等待 API 就绪
     local waited=0
@@ -211,6 +234,8 @@ case "${1:-help}" in
     db-seed)     load_env; apply_docker_overrides
                  info "写入开发期测试数据（仅开发）..."
                  $ALL run --rm --no-deps api python -m src.scripts.seed_dev ;;
+    wheels)      bash scripts/freeze_wheels.sh ;;
+    backup)      bash scripts/backup.sh ;;
     help|--help|-h) cmd_help ;;
     *)           fail "未知命令: $1（可用: start|stop|restart|status|logs|init-db|db-seed|help）" ;;
 esac

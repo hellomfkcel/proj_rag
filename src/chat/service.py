@@ -223,7 +223,7 @@ def _run_retrieve_generate(
     # 1. 从 ctx_token 提取 credential 后重建 RequestContext（生产路径）
     if ctx_token:
         credential = resolve_ctx_token(ctx_token)
-        ctx = build_context(credential, enforce_jwt=True)
+        ctx = build_context(credential, enforce_jwt=True, jwks_url=Settings().jwt_jwks_url)
     else:
         raise ValueError("ctx_token is required for retrieval tasks")
 

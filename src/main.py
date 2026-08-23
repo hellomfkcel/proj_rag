@@ -50,6 +50,12 @@ async def lifespan(app: FastAPI):
     from src.platform.model.registry import init_langfuse
     init_langfuse()
 
+    # P-AUTHC: 生产安全启动校验（APP_ENV=production 时关键项缺失 raise，阻止弱配置上线）
+    from src.config import validate_production_config
+    import structlog
+    for _w in validate_production_config():
+        structlog.get_logger().warning(_w)
+
     # 确保 celery_app 被 import——这会触发 celery_app.py 模块级的
     # CeleryInstrumentor().instrument()，使 trace context 在 API 发送
     # Celery 任务时自动注入任务消息头
@@ -121,6 +127,13 @@ app.add_middleware(
 )
 app.add_middleware(AuthMiddleware)
 
+# ── 认证端点限流（slowapi；/dev-login 等防暴力破解） ──
+from slowapi.errors import RateLimitExceeded
+from slowapi import _rate_limit_exceeded_handler
+from src.permission.limiter import limiter
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
 # ── FastAPI OTel 自动插桩（★ 必须最后添加，确保是最外层） ──
 from src.platform.obs.tracing import instrument_fastapi
 instrument_fastapi(app)
@@ -139,3 +152,38 @@ app.include_router(eval_router)
 @app.get("/healthz")
 async def healthz():
     return {"status": "ok"}
+
+
+@app.get("/readyz")
+async def readyz():
+    """就绪检查：PG / Redis 可达（权限服务按架构约定不入 readyz）。"""
+    from src.config import Settings as _Settings
+    import asyncpg as _apg
+    import redis as _redis
+
+    s = _Settings()
+    status = {"status": "ok", "checks": {}}
+    degraded = False
+
+    # PG
+    try:
+        conn = await _apg.connect(s.database_url.replace("postgresql+asyncpg://", "postgresql://"), timeout=3)
+        await conn.execute("SELECT 1")
+        await conn.close()
+        status["checks"]["postgres"] = "ok"
+    except Exception as e:
+        status["checks"]["postgres"] = f"unreachable: {type(e).__name__}"
+        degraded = True
+
+    # Redis
+    try:
+        r = _redis.from_url(s.redis_url, socket_timeout=3)
+        r.ping()
+        status["checks"]["redis"] = "ok"
+    except Exception as e:
+        status["checks"]["redis"] = f"unreachable: {type(e).__name__}"
+        degraded = True
+
+    if degraded:
+        status["status"] = "degraded"
+    return status

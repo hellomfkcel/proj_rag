@@ -32,7 +32,7 @@ services:
       - postgres_data:/var/lib/postgresql/data
       - ./scripts/init.sql:/docker-entrypoint-initdb.d/init.sql
     ports:
-      - "${POSTGRES_HOST_PORT:-25432}:5432"
+      - "127.0.0.1:${POSTGRES_HOST_PORT:-25432}:5432"
     networks:
       - rag-network
     healthcheck:
@@ -59,7 +59,7 @@ services:
     volumes:
       - redis_data:/data
     ports:
-      - "${REDIS_HOST_PORT:-16379}:6379"
+      - "127.0.0.1:${REDIS_HOST_PORT:-16379}:6379"
     networks:
       - rag-network
     healthcheck:
@@ -137,8 +137,8 @@ services:
     volumes:
       - milvus_data:/var/lib/milvus
     ports:
-      - "${MILVUS_HOST_PORT:-19530}:19530"
-      - "${MILVUS_HEALTH_PORT:-9091}:9091"
+      - "127.0.0.1:${MILVUS_HOST_PORT:-19530}:19530"
+      - "127.0.0.1:${MILVUS_HEALTH_PORT:-9091}:9091"
     networks:
       - rag-network
     depends_on:
@@ -169,7 +169,7 @@ services:
     volumes:
       - seaweedfs_data:/data
     ports:
-      - "${SEAWEEDFS_HOST_PORT:-18333}:8333"
+      - "127.0.0.1:${SEAWEEDFS_HOST_PORT:-18333}:8333"
     networks:
       - rag-network
     healthcheck:
@@ -215,10 +215,16 @@ services:
       # 模型缓存目录（默认当前用户 HF 缓存；多机部署用 HF_HUB_CACHE_DIR 覆盖）
       - ${HF_HUB_CACHE_DIR:-/home/mfkcel/.cache/huggingface/hub}:/models/hub
     ports:
-      - "${INFINITY_HOST_PORT:-19501}:7997"
+      - "127.0.0.1:${INFINITY_HOST_PORT:-19501}:7997"
     networks:
       - rag-network
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:7997/health', timeout=3)"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
     deploy:
       resources:
         reservations:

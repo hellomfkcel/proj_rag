@@ -149,5 +149,5 @@ COPY requirements-gpu.txt ./
 # （此前 COPY + rm 会把 3.9GB 的 wheel 层永久留在镜像里）。
 RUN --mount=type=bind,source=build_cache/wheels,target=/wheels \
     pip install --no-index --find-links /wheels ${TORCH_INSTALL} && \
-    pip install --no-cache-dir -r requirements-gpu.txt
+    pip install --no-index --find-links /wheels -r requirements-gpu.txt
 USER appuser

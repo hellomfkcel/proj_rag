@@ -34,6 +34,8 @@ services:
       # 外部权限服务后端（宿主机 18080；跨主机部署用 env 覆盖）
       AUTHZ_SERVICE_URL: ${AUTHZ_SERVICE_URL:-http://host.docker.internal:${PERMISSION_SERVICE_HOST_PORT:-18080}}
       AUTHZ_EVENT_STREAM_URL: ${AUTHZ_EVENT_STREAM_URL:-}
+      # 事件流 Redis（visibility-events 订阅权限变更）；api/workers 亦读此值（Settings）
+      AUTHZ_EVENT_STREAM_REDIS_URL: ${AUTHZ_EVENT_STREAM_REDIS_URL:-}
       AUTHZ_CLIENT_CREDENTIAL: ${AUTHZ_CLIENT_CREDENTIAL:-}
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL}
       OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:7b}
@@ -64,6 +66,12 @@ services:
       OIDC_DISCOVERY_URL: ${OIDC_DISCOVERY_URL:-}
       OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-}
       OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-}
+      # 运行模式：production 时强制 SSO/JWKS/密钥校验、禁用 dev 认证路径
+      APP_ENV: ${APP_ENV:-development}
+      # OIDC redirect_uri / SSO 回调推导基址（浏览器可达地址）
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
+      # IdP JWKS（生产验签优先）
+      JWT_JWKS_URL: ${JWT_JWKS_URL:-}
       # CORS 与前端外部链接（浏览器可达地址）
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-}
       GRAFANA_URL: ${GRAFANA_URL:-}
@@ -79,12 +87,18 @@ services:
       - ./config/jwt_public.pem:/app/config/jwt_public.pem:ro
       - ./config/jwt_private.pem:/app/config/jwt_private.pem:ro
     ports:
-      - "${API_HOST_PORT:-8000}:8000"
+      - "127.0.0.1:${API_HOST_PORT:-8000}:8000"
     networks:
       - rag-network
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
 
   # 用途：摄入任务 worker，消费 ingestion_queue
   #        执行 Haystack 摄入 Pipeline：文档解析 → 切分 → BGE-M3 嵌入 → 写 Milvus
@@ -110,6 +124,7 @@ services:
       TRANSFORMERS_OFFLINE: "1"
     volumes:
       - ./pipelines:/app/pipelines
+      - ./config/jwt_public.pem:/app/config/jwt_public.pem:ro
       - model_cache:/models
       - ${HF_HUB_CACHE_DIR:-/home/mfkcel/.cache/huggingface/hub}:/models/hub:ro
     networks:
@@ -158,6 +173,7 @@ services:
       TRANSFORMERS_OFFLINE: "1"
     volumes:
       - ./pipelines:/app/pipelines
+      - ./config/jwt_public.pem:/app/config/jwt_public.pem:ro
       - model_cache:/models
       - ${HF_HUB_CACHE_DIR:-/home/mfkcel/.cache/huggingface/hub}:/models/hub:ro
     networks:
@@ -202,6 +218,7 @@ services:
       OTEL_SERVICE_NAME: stamping-worker
     volumes:
       - ./pipelines:/app/pipelines
+      - ./config/jwt_public.pem:/app/config/jwt_public.pem:ro
     networks:
       - rag-network
     extra_hosts:
@@ -253,10 +270,11 @@ services:
       TRANSFORMERS_OFFLINE: "1"
     volumes:
       - ./pipelines:/app/pipelines
+      - ./config/jwt_public.pem:/app/config/jwt_public.pem:ro
       - model_cache:/models
       - ${HF_HUB_CACHE_DIR:-/home/mfkcel/.cache/huggingface/hub}:/models/hub:ro
     ports:
-      - "${EMBEDDING_HOST_PORT:-19500}:19500"
+      - "127.0.0.1:${EMBEDDING_HOST_PORT:-19500}:19500"
     networks:
       - rag-network
     extra_hosts:
@@ -299,6 +317,13 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
+    healthcheck:
+      # outbox-relay 无 HTTP 端口；校验其投递依赖 Redis 可达
+      test: ["CMD", "python", "-c", "import os, redis; redis.from_url(os.environ['REDIS_URL']).ping()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
 
   # ════════════════════════════════════════════════════════════
   # 事件订阅器
@@ -359,6 +384,9 @@ services:
     environment:
       NODE_ENV: production
       PORT: "3001"
+      # Next.js standalone server.js 默认用容器 hostname 绑定 → 127.0.0.1/端口映射不可达；
+      # 显式绑定 0.0.0.0（同 admin-console 处理）。
+      HOSTNAME: "0.0.0.0"
       # SSE 流代理后端地址：容器内必须用服务名 api:8000。
       # 默认 localhost:8000 在容器内指向自身 → /stream 路由代理连接拒绝 → 前端"流式传输中断"。
       BACKEND_BASE_URL: http://api:8000
@@ -368,6 +396,12 @@ services:
     restart: unless-stopped
     depends_on:
       - api
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3001/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
 
   # ════════════════════════════════════════════════════════════
   # Nginx 反向代理（统一入口）
@@ -381,8 +415,7 @@ services:
   nginx:
     image: nginx:alpine
     ports:
-      - "${NGINX_HTTP_PORT:-80}:80"          # 统一入口
-      - "${FRONTEND_HOST_PORT:-3001}:3001"       # 开发兼容（直接访问前端）
+      - "${NGINX_HTTP_PORT:-80}:80"          # 统一入口（前端经此访问，不再直连 3001）
     volumes:
       - ./frontend/nginx.conf:/etc/nginx/nginx.conf:ro
     networks:
@@ -391,3 +424,10 @@ services:
     depends_on:
       - api
       - frontend
+    healthcheck:
+      # /healthz 透传后端，验证 api 可达；用 127.0.0.1 避免 localhost→::1 无监听
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s

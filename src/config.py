@@ -16,12 +16,11 @@ class Settings:
     """应用设置，全部从环境变量读取。"""
 
     # ── 数据库 ──
-    database_url: str = os.getenv("DATABASE_URL",
-        "postgresql+asyncpg://rag:REDACTED@localhost:25432/rag")
+    # 无默认值：开发由 .env / compose 注入；生产由 validate_production_config 兜底
+    database_url: str = os.getenv("DATABASE_URL", "")
 
     # ── Redis ──
-    redis_url: str = os.getenv("REDIS_URL",
-        "redis://:REDACTED@localhost:16379/0")
+    redis_url: str = os.getenv("REDIS_URL", "")
 
     # ── Milvus ──
     milvus_host: str = os.getenv("MILVUS_HOST", "localhost")
@@ -43,10 +42,8 @@ class Settings:
     # 不提供默认值 —— 缺省即 remote 模式不可用，避免静默连到过期地址。
     authz_service_url: str = os.getenv("AUTHZ_SERVICE_URL", "")
     # VisibilityChanged 事件流 Redis URL（remote 模式使用）
-    authz_event_stream_redis_url: str = os.getenv(
-        "AUTHZ_EVENT_STREAM_REDIS_URL",
-        "redis://:REDACTED@localhost:16379/0",
-    )
+    # 无默认值：生产由 validate_production_config 强制要求显式配置
+    authz_event_stream_redis_url: str = os.getenv("AUTHZ_EVENT_STREAM_REDIS_URL", "")
     # RAG 系统所属的项目 ID，用于权限服务生命周期端点 (register/link/unlink/retire)
     # 默认 "rag-v14" 对应权限服务启动时自动种子项目
     authz_project_id: str = os.getenv("AUTHZ_PROJECT_ID", "rag-v14")
@@ -137,8 +134,127 @@ class Settings:
     # ── 日志 ──
     log_level: str = os.getenv("LOG_LEVEL", "INFO")
 
+    # ── 运行模式 ──
+    # APP_ENV=production 时：强制 SSO/JWKS/密钥校验、禁用 dev 认证路径（/dev-login、/refresh dev 分支）。
+    # 默认 development（本地/联调）；deploy 脚本置 production。
+    app_env: str = os.getenv("APP_ENV", "development")
+
+    @property
+    def production(self) -> bool:
+        """生产模式判定：APP_ENV=production。"""
+        return self.app_env == "production"
+
+    # 前端可访问的本系统外部基址（OIDC redirect_uri / SSO 回调推导用）。
+    # 生产必须配置为浏览器可达地址（域名或公网 IP），不配置则回退 OIDC exchange 不传 redirect_uri。
+    public_base_url: str = os.getenv("PUBLIC_BASE_URL", "")
+
     # ── 模型提供商判定 ──
     @property
     def is_ollama(self) -> bool:
         """是否使用本地 Ollama（基于 URL 自动判定）。"""
         return "11434" in self.llm_base_url and "vllm" not in self.llm_base_url
+
+
+# ══════════════════════════════════════════════════════════════════
+# 生产安全启动检查（APP_ENV=production）
+# ══════════════════════════════════════════════════════════════════
+
+def validate_production_config() -> list[str]:
+    """启动时校验关键安全配置，返回警告列表。
+
+    开发环境（APP_ENV != production）：仅收集 warnings，不阻塞。
+    生产环境（APP_ENV=production）：关键项缺失 raise RuntimeError，阻止以弱配置上线。
+
+    生产要求：
+    1. CTX_TOKEN_SECRET 显式配置（禁止回退 Redis URL hash）
+    2. AUTHZ_CLIENT_CREDENTIAL 显式配置（RAG→权限服务 X-Api-Key）
+    3. AUTHZ_SERVICE_MODE=remote（权限判定走外部权限平台）
+    4. OIDC_DISCOVERY_URL + JWT_JWKS_URL 配置（SSO 登录 + IdP 远程验签）
+    5. DB/Redis 连接串不含开发口令；AUTHZ_EVENT_STREAM_REDIS_URL 显式配置
+    """
+    s = Settings()
+    warnings: list[str] = []
+    errors: list[str] = []
+
+    # 1. ctx_token 签名密钥
+    if not s.ctx_token_secret:
+        msg = (
+            "CTX_TOKEN_SECRET is not set (falls back to REDIS_URL hash for ctx_token signing). "
+            "In production, set a strong random value (min 32 chars)."
+        )
+        if s.production:
+            errors.append(msg)
+        else:
+            warnings.append(msg)
+
+    # 2. 服务间认证凭据
+    if not s.authz_client_credential:
+        msg = (
+            "AUTHZ_CLIENT_CREDENTIAL is not set. "
+            "Production requires the permission-service shared API key (X-Api-Key)."
+        )
+        if s.production:
+            errors.append(msg)
+        else:
+            warnings.append(msg)
+
+    # 3. 权限判定模式
+    if s.authz_service_mode != "remote":
+        msg = (
+            f"AUTHZ_SERVICE_MODE={s.authz_service_mode}; "
+            "production requires 'remote' (external permission service)."
+        )
+        if s.production:
+            errors.append(msg)
+        else:
+            warnings.append(msg)
+
+    # 4. SSO 登录（生产禁用 dev-login）
+    if not s.oidc_discovery_url or not s.oidc_client_id:
+        msg = (
+            "OIDC_DISCOVERY_URL / OIDC_CLIENT_ID is not set. "
+            "Production requires SSO (dev-login is disabled in production)."
+        )
+        if s.production:
+            errors.append(msg)
+        else:
+            warnings.append(msg)
+
+    if not s.jwt_jwks_url:
+        msg = (
+            "JWT_JWKS_URL is not set. "
+            "Production should verify tokens against the IdP JWKS endpoint."
+        )
+        if s.production:
+            errors.append(msg)
+        else:
+            warnings.append(msg)
+
+    # 5. 开发口令泄漏进生产连接串
+    _dev_creds = ("rag_dev_pwd_2026", "perm_pass", "perm_redis_pwd_2026")
+    for _name, _url in (
+        ("DATABASE_URL", s.database_url),
+        ("REDIS_URL", s.redis_url),
+        ("AUTHZ_EVENT_STREAM_REDIS_URL", s.authz_event_stream_redis_url),
+    ):
+        if any(c in _url for c in _dev_creds):
+            msg = f"{_name} contains a development/default credential."
+            if s.production:
+                errors.append(msg)
+            else:
+                warnings.append(msg)
+
+    # 5b. 事件流 Redis 必须配置（visibility-events 订阅依赖）
+    if not s.authz_event_stream_redis_url:
+        msg = "AUTHZ_EVENT_STREAM_REDIS_URL is not set; visibility-events cannot subscribe."
+        if s.production:
+            errors.append(msg)
+        else:
+            warnings.append(msg)
+
+    if errors:
+        raise RuntimeError(
+            "Production security checks failed:\n- " + "\n- ".join(errors)
+        )
+
+    return warnings
