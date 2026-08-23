@@ -47,7 +47,8 @@ class OIDCTokens:
 
 @dataclass
 class OIDCClaims:
-    sub: str                          # 用户唯一标识
+    sub: str                          # 用户唯一标识（Keycloak 下为 UUID）
+    preferred_username: str = ""      # 可读用户名（Keycloak preferred_username）——principal 首选
     tenant: str = ""                  # 租户（从 JWT claim 映射，可配置）
     roles: list = field(default_factory=list)
     groups: list = field(default_factory=list)
@@ -242,6 +243,7 @@ class OIDCProvider:
         # 6. 提取 claims → OIDCClaims
         return OIDCClaims(
             sub=claims.get("sub", ""),
+            preferred_username=claims.get("preferred_username", ""),
             tenant=claims.get("tenant", claims.get("tenant_id", "")),
             roles=self._extract_roles(claims),
             groups=self._extract_groups(claims),
@@ -249,6 +251,50 @@ class OIDCProvider:
             name=claims.get("name", claims.get("preferred_username", "")),
             raw=claims,
         )
+
+    def extract_access_roles(self, access_token: str) -> list:
+        """从 access_token 提取 realm_access.roles + client roles。
+
+        Keycloak 某些 client（如 rag-frontend）的 id_token 未映射 roles client-scope
+        （realm_access 缺失），而 access_token 默认包含 realm_access.roles。
+        RAG /token 合并两者，保证 system_admin 等 realm 角色进入本系统 JWT
+        （前端菜单/角色判定 isAdmin/hasRole 依赖）。
+        """
+        if not access_token:
+            return []
+        meta = self.discover()
+        if not meta:
+            return []
+        jwks_uri = meta.get("jwks_uri", "")
+        try:
+            jwks_resp = self._http.get(jwks_uri)
+            jwks_resp.raise_for_status()
+            jwks = jwks_resp.json()
+            unverified_header = jose_jwt.get_unverified_header(access_token)
+            kid = unverified_header.get("kid", "")
+            signing_key = next((k for k in jwks.get("keys", []) if k.get("kid") == kid), None)
+            if not signing_key:
+                signing_key = next((k for k in jwks.get("keys", []) if k.get("alg", "").startswith("RS")), None)
+            if not signing_key:
+                return []
+            claims = jose_jwt.decode(
+                access_token, signing_key,
+                algorithms=["RS256"],
+                options={"verify_exp": True, "verify_aud": False, "verify_at_hash": False},
+            )
+        except Exception as exc:
+            log.warning("oidc_access_roles_extract_failed", error=str(exc))
+            return []
+        roles = []
+        realm = claims.get("realm_access", {})
+        if isinstance(realm, dict):
+            roles.extend(realm.get("roles", []) or [])
+        ra = claims.get("resource_access", {})
+        if isinstance(ra, dict):
+            for _cid, info in ra.items():
+                if isinstance(info, dict):
+                    roles.extend(info.get("roles", []) or [])
+        return roles
 
     # ── Refresh Token ─────────────────────────────────────────────
 

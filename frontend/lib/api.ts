@@ -66,11 +66,13 @@ api.interceptors.response.use(
       }).catch(() => {});
     }
 
-    // 401 — clear token and redirect
+    // 401 — clear token; 仅在"曾有 token 现在失效"时强制跳登录（会话过期）。
+    // 匿名 401（公开页 / SSO 回调换码前）不跳——否则 /auth/callback 的 /config 401 会把换码中断弹回登录页
     if (status === 401) {
+      const hadToken = !!localStorage.getItem("access_token");
       localStorage.removeItem("access_token");
       localStorage.removeItem("user");
-      if (typeof window !== "undefined" && window.location.pathname !== "/login") {
+      if (hadToken && typeof window !== "undefined" && window.location.pathname !== "/login") {
         window.location.href = "/login";
       }
     }

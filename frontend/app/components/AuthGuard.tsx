@@ -6,7 +6,8 @@ import { useEffect } from "react";
 import { useRouter, usePathname } from "next/navigation";
 import { useAuthStore } from "@/stores/useAuthStore";
 
-const PUBLIC_PATHS = ["/login"];
+// /auth/callback 必须公开：SSO 授权码回调页需要在无 token 时挂载执行 exchangeCode（换码后再登录）
+const PUBLIC_PATHS = ["/login", "/auth/callback"];
 
 export default function AuthGuard({ children }: { children: React.ReactNode }) {
   const token = useAuthStore((s) => s.token);

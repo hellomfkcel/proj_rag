@@ -53,7 +53,7 @@ http {
         listen 80;
         server_name _;
 
-        # __HTTP_REDIRECT_HTTPS__
+        # 生产 TLS 模式：页面流量由下方 location / 内的 return 301 收敛到 https（healthz 保留直通供健康检查）
 
         # ── 健康检查（透传到后端） ─────────────────────────────
         location /healthz {
@@ -94,6 +94,7 @@ http {
 
         # ── 其余请求 → 前端 Next.js ──────────────────────────
         location / {
+            __HTTP_REDIRECT_HTTPS__
             proxy_pass http://frontend;
             proxy_set_header Host $host;
             proxy_set_header X-Real-IP $remote_addr;

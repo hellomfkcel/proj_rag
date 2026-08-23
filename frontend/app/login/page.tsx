@@ -69,7 +69,11 @@ export default function LoginPage() {
     }
   };
 
-  const KEYCLOAK_URL = process.env.NEXT_PUBLIC_KEYCLOAK_URL || "http://192.168.1.127:8080";
+  // Keycloak URL：生产优先用 NEXT_PUBLIC_KEYCLOAK_URL（build arg，多主机/域名覆盖）；
+  // 未配置时用同源（window.location.origin）——nginx /realms 反代到 Keycloak，与生产 issuer 一致。
+  // 不要默认 http://<ip>:8080（Keycloak 生产模式会把它弹回 https，导致"闪一下不跳转"）。
+  const KEYCLOAK_URL = process.env.NEXT_PUBLIC_KEYCLOAK_URL
+    || (typeof window !== "undefined" ? window.location.origin : "http://192.168.1.127:8080");
   const KEYCLOAK_REALM = process.env.NEXT_PUBLIC_KEYCLOAK_REALM || "rag-v14";
   const KEYCLOAK_CLIENT_ID = process.env.NEXT_PUBLIC_KEYCLOAK_CLIENT_ID || "rag-frontend";
 

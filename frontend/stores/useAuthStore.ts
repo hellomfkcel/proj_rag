@@ -60,7 +60,17 @@ export const useAuthStore = create<AuthState>((set, get) => ({
       localStorage.removeItem("expires_at");
     }
     set({ token: null, user: null, expiresAt: null, hydrated: true, availableTenants: [] });
-    if (typeof window !== "undefined") window.location.href = "/login";
+    if (typeof window !== "undefined") {
+      // 结束 Keycloak SSO 会话：否则"退出"后 Keycloak 会话仍在，再点 SSO 直接免密进入，无法切账号。
+      // 经 permission-nginx :18081 调 end_session，post_logout_redirect_uri 跳回本系统 /login。
+      const kcUrl = process.env.NEXT_PUBLIC_KEYCLOAK_URL || window.location.origin;
+      const realm = process.env.NEXT_PUBLIC_KEYCLOAK_REALM || "rag-v14";
+      const clientId = process.env.NEXT_PUBLIC_KEYCLOAK_CLIENT_ID || "rag-frontend";
+      const postLogout = encodeURIComponent(`${window.location.origin}/login`);
+      window.location.href =
+        `${kcUrl}/realms/${realm}/protocol/openid-connect/logout` +
+        `?client_id=${clientId}&post_logout_redirect_uri=${postLogout}`;
+    }
   },
 
   hydrate: () => {

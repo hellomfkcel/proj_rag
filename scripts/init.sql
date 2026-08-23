@@ -75,6 +75,7 @@ CREATE TABLE IF NOT EXISTS conversation_turns (
     turn_index               INTEGER NOT NULL,
     user_question            TEXT NOT NULL,
     resolved_query           TEXT NOT NULL,      -- 阶段一 = user_question，阶段二改写
+    answer                   TEXT NOT NULL DEFAULT '',   -- LLM 生成答案（chat.service _save_turn 依赖；缺失会 500）
     retrieval_params_snapshot JSONB,
     retrieved_chunk_ids      TEXT[] DEFAULT '{}',
     retrieved_chunks         JSONB DEFAULT '[]',   -- 来源元数据 [{chunk_id, doc_name, content}]，供前端来源标注
@@ -95,6 +96,14 @@ CREATE TABLE IF NOT EXISTS directories (
     bound_kb_id      UUID UNIQUE REFERENCES knowledge_bases(id),
     created_by       VARCHAR(64) NOT NULL,
     created_at       TIMESTAMPTZ DEFAULT now()
+);
+
+-- ── 文档-目录关联（dir_routes.py 原生 SQL 依赖；缺失会 500） ─────────
+CREATE TABLE IF NOT EXISTS document_directory_entry (
+    document_id   UUID NOT NULL REFERENCES documents(id),
+    directory_id  UUID NOT NULL REFERENCES directories(id),
+    created_at    TIMESTAMPTZ DEFAULT now(),
+    PRIMARY KEY (document_id, directory_id)
 );
 
 -- ── Outbox（B-DOC 分区） ─────────────────────────────────────────────

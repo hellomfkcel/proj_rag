@@ -13,6 +13,14 @@ RUN npm ci --production=false
 
 # 复制源码并构建
 COPY . .
+# NEXT_PUBLIC_* 在构建时内联进 JS 束：SSO 按钮跳转的 Keycloak 地址（deploy 注入；
+# 缺省回退 window.location.origin）。否则构建时为空 → 登录页走同源 /realms。
+ARG NEXT_PUBLIC_KEYCLOAK_URL=""
+ARG NEXT_PUBLIC_KEYCLOAK_REALM=""
+ARG NEXT_PUBLIC_KEYCLOAK_CLIENT_ID=""
+ENV NEXT_PUBLIC_KEYCLOAK_URL=$NEXT_PUBLIC_KEYCLOAK_URL \
+    NEXT_PUBLIC_KEYCLOAK_REALM=$NEXT_PUBLIC_KEYCLOAK_REALM \
+    NEXT_PUBLIC_KEYCLOAK_CLIENT_ID=$NEXT_PUBLIC_KEYCLOAK_CLIENT_ID
 RUN npm run build
 
 # ── Stage 2: 生产运行阶段 ──────────────────────────────────────

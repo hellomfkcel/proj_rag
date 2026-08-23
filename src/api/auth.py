@@ -260,26 +260,36 @@ async def exchange_token(request: Request, body: TokenRequest):
         )
 
     # 3. Sign our own JWT (RS256, wrapping IdP claims)
+    # 身份首选 preferred_username（可读用户名，与 dev-login/权限服务 parse_principal/seed 绑定一致）：
+    #   Keycloak SSO 下 sub=UUID、preferred_username="admin" → 本系统 user_id="admin" → principal user:admin
     roles = claims.roles or ["user"]
+    # Keycloak 部分 client 的 id_token 缺 realm_access.roles（roles client-scope 未映射），
+    # access_token 默认包含 → 合并，保证 system_admin 等 realm 角色进入本系统 JWT
+    # （前端 isAdmin/hasRole 菜单门控、权限服务角色判定依赖）。
+    if tokens.access_token:
+        access_roles = provider.extract_access_roles(tokens.access_token)
+        if access_roles:
+            roles = list(dict.fromkeys([*roles, *access_roles])) or ["user"]
+    user_id = claims.preferred_username or claims.sub or claims.name or "oidc-user"
     jwt_token, expires_at = _sign_jwt(
-        sub=claims.sub or claims.name or "oidc-user",
+        sub=user_id,
         tenant=claims.tenant or "unknown",
         roles=roles,
     )
 
     # 4. Store refresh_token hash for rotation (one-way, async)
     if tokens.refresh_token:
-        _store_refresh_token_hash(claims.sub, tokens.refresh_token)
+        _store_refresh_token_hash(user_id, tokens.refresh_token)
 
     return TokenResponse(
         access_token=jwt_token,
         refresh_token=tokens.refresh_token or None,
         expires_at=expires_at.isoformat(),
         user={
-            "id": claims.sub,
+            "id": user_id,
             "tenant_id": claims.tenant,
             "roles": roles,
-            "name": claims.name or claims.sub,
+            "name": claims.name or user_id,
             "email": claims.email,
         },
     )
@@ -495,7 +505,13 @@ async def sso_callback(code: str = "", state: str = ""):
 
     # ── 1. Exchange authorization_code ──
     # Determine redirect_uri: the callback URL itself (without query params)
-    redirect_uri = f"{_get_base_url()}/api/v1/auth/callback"
+    _base = _get_base_url()
+    if not _base:
+        raise HTTPException(
+            status_code=500,
+            detail="PUBLIC_BASE_URL 未配置——SSO 回调无法构造 redirect_uri。请设置 PUBLIC_BASE_URL。",
+        )
+    redirect_uri = f"{_base}/api/v1/auth/callback"
     tokens = provider.exchange_code(code, redirect_uri)
     if not tokens:
         raise HTTPException(
@@ -540,9 +556,12 @@ async def sso_callback(code: str = "", state: str = ""):
 
 
 def _get_base_url() -> str:
-    """Get the base URL for constructing redirect_uri."""
+    """Get the base URL for constructing redirect_uri（须配置 PUBLIC_BASE_URL，缺失返回空）。
+
+    不回落 localhost：其他环境/容器里 localhost 指向自身，会让 OIDC redirect_uri 指向错地址。
+    """
     s = Settings()
-    return getattr(s, "public_base_url", "") or "http://localhost:8000"
+    return getattr(s, "public_base_url", "") or ""
 
 
 def _sso_callback_html(

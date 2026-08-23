@@ -9,6 +9,7 @@ import { useKBStore } from "@/stores/useKBStore";
 import KBList from "@/app/components/KBList";
 import { listKBs, renameKB, deleteKB } from "@/lib/kb";
 import { listTenants } from "@/lib/auth";
+import { getAppConfig } from "@/lib/settings";
 import { isAdmin } from "@/lib/permissions";
 import type { Tenant } from "@/lib/auth";
 
@@ -37,6 +38,13 @@ export default function Header() {
   const [newKBName, setNewKBName] = useState("");
   const [newKBStrategy, setNewKBStrategy] = useState("sentence");
   const [tenantsLoading, setTenantsLoading] = useState(false);
+  // 外部链接（数据驱动，来源 backend /config；不硬编码 IP）
+  const [adminConsoleUrl, setAdminConsoleUrl] = useState("");
+
+  // 首次挂载时从 backend /config 拉外部链接（避免硬编码 IP，多环境可移植）
+  useEffect(() => {
+    getAppConfig().then((cfg) => setAdminConsoleUrl(cfg.admin_console_url)).catch(() => {});
+  }, []);
 
   // 获取租户列表（确保 Header 始终有租户数据）
   const fetchTenants = useCallback(async () => {
@@ -270,7 +278,7 @@ export default function Header() {
                   <div className="px-3 py-2 border-t border-gray-100 text-xs text-gray-400">
                     租户管理请前往{" "}
                     <a
-                      href={process.env.NEXT_PUBLIC_ADMIN_CONSOLE_URL || "http://192.168.1.127:3002"}
+                      href={adminConsoleUrl || process.env.NEXT_PUBLIC_ADMIN_CONSOLE_URL || ""}
                       target="_blank"
                       rel="noopener noreferrer"
                       className="text-blue-500 hover:underline"

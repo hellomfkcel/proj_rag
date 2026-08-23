@@ -16,7 +16,7 @@ class PrefilterInjector:
     Output: filters dict that can be passed to MilvusEmbeddingRetriever.run(filters=...)
     """
 
-    def __init__(self, tenant_id: str = "tenant-dev", principals: Optional[List[str]] = None):
+    def __init__(self, tenant_id: str = "", principals: Optional[List[str]] = None):
         self.tenant_id = tenant_id
         self.principals = principals or ["user:dev-user"]
 

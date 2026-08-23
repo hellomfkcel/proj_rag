@@ -21,11 +21,11 @@ def get_request_context(request: Request) -> RequestContext:
     ctx = getattr(request.state, "ctx", None)
     if ctx is not None:
         return ctx
-    # 公开路径 fallback
+    # 公开路径 fallback（匿名无租户，tenant 留空——不硬编码开发租户名）
     return RequestContext(
         request_id="dev-public",
         user_id="anonymous",
-        tenant_id="tenant-dev",
+        tenant_id="",
         credential="",
         roles=["user"],
         principals=["user:anonymous"],

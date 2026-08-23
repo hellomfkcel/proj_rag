@@ -62,6 +62,18 @@ docker info >/dev/null 2>&1 || fail "docker daemon 不可用"
 command -v openssl >/dev/null || fail "缺少 openssl"
 [ -f "$ENV_FILE" ] || fail "缺少 .env——请 cp .env.example .env 后运行"
 
+# 预创建 build_cache 为当前用户：nginx 挂载 build_cache/tls 时 docker 会用 root 创建缺失目录，
+# 导致 deploy 无法写入证书。任何 docker 操作前先确保该目录归当前用户。
+mkdir -p "$REPO_ROOT/build_cache"
+if [ ! -w "$REPO_ROOT/build_cache" ]; then
+    if [ ! -d "$REPO_ROOT/build_cache/wheels" ]; then
+        rm -rf "$REPO_ROOT/build_cache" && mkdir -p "$REPO_ROOT/build_cache"
+        ok "build_cache 曾被 docker 以 root 创建，已重建为当前用户"
+    else
+        warn "build_cache 含 wheels 且不可写——请手动 chown -R $(id -u):$(id -g) $REPO_ROOT/build_cache"
+    fi
+fi
+
 set -a; source "$ENV_FILE"; set +a
 
 # ── 第 4 步：人工值（缺失即 fail，说明来源） ──
@@ -145,11 +157,13 @@ if [ -z "$PERM_REDIS_PASSWORD" ] && [ -f "$PERM_ROOT/.env" ]; then
     PERM_REDIS_PASSWORD="$(grep -E '^PERM_REDIS_PASSWORD=' "$PERM_ROOT/.env" | head -1 | cut -d= -f2- || true)"
 fi
 [ -n "$PERM_REDIS_PASSWORD" ] || fail "PERM_REDIS_PASSWORD 未设置。\n    值：权限系统 perm-redis 的密码（用于构造 AUTHZ_EVENT_STREAM_REDIS_URL）。\n    获取：权限系统 .env 的 PERM_REDIS_PASSWORD（同主机自动读取）。"
-AUTHZ_EVENT_STREAM_REDIS_URL="redis://:${PERM_REDIS_PASSWORD}@localhost:${PERM_REDIS_HOST_PORT:-16380}/0"
+# 容器内 host.docker.internal 才能访问宿主机 perm-redis；localhost 指向容器自身
+AUTHZ_EVENT_STREAM_REDIS_URL="redis://:${PERM_REDIS_PASSWORD}@${PERMISSION_HOST:-host.docker.internal}:${PERM_REDIS_HOST_PORT:-16380}/0"
 
 # 写回 .env（生产所需键）
 update_env AUTHZ_CLIENT_CREDENTIAL "$AUTHZ_CLIENT_CREDENTIAL"
 update_env CTX_TOKEN_SECRET "$CTX_TOKEN_SECRET"
+update_env PERMISSION_REDIS_PASSWORD "$PERM_REDIS_PASSWORD"
 update_env AUTHZ_EVENT_STREAM_REDIS_URL "$AUTHZ_EVENT_STREAM_REDIS_URL"
 update_env PUBLIC_BASE_URL "$PUBLIC_BASE_URL"
 update_env OIDC_CLIENT_ID "${OIDC_CLIENT_ID:-${KEYCLOAK_CLIENT_ID:-rag-frontend}}"
@@ -161,6 +175,8 @@ NGINX_TLS="${NGINX_TLS:-false}"
 if [ "$NGINX_TLS" = "true" ]; then
     CERT_DIR="$REPO_ROOT/build_cache/tls"
     mkdir -p "$CERT_DIR"
+    # nginx compose 挂载该目录时 docker 可能以 root 创建 → 需 chown 才能写入证书
+    chown -R "$(id -u):$(id -g)" "$CERT_DIR" 2>/dev/null || true
     TLS_CERT_FILE="${TLS_CERT_FILE:-$CERT_DIR/tls.crt}"
     TLS_KEY_FILE="${TLS_KEY_FILE:-$CERT_DIR/tls.key}"
     if [ ! -s "$TLS_CERT_FILE" ] || [ ! -s "$TLS_KEY_FILE" ]; then
@@ -168,14 +184,41 @@ if [ "$NGINX_TLS" = "true" ]; then
             -keyout "$TLS_KEY_FILE" -out "$TLS_CERT_FILE" \
             -subj "/CN=${EXTERNAL_HOST}" 2>/dev/null
         ok "已生成自签证书（$TLS_CERT_FILE）——生产请替换为正式证书（TLS_CERT_FILE/TLS_KEY_FILE）"
+        # 自签证书：api 调用 IdP/nginx 需跳过 TLS 校验（正式证书则保持 OIDC_SSL_VERIFY=true）
+        update_env OIDC_SSL_VERIFY false
+        warn "自签证书 → OIDC_SSL_VERIFY=false（api 跳过 IdP TLS 校验）；正式证书部署请删除该行以恢复校验"
     fi
-    # https 化浏览器侧地址
+    # https 化浏览器侧地址（覆盖 .env 里可能的旧 http 值）
     update_env PUBLIC_BASE_URL "https://${EXTERNAL_HOST}"
     update_env CORS_ALLOWED_ORIGINS "https://${EXTERNAL_HOST}"
-    ok "NGINX_TLS=true：启用 nginx 443，浏览器侧 URL 已收敛为 https"
+    # IdP 走权限平台独立入口（permission-nginx :18081）：Keycloak issuer 带 :18081 端口，
+    # RAG 侧 discovery/JWKS 必须与之同源，否则 id_token 验签失败。
+    update_env OIDC_DISCOVERY_URL "http://${EXTERNAL_HOST}:${PERMISSION_NGINX_PORT:-18081}/realms/${KEYCLOAK_REALM:-rag-v14}/.well-known/openid-configuration"
+    update_env JWT_JWKS_URL "http://${EXTERNAL_HOST}:${PERMISSION_NGINX_PORT:-18081}/realms/${KEYCLOAK_REALM:-rag-v14}/protocol/openid-connect/certs"
+    update_env NEXT_PUBLIC_KEYCLOAK_URL "http://${EXTERNAL_HOST}:${PERMISSION_NGINX_PORT:-18081}"
+    ok "NGINX_TLS=true：启用 nginx 443；IdP 走权限平台入口 :${PERMISSION_NGINX_PORT:-18081}"
 else
-    ok "NGINX_TLS=false：nginx 保持 HTTP（TLS 由外部 LB/Ingress 终结）"
+    # NGINX_TLS=false：重置浏览器侧 URL 为 http（避免复制/历史 .env 残留 https 导致 SSO 指向无 443 的 nginx）
+    update_env PUBLIC_BASE_URL "http://${EXTERNAL_HOST}"
+    update_env CORS_ALLOWED_ORIGINS "http://${EXTERNAL_HOST},http://${EXTERNAL_HOST}:${FRONTEND_HOST_PORT:-3001}"
+    update_env OIDC_DISCOVERY_URL "http://${EXTERNAL_HOST}:${PERMISSION_NGINX_PORT:-18081}/realms/${KEYCLOAK_REALM:-rag-v14}/.well-known/openid-configuration"
+    update_env JWT_JWKS_URL "http://${EXTERNAL_HOST}:${PERMISSION_NGINX_PORT:-18081}/realms/${KEYCLOAK_REALM:-rag-v14}/protocol/openid-connect/certs"
+    update_env NEXT_PUBLIC_KEYCLOAK_URL "http://${EXTERNAL_HOST}:${PERMISSION_NGINX_PORT:-18081}"
+    ok "NGINX_TLS=false：nginx 保持 HTTP；IdP 走权限平台入口 :${PERMISSION_NGINX_PORT:-18081}"
 fi
+
+# 重载 .env：上面的 update_env 把 OIDC/JWKS/URL 写入了 .env，但 shell 变量还是旧值。
+# 全新 .env（首次部署）时 shell 无这些值 → 下方生产 SSO 校验会误判失败。
+set -a; source "$ENV_FILE"; set +a
+
+# 容器内 127.0.0.1/localhost 指向容器自身，非宿主机——对这些宿主 URL 值告警
+# （LLM/Otel/Langfuse 等；AUTHZ_SERVICE_URL 已由 compose 从 PERMISSION_HOST 计算）。
+for _u in LLM_BASE_URL OTEL_EXPORTER_OTLP_ENDPOINT LANGFUSE_HOST; do
+    _v="${!_u:-}"
+    if [[ -n "$_v" && "$_v" =~ ^https?://(127\.0\.0\.1|localhost)(:|/) ]]; then
+        warn "$_u=$_v 指向容器自身——容器内不可达。宿主服务请用 host.docker.internal（如 http://host.docker.internal:11434/v1）；外部 API（如 api.deepseek.com）不受影响。"
+    fi
+done
 
 # 渲染 nginx.conf（TLS 开关决定是否注入 443 server）
 python3 - "$NGINX_TLS" <<'PYEOF'
@@ -237,7 +280,8 @@ ssl_server = '''    server {
 with open("frontend/nginx.conf.tmpl") as f:
     conf = f.read()
 conf = conf.replace("__TLS_SERVER__", ssl_server if tls_enabled else "")
-conf = conf.replace("__HTTP_REDIRECT_HTTPS__", "")
+# 80 端口 location /：TLS 模式页面流量 301 → https（healthz 在独立 location 保留直通）；非 TLS 空
+conf = conf.replace("__HTTP_REDIRECT_HTTPS__", "return 301 https://$host$request_uri;\n" if tls_enabled else "")
 conf = conf.replace("__KEYCLOAK_PORT__", kc_port)
 with open("frontend/nginx.conf", "w") as f:
     f.write(conf)
@@ -280,6 +324,11 @@ info "启动编排（复用 start.sh start，BUILD=$BUILD，APP_ENV=$APP_ENV）.
 export BUILD
 bash scripts/start.sh start
 
+# nginx.conf 由 deploy 渲染（bind mount），compose up 不会因文件内容变化重建容器 → 强制重建让 443/TLS 生效
+info "强制重建 nginx（加载 deploy 渲染的 nginx.conf）..."
+docker compose -f docker-compose.infra.yml -f docker-compose.app.yml up -d --force-recreate nginx 2>&1 | tail -1
+ok "nginx 已加载最新配置（NGINX_TLS=$NGINX_TLS）"
+
 # ── 最终验证 ──
 local_waited=0
 while (( local_waited < APP_TIMEOUT )); do
@@ -290,6 +339,14 @@ while (( local_waited < APP_TIMEOUT )); do
 done
 if (( local_waited >= APP_TIMEOUT )); then
     warn "API 未就绪，请查日志: scripts/start.sh logs api"
+fi
+
+# ── smoke 检查：系统性拦截"本地正常、部署失效"类问题（schema/连接/认证/超管初始化） ──
+info "运行部署后 smoke 检查（scripts/smoke_check.sh）..."
+if bash scripts/smoke_check.sh; then
+    ok "smoke 检查全部通过"
+else
+    warn "smoke 检查存在失败项——请按上方 [x] 提示修复后重跑：bash scripts/smoke_check.sh"
 fi
 
 echo ""

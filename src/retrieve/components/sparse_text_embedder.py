@@ -10,8 +10,10 @@ from typing import Any, Dict
 
 from haystack import component
 
-# BGE-M3 模型本地缓存路径
-_BGE_M3_LOCAL_PATH = os.path.expanduser("~/.cache/modelscope/hub/BAAI/bge-m3")
+# BGE-M3 模型本地缓存路径（数据驱动：env BGE_M3_LOCAL_PATH 可覆盖，避免硬编码主机路径）
+_BGE_M3_LOCAL_PATH = os.getenv(
+    "BGE_M3_LOCAL_PATH", os.path.expanduser("~/.cache/modelscope/hub/BAAI/bge-m3")
+)
 
 
 def _resolve_bge_m3_path() -> str:

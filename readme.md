@@ -804,3 +804,51 @@ pytest tests/unit/ -v           # 单元测试
 | [`docs/deploy/security-checklist.md`](docs/deploy/security-checklist.md) | 上线安全检查清单 |
 | [`docs/archive/`](docs/archive/) | 历史诊断/阶段/测试报告文档归档（git 历史同步可查） |
 | [`CLAUDE.md`](CLAUDE.md) | 仓库开发约定 |
+
+---
+
+## 13. 生产部署与初始账号
+
+### 13.1 Docker 生产部署
+
+```bash
+# 权限平台先行（RAG 的权限判定/SSO 依赖它）：
+cd <权限系统仓库> && KC_START_MODE=start bash scripts/deploy.sh
+
+# RAG：
+cd <RAG仓库>
+cp .env.example .env    # 填 LLM_* / EXTERNAL_HOST 等（deploy.sh 会校验缺失项）
+NGINX_TLS=true bash scripts/deploy.sh   # 生产（TLS + SSO）；BUILD=1 强制重建
+```
+
+`deploy.sh` 四步：校验外部依赖（权限平台/Keycloak/OTel/Langfuse）→ 自动生成强口令/密钥 →
+读环境/基础设施（`AUTHZ_CLIENT_CREDENTIAL`、共享 `CTX_TOKEN_SECRET`、perm-redis）→
+生产门禁校验（`APP_ENV=production` 缺 SSO/弱口令即 fail）→ 渲染 nginx.conf → 委托 `start.sh start`
+→ **部署后自动跑 smoke 检查**（schema/连接/认证/超管初始化）。
+
+**访问入口**：
+| 入口 | 地址 |
+|------|------|
+| RAG 前端（SSO） | `https://192.168.1.127/login`（80 自动跳 443） |
+| 权限管理台 | `http://192.168.1.127:18081` |
+| Keycloak 管理台 | `http://192.168.1.127:18081/admin` |
+
+### 13.2 初始超管账号
+
+| 系统 | 账号 | 密码 | 说明 |
+|------|------|------|------|
+| RAG + 权限平台 | `admin` | `Admin@44545780` | `system_admin` 超管，全部菜单/功能 |
+| Keycloak master 管理员 | `admin` | 见权限仓库 `permission-service/config/keycloak_admin_password` | 仅管理台/部署用 |
+
+> ⚠️ `admin:admin123` 是 Keycloak **master realm** 管理员，**不是 rag-v14 业务账号**，登录不了 RAG。
+
+### 13.3 新用户创建（让 RAG 可访问）
+
+1. Keycloak 管理台 `http://192.168.1.127:18081/admin`（master admin 登录）→ 切 realm `rag-v14`
+   → **Users → Add user** → Credentials 设密码 → Role Mapper 勾 `system_admin`/`user`
+   → Attributes 加 `tenant_id=tenant-dev`。
+2. 权限管理台 → **👥 用户与组 → 从 Keycloak 同步**（或 `POST /api/v1/auth/sync/users`）。
+3. 权限管理台 → **角色绑定**给 `user:<用户名>` 授 RAG 权限（`kb_reader`/`kb_writer`）。
+
+> ⚠️ 只给只读权限**不要**把人加为项目管理员（`project_admin` 会授项目内全部 KB 写/管理权限）。
+> 详见 [`docs/ops/RAG上线运维手册.md`](docs/ops/RAG上线运维手册.md) §7.1 与 §8（部署问题实录）。

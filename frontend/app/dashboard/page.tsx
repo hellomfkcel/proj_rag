@@ -148,15 +148,15 @@ export default function DashboardPage() {
       <section className="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
         <h2 className="text-lg font-semibold mb-4">🔗 外部工具</h2>
         <div className="grid grid-cols-4 gap-4 text-sm">
-          <a href={appCfg?.grafana_url||"http://192.168.1.127:3000"} target="_blank" rel="noreferrer" className="p-3 border border-gray-200 rounded-lg hover:border-orange-300 hover:bg-orange-50 transition">
+          <a href={appCfg?.grafana_url||""} target="_blank" rel="noreferrer" className="p-3 border border-gray-200 rounded-lg hover:border-orange-300 hover:bg-orange-50 transition">
             <div className="font-medium text-gray-700">📊 Grafana</div>
             <div className="text-xs text-gray-400 mt-1">Trace / Log / Metric</div>
           </a>
-          <a href={appCfg?.langfuse_url||"http://localhost:13000"} target="_blank" rel="noreferrer" className="p-3 border border-gray-200 rounded-lg hover:border-green-300 hover:bg-green-50 transition">
+          <a href={appCfg?.langfuse_url||""} target="_blank" rel="noreferrer" className="p-3 border border-gray-200 rounded-lg hover:border-green-300 hover:bg-green-50 transition">
             <div className="font-medium text-gray-700">🔍 Langfuse</div>
             <div className="text-xs text-gray-400 mt-1">LLM 调用链路与成本</div>
           </a>
-          <a href={`${appCfg?.cerbos_url||"http://localhost:13592"}`} target="_blank" rel="noreferrer" className="p-3 border border-gray-200 rounded-lg hover:border-blue-300 hover:bg-blue-50 transition">
+          <a href={`${appCfg?.cerbos_url||""}`} target="_blank" rel="noreferrer" className="p-3 border border-gray-200 rounded-lg hover:border-blue-300 hover:bg-blue-50 transition">
             <div className="font-medium text-gray-700">🛡️ Cerbos</div>
             <div className="text-xs text-gray-400 mt-1">权限策略引擎</div>
           </a>
