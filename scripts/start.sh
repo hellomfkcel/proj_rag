@@ -57,14 +57,21 @@ load_env() {
 apply_docker_overrides() {
     export EMBEDDING_SERVICE_URL="http://embedding-service:19500"
     export INFINITY_URL="http://infinity:7997"
+    # 外部服务主机（多主机部署用 env 覆盖；单机默认 host-gateway 指向宿主机）：
+    #   PERMISSION_HOST   权限服务/perm-redis 所在主机
+    #   KEYCLOAK_HOST     Keycloak 所在主机
+    #   OBSERVABILITY_HOST  OTel/Langfuse 所在主机
+    PERMISSION_HOST="${PERMISSION_HOST:-host.docker.internal}"
+    KEYCLOAK_HOST="${KEYCLOAK_HOST:-host.docker.internal}"
+    OBSERVABILITY_HOST="${OBSERVABILITY_HOST:-host.docker.internal}"
     # 权限判定统一走外部权限平台（remote）；无内部 Cerbos
-    export AUTHZ_SERVICE_URL="http://host.docker.internal:${PERMISSION_SERVICE_HOST_PORT:-18080}"
+    export AUTHZ_SERVICE_URL="http://${PERMISSION_HOST}:${PERMISSION_SERVICE_HOST_PORT:-18080}"
     export AUTHZ_SERVICE_MODE="${AUTHZ_SERVICE_MODE:-remote}"
-    export OTEL_EXPORTER_OTLP_ENDPOINT="http://host.docker.internal:4318"
-    export LANGFUSE_HOST="http://host.docker.internal:13000"
+    export OTEL_EXPORTER_OTLP_ENDPOINT="http://${OBSERVABILITY_HOST}:4318"
+    export LANGFUSE_HOST="http://${OBSERVABILITY_HOST}:13000"
     # Keycloak 是服务端调用（api 容器→宿主机 IdP），容器内 localhost 指向自身，
     # 必须无条件覆盖（.env 的 localhost 值仅供宿主机 dev 进程用）
-    export KEYCLOAK_SERVER_URL="http://host.docker.internal:${KEYCLOAK_HOST_PORT:-8080}"
+    export KEYCLOAK_SERVER_URL="http://${KEYCLOAK_HOST}:${KEYCLOAK_HOST_PORT:-8080}"
     # OIDC/JWKS：服务端调用（token 交换 + IdP 验签）必须与浏览器侧 issuer 一致——
     # Keycloak 按请求 Host 派生 issuer，若 api 经 host-gateway 拉 discovery 而浏览器经
     # EXTERNAL_HOST，iss 不匹配导致 id_token 验签失败。因此这里用 EXTERNAL_HOST 基址
@@ -79,11 +86,11 @@ apply_docker_overrides() {
         export JWT_JWKS_URL="http://${EXTERNAL_HOST}:${KEYCLOAK_HOST_PORT:-8080}/realms/${KEYCLOAK_REALM:-rag-v14}/protocol/openid-connect/certs"
     fi
 
-    # 事件流 Redis 是权限系统的 perm-redis；从 .env 提取密码并换 host-gateway 宿主地址
+    # 事件流 Redis 是权限系统的 perm-redis；从 .env 提取密码并换外部主机地址
     local perm_pwd
     perm_pwd="$(sed -nE 's#^AUTHZ_EVENT_STREAM_REDIS_URL=redis://:([^@]+)@.*#\1#p' .env)"
     if [[ -n "$perm_pwd" ]]; then
-        export AUTHZ_EVENT_STREAM_REDIS_URL="redis://:${perm_pwd}@host.docker.internal:${PERM_REDIS_HOST_PORT:-16380}/0"
+        export AUTHZ_EVENT_STREAM_REDIS_URL="redis://:${perm_pwd}@${PERMISSION_HOST}:${PERM_REDIS_HOST_PORT:-16380}/0"
     else
         warn ".env 未配置 AUTHZ_EVENT_STREAM_REDIS_URL，visibility-events 将无法订阅权限事件"
     fi

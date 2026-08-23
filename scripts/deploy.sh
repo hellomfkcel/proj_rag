@@ -14,6 +14,18 @@
 #   APP_ENV=development bash scripts/deploy.sh  # 联调（保留 dev 登录路径）
 #   BUILD=1 bash scripts/deploy.sh           # 强制重建镜像（含 embedding-service）
 #   ROTATE_KEYS=1 bash scripts/deploy.sh     # 强制轮换 JWT 密钥对（泄露后的补救）
+#   NGINX_TLS=true bash scripts/deploy.sh    # nginx 443 TLS（自签或 TLS_CERT_FILE/TLS_KEY_FILE）
+#
+# 多主机部署（RAG 与权限系统/可观测在不同主机时，用 env 覆盖服务地址）：
+#   PERMISSION_HOST=<权限主机IP>               # 权限服务/perm-redis（默认 host.docker.internal 单机）
+#   KEYCLOAK_HOST=<Keycloak主机IP>             # Keycloak（默认 host.docker.internal）
+#   OBSERVABILITY_HOST=<观测主机IP>            # OTel :4318 / Langfuse :13000（默认 host.docker.internal）
+#   AUTHZ_CLIENT_CREDENTIAL / CTX_TOKEN_SECRET / PERM_REDIS_PASSWORD
+#       跨系统共享值：多主机下无法读本地权限配置，必须显式 env 提供（单机自动读本地）
+#
+# 正式域名（#7）：
+#   EXTERNAL_HOST=https 域名（如 rag.example.com） + NGINX_TLS=true + 正式证书（TLS_CERT_FILE/TLS_KEY_FILE）
+#   Keycloak 侧同步 KC_HOSTNAME=域名 + https redirect URIs（keycloak_bootstrap 自动按 EXTERNAL_HOST 推导）
 #
 # 人工设置值（第 4 步，缺失会 fail）：
 #   LLM_BASE_URL / LLM_MODEL / LLM_API_KEY  LLM 服务地址/模型名/密钥。
@@ -143,6 +155,94 @@ update_env PUBLIC_BASE_URL "$PUBLIC_BASE_URL"
 update_env OIDC_CLIENT_ID "${OIDC_CLIENT_ID:-${KEYCLOAK_CLIENT_ID:-rag-frontend}}"
 # CORS 收敛：生产浏览器来源 = EXTERNAL_HOST（前端经 nginx 同源，无需额外端口）
 update_env CORS_ALLOWED_ORIGINS "http://${EXTERNAL_HOST},http://${EXTERNAL_HOST}:${FRONTEND_HOST_PORT:-3001}"
+
+# ── TLS：nginx 443 终止（NGINX_TLS=true 时启用） ────────────────
+NGINX_TLS="${NGINX_TLS:-false}"
+if [ "$NGINX_TLS" = "true" ]; then
+    CERT_DIR="$REPO_ROOT/build_cache/tls"
+    mkdir -p "$CERT_DIR"
+    TLS_CERT_FILE="${TLS_CERT_FILE:-$CERT_DIR/tls.crt}"
+    TLS_KEY_FILE="${TLS_KEY_FILE:-$CERT_DIR/tls.key}"
+    if [ ! -s "$TLS_CERT_FILE" ] || [ ! -s "$TLS_KEY_FILE" ]; then
+        openssl req -x509 -nodes -newkey rsa:2048 -days 825 \
+            -keyout "$TLS_KEY_FILE" -out "$TLS_CERT_FILE" \
+            -subj "/CN=${EXTERNAL_HOST}" 2>/dev/null
+        ok "已生成自签证书（$TLS_CERT_FILE）——生产请替换为正式证书（TLS_CERT_FILE/TLS_KEY_FILE）"
+    fi
+    # https 化浏览器侧地址
+    update_env PUBLIC_BASE_URL "https://${EXTERNAL_HOST}"
+    update_env CORS_ALLOWED_ORIGINS "https://${EXTERNAL_HOST}"
+    ok "NGINX_TLS=true：启用 nginx 443，浏览器侧 URL 已收敛为 https"
+else
+    ok "NGINX_TLS=false：nginx 保持 HTTP（TLS 由外部 LB/Ingress 终结）"
+fi
+
+# 渲染 nginx.conf（TLS 开关决定是否注入 443 server）
+python3 - "$NGINX_TLS" <<'PYEOF'
+import os, sys
+tls_enabled = sys.argv[1] == "true"
+kc_port = os.environ.get("KEYCLOAK_HOST_PORT", "8080")
+ssl_server = '''    server {
+        listen 443 ssl;
+        server_name _;
+        ssl_certificate /etc/nginx/certs/tls.crt;
+        ssl_certificate_key /etc/nginx/certs/tls.key;
+        ssl_protocols TLSv1.2 TLSv1.3;
+        ssl_ciphers HIGH:!aNULL:!MD5;
+
+        location /healthz {
+            proxy_pass http://backend;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto https;
+        }
+
+        location /realms/ {
+            proxy_pass http://host.docker.internal:__KEYCLOAK_PORT__;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto https;
+            proxy_set_header X-Forwarded-Host $host;
+            proxy_http_version 1.1;
+            proxy_read_timeout 60s;
+        }
+
+        location /api/ {
+            proxy_pass http://backend;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto https;
+            proxy_buffering off;
+            proxy_cache off;
+            proxy_read_timeout 300s;
+            proxy_http_version 1.1;
+            proxy_set_header Connection '';
+        }
+
+        location / {
+            proxy_pass http://frontend;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto https;
+            proxy_http_version 1.1;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection "upgrade";
+        }
+    }
+'''
+with open("frontend/nginx.conf.tmpl") as f:
+    conf = f.read()
+conf = conf.replace("__TLS_SERVER__", ssl_server if tls_enabled else "")
+conf = conf.replace("__HTTP_REDIRECT_HTTPS__", "")
+conf = conf.replace("__KEYCLOAK_PORT__", kc_port)
+with open("frontend/nginx.conf", "w") as f:
+    f.write(conf)
+PYEOF
+ok "nginx.conf 已渲染（NGINX_TLS=$NGINX_TLS）"
 if [ "$APP_ENV" = "production" ] && ! grep -q '^APP_ENV=production$' "$ENV_FILE"; then
     sed -i 's/^APP_ENV=.*/APP_ENV=production/' "$ENV_FILE" 2>/dev/null || true
     grep -q '^APP_ENV=production$' "$ENV_FILE" || echo "APP_ENV=production" >> "$ENV_FILE"

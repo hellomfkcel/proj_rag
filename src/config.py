@@ -130,6 +130,8 @@ class Settings:
     oidc_discovery_url: str = os.getenv("OIDC_DISCOVERY_URL", "")
     oidc_client_id: str = os.getenv("OIDC_CLIENT_ID", "")
     oidc_client_secret: str = os.getenv("OIDC_CLIENT_SECRET", "")
+    # IdP TLS 校验：正式证书默认开启；自签/内部 CA 部署设 OIDC_SSL_VERIFY=false
+    oidc_ssl_verify: bool = os.getenv("OIDC_SSL_VERIFY", "true").lower() not in ("false", "0", "no")
 
     # ── 日志 ──
     log_level: str = os.getenv("LOG_LEVEL", "INFO")

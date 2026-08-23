@@ -68,7 +68,9 @@ class OIDCProvider:
         self.discovery_url: str = getattr(s, "oidc_discovery_url", "") or ""
         self.client_id: str = getattr(s, "oidc_client_id", "") or ""
         self.client_secret: str = getattr(s, "oidc_client_secret", "") or ""
-        self._http = httpx.Client(timeout=15.0)
+        # TLS 校验：正式证书默认开启；自签/内部 CA 部署可设 OIDC_SSL_VERIFY=false
+        self._verify = getattr(s, "oidc_ssl_verify", True)
+        self._http = httpx.Client(timeout=15.0, verify=self._verify)
 
     @property
     def enabled(self) -> bool:
