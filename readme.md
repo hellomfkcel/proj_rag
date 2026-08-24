@@ -40,33 +40,31 @@
 ### 前置要求
 
 - Docker + Docker Compose v2
-- 外部权限平台（权限服务 + Cerbos + Keycloak）另行部署，并配置 `.env` 中 `AUTHZ_*` / `KEYCLOAK_*` 相关项
-- 复制 `.env.example` 为 `.env` 并填写（密钥、模型 key 等）
+- 外部权限平台（权限系统 + Cerbos + Keycloak）已部署（默认同主机 `../permission-system`）
+- 复制 `.env.example` 为 `.env` 并填写必需变量
 
-### 全栈部署
+### 部署（scripts/deploy.sh）— 首次上线 / 配置变更后
 
-```bash
-# 一键启动：基础设施 → 初始化数据库 → 应用
-bash scripts/start.sh start
-
-# 停止 / 重启 / 状态 / 日志
-bash scripts/start.sh stop
-bash scripts/start.sh restart
-bash scripts/start.sh status
-bash scripts/start.sh logs [服务名]
-```
-
-### 常用运维命令（Makefile）
+`deploy.sh` 负责：校验外部依赖 → 自动生成强随机密钥/口令（含 JWT 密钥对）→ 读取环境与基础设施配置（权限平台 key、perm-redis、OTel/Langfuse/LLM 等）→ 人工补值（缺失即报错并说明来源）→ 编排启动 → 最终验证与 smoke 检查。
 
 ```bash
-make infra              # 启动基础设施
-make infra-down         # 停止基础设施（保留数据）
-make infra-reset        # 完全重置（删除所有数据，慎用）
-make db-init            # 初始化数据库表（首次部署后执行一次）
-make db-seed            # 写入开发测试数据（仅开发）
+bash scripts/deploy.sh                       # 生产部署（默认 APP_ENV=production）
+APP_ENV=development bash scripts/deploy.sh   # 联调模式（保留 dev 登录）
+BUILD=1 bash scripts/deploy.sh               # 代码变更后强制重建镜像
+ROTATE_KEYS=1 bash scripts/deploy.sh         # 密钥泄露后强制轮换 JWT
+NGINX_TLS=true bash scripts/deploy.sh        # nginx 443 TLS
 ```
 
-本地开发可分别启动进程：`make dev-api`、`make dev-ingest`、`make dev-retrieve`、`make dev-stamp`、`make dev-embedding`、`make dev-frontend` 等。
+### 运维（scripts/start.sh）— 日常起停与排障
+
+```bash
+bash scripts/start.sh start                  # 按序启动：infra → init-db → app
+bash scripts/start.sh stop                   # 停止全部（保留数据卷）
+bash scripts/start.sh restart                # 重启全部
+bash scripts/start.sh status                 # 查看各服务健康状态
+bash scripts/start.sh logs [服务名]           # 查看日志（-f 跟随）
+bash scripts/start.sh backup                 # 数据备份（PG + 卷快照）
+```
 
 ### 服务端口
 
