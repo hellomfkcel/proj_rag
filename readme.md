@@ -564,7 +564,7 @@ KB=$(curl -s -X POST http://localhost:8000/api/v1/knowledge-bases \
 # 3. 上传文档，自动触发解析 → 摄入 → 盖戳
 curl -s -X POST http://localhost:8000/api/v1/documents/upload \
   -H "Authorization: Bearer $TOKEN" \
-  -F "file=@test_docs/<文件名>.md" -F "kb_id=$KB" -F "auto_parse=true"
+  -F "file=@<你的文档>.md" -F "kb_id=$KB" -F "auto_parse=true"
 
 # 4. 确认已可检索：chunk 的 vis_version 须大于 0
 curl -s -H "Authorization: Bearer $TOKEN" \
