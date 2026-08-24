@@ -43,3 +43,6 @@ Thumbs.db
 # Claude Code 本地设置（含权限命令清单，可能含口令明文）
 .claude/settings.local.json
 backups/
+
+# 内部设计文档已移出 git（历史已清除，副本在 ~/docs_backup_20260824）
+docs/
