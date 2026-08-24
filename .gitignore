@@ -34,3 +34,6 @@ Thumbs.db
 # Secrets
 *.pem
 !config/jwt_*.pem
+
+# 内部设计文档已移出 git（历史已清除，副本在 ~/docs_backup_20260824）
+docs/
