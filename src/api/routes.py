@@ -30,6 +30,9 @@ class UploadResponse(BaseModel):
     mount_id: str
     parse_status: str
     duplicate: bool
+    # 上传后可见性提示：若 KB 当前无授权读者，内容将对所有人不可见（摄入后产生
+    # stamp_empty_visibility 警告）。指引用户到管理台授权，避免"有文档但检索不到"静默发生。
+    visibility_note: str = ""
 
 
 class QueryRequest(BaseModel):
@@ -136,6 +139,13 @@ def upload_document(
         credential=credential,
         otel_trace_id=_otel_trace_id,
         otel_span_id=_otel_span_id,
+    )
+    # 可见性提示：解析/盖戳是异步的，此处无法同步判定可见性；给出指引。
+    # 若该 KB 当前无任何授权读者（无 kb:read ACL / 角色绑定），摄入后 chunk 将盖空戳，
+    # 内容对所有人不可见，并产生 stamp_empty_visibility 警告（Loki/审计可查）。
+    result["visibility_note"] = (
+        "文档已受理解析。若该 KB 当前无授权读者，内容将不对任何人可见并在摄入后产生警告——"
+        "请在管理台为该 KB 授权（kb:read/kb:write 或角色绑定），授权后重新盖戳即可检索。"
     )
     return UploadResponse(**result)
 

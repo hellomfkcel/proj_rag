@@ -53,18 +53,25 @@ APP_ENV=development bash scripts/deploy.sh   # 联调模式（保留 dev 登录�
 BUILD=1 bash scripts/deploy.sh               # 代码变更后强制重建镜像
 ROTATE_KEYS=1 bash scripts/deploy.sh         # 密钥泄露后强制轮换 JWT
 NGINX_TLS=true bash scripts/deploy.sh        # nginx 443 TLS
+RESET=1 bash scripts/deploy.sh               # 全新部署：清空全部数据卷（数据不可恢复）
 ```
 
 ### 运维（scripts/start.sh）— 日常起停与排障
 
 ```bash
 bash scripts/start.sh start                  # 按序启动：infra → init-db → app
+RESET=1 bash scripts/start.sh start          # 全新部署：清空全部数据卷（数据不可恢复）
 bash scripts/start.sh stop                   # 停止全部（保留数据卷）
 bash scripts/start.sh restart                # 重启全部
 bash scripts/start.sh status                 # 查看各服务健康状态
 bash scripts/start.sh logs [服务名]           # 查看日志（-f 跟随）
 bash scripts/start.sh backup                 # 数据备份（PG + 卷快照）
 ```
+
+> **全新部署（RESET=1）**：数据卷（postgres/redis/etcd/minio/milvus/seaweedfs/infinity_hf/model_cache）
+> 首次初始化时固化口令，`POSTGRES_PASSWORD` 对既有卷不生效。重部署时 `.env` 口令与旧卷不一致会导致
+> 数据库认证失败——脚本会在建表前做口令预检并提示。`RESET=1` 清空全部数据卷后按 `.env` 全新初始化
+> （含向量库与模型缓存，**数据不可恢复**）。
 
 ### 服务端口
 

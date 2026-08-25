@@ -14,6 +14,7 @@
 #   scripts/start.sh backup          # 数据备份（PG + 卷快照，见 scripts/backup.sh）
 #
 #   BUILD=1 scripts/start.sh start   # 强制重建镜像（代码有变更时）；默认 BUILD=0 复用已有镜像秒起
+#   RESET=1 scripts/start.sh start   # 全新部署：先清空全部数据卷（含向量库/模型缓存，数据不可恢复）
 #
 # 依赖：
 #   - .env 已配置（cp .env.example .env 后填写必需变量）
@@ -32,6 +33,7 @@ ALL="docker compose -f docker-compose.infra.yml -f docker-compose.app.yml"
 INFRA_TIMEOUT="${INFRA_TIMEOUT:-300}"   # 基础设施健康等待上限（秒）
 APP_TIMEOUT="${APP_TIMEOUT:-120}"       # app 就绪等待上限（秒）
 BUILD="${BUILD:-0}"                     # 1=强制重建镜像(带代码变更)，0=复用已有镜像（默认）
+RESET="${RESET:-0}"                     # 1=全新部署：先清空全部数据卷（含向量库/模型缓存，数据不可恢复）
 
 info() { echo -e "\033[36m[i]\033[0m $*"; }
 ok()   { echo -e "\033[32m[✓]\033[0m $*"; }
@@ -154,6 +156,13 @@ cmd_start() {
     load_env
     apply_docker_overrides
 
+    # RESET=1：全新部署，先清空全部数据卷（含向量库 Milvus/MinIO/seaweedfs 与 model_cache，数据不可恢复）
+    if [[ "$RESET" == "1" ]]; then
+        warn "RESET=1 全新部署：即将清空全部数据卷（postgres/redis/etcd/minio/milvus/seaweedfs/infinity_hf/model_cache），数据不可恢复！"
+        $ALL down -v --remove-orphans
+        ok "数据卷已清空，将按当前 .env 全新初始化"
+    fi
+
     # 计算层是否重建镜像：BUILD=1 强制 --build（代码变更后需要）；默认复用已有镜像
     local build_flag=""
     [[ "$BUILD" == "1" ]] && build_flag="--build"
@@ -165,6 +174,16 @@ cmd_start() {
     # 2. 等待 infra 全部 healthy（Milvus 通常最慢）
     wait_healthy "$INFRA" "$INFRA_TIMEOUT" "基础设施"
 
+    # 2b. postgres 口令预检（fail-fast）：既有 postgres_data 卷口令固化，POSTGRES_PASSWORD 对非空卷不生效；
+    #     用容器内 @postgres:5432 命中真实 scram 认证，在建表/起应用层之前暴露口令漂移。
+    if $INFRA exec -T postgres psql \
+        "postgresql://rag:${POSTGRES_PASSWORD}@postgres:5432/rag" \
+        -tAc "SELECT 1" >/dev/null 2>&1; then
+        ok "postgres 口令预检通过（rag）"
+    else
+        fail "postgres 数据卷口令与 .env 不一致（rag 认证失败）。\n    处理：RESET=1 scripts/start.sh start 全量重建（清空数据卷，数据不可恢复）；\n          或恢复该卷首次初始化时的原 POSTGRES_PASSWORD 到 .env。"
+    fi
+
     # 3. 建表（幂等，重复启动安全）
     init_db
 
@@ -172,6 +191,11 @@ cmd_start() {
     #    默认 BUILD=0 复用已有镜像；BUILD=1 才 --build 重建
     info "启动计算层（app）${build_flag:+（BUILD 强制重建）}..."
     $ALL up -d $build_flag
+
+    # 4b. 强制重建 nginx：后端容器（api/frontend）被 recreate 后容器 IP 变化，而 nginx 在
+    #     启动时解析 upstream（server api:8000）→ 若后端 IP 已变则指向旧 IP → 502 Connection refused。
+    #     deploy.sh 已对 nginx 做 --force-recreate，start.sh 对齐（登录/API 全经 nginx 反代）。
+    $ALL up -d --force-recreate nginx 2>&1 | tail -1
 
     # 5. 等待 API 就绪
     local waited=0

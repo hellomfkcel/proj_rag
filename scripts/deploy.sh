@@ -15,6 +15,7 @@
 #   BUILD=1 bash scripts/deploy.sh           # 强制重建镜像（含 embedding-service）
 #   ROTATE_KEYS=1 bash scripts/deploy.sh     # 强制轮换 JWT 密钥对（泄露后的补救）
 #   NGINX_TLS=true bash scripts/deploy.sh    # nginx 443 TLS（自签或 TLS_CERT_FILE/TLS_KEY_FILE）
+#   RESET=1 bash scripts/deploy.sh           # 全新部署：先清空全部数据卷（含向量库/模型缓存，数据不可恢复）
 #
 # 多主机部署（RAG 与权限系统/可观测在不同主机时，用 env 覆盖服务地址）：
 #   PERMISSION_HOST=<权限主机IP>               # 权限服务/perm-redis（默认 host.docker.internal 单机）
@@ -50,6 +51,7 @@ APP_TIMEOUT="${APP_TIMEOUT:-120}"
 BUILD="${BUILD:-0}"
 APP_ENV="${APP_ENV:-production}"
 ROTATE_KEYS="${ROTATE_KEYS:-0}"
+RESET="${RESET:-0}"                     # 1=全新部署：透传给 start.sh 清空全部数据卷（数据不可恢复）
 
 info() { echo -e "\033[36m[i]\033[0m $*"; }
 ok()   { echo -e "\033[32m[✓]\033[0m $*"; }
@@ -320,8 +322,9 @@ verify_url "OTel Collector" "http://127.0.0.1:4318/" optional
 verify_url "Langfuse" "http://127.0.0.1:13000/" optional
 
 # ── 委托 start.sh 完成编排（infra → init-db → app） ──
-info "启动编排（复用 start.sh start，BUILD=$BUILD，APP_ENV=$APP_ENV）..."
+info "启动编排（复用 start.sh start，BUILD=$BUILD，RESET=$RESET，APP_ENV=$APP_ENV）..."
 export BUILD
+export RESET
 bash scripts/start.sh start
 
 # nginx.conf 由 deploy 渲染（bind mount），compose up 不会因文件内容变化重建容器 → 强制重建让 443/TLS 生效

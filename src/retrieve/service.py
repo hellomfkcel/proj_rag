@@ -56,9 +56,25 @@ def retrieve(
     else:
         raise ValueError("ctx_token is required for retrieval tasks")
 
+    # ── 检索 span 属性（写入当前 span，让 Tempo 携带 query/kb/principal/结果）──
+    from opentelemetry import trace as _otel_trace2
+
+    def _set_span_attrs(status: str, count: int = 0) -> None:
+        _sp = _otel_trace2.get_current_span()
+        if _sp.is_recording():
+            _sp.set_attribute("retrieve.status", status)
+            _sp.set_attribute("retrieve.result_count", count)
+            _sp.set_attribute("retrieve.tenant_id", ctx.tenant_id)
+            _sp.set_attribute("retrieve.principals", ",".join(sorted(ctx.principals)))
+            _sp.set_attribute("retrieve.kb_ids", ",".join(kb_ids))
+            _sp.set_attribute("retrieve.query", query)
+
     # ── L1: prefilter ──
     pf = get_prefilter(ctx)
     if pf.get("suspended"):
+        log.warning("retrieve_suspended", tenant_id=ctx.tenant_id,
+                    principals=list(ctx.principals), reason=pf.get("reason"))
+        _set_span_attrs("suspended")
         return {"documents": [], "status": "suspended"}
 
     pf_kbs = pf.get("kbs", "__ALL__")
@@ -68,7 +84,17 @@ def retrieve(
         pf_kb_set = set(pf_kbs) if isinstance(pf_kbs, list) else set()
         candidate_kbs = [kb for kb in kb_ids if kb in pf_kb_set]
 
+    log.info("retrieve_prefilter",
+             tenant_id=ctx.tenant_id, principals=list(ctx.principals),
+             allow_stamps=pf.get("allow_stamps"), deny_stamps=pf.get("deny_stamps"),
+             version=pf.get("version"), requested_kbs=kb_ids,
+             candidate_kbs=candidate_kbs)
+
     if not candidate_kbs:
+        log.warning("retrieve_empty_candidates",
+                    tenant_id=ctx.tenant_id, principals=list(ctx.principals),
+                    requested_kbs=kb_ids, pf_kbs=pf_kbs)
+        _set_span_attrs("empty_candidates")
         return {"documents": [], "status": "empty_candidates"}
 
     # ── P0-2: 查询嵌入只编一次（与 KB 无关，确定性纯函数）──
@@ -153,11 +179,22 @@ def retrieve(
                     result.get("ranker", {}).get("documents", []) or
                     result.get(_retriever_key, {}).get("documents", []))
             all_docs.extend(docs)
+            # 每 KB 检索结果：filter_expr 即六条件编译结果（含 allow_stamps json_contains），
+            # 命中 0 时可直接看出"空 allow_stamps 被排除"等原因。
+            log.info("retrieve_kb_run", kb_id=kb_id, filter_expr=filter_expr,
+                     hit_count=len(docs), mode=retrieval_mode)
 
         except Exception as exc:
-            log.warning("pipeline_query_failed", error=str(exc), kb_id=kb_id)
+            log.warning("pipeline_query_failed", error=str(exc), kb_id=kb_id,
+                        filter_expr=filter_expr)
 
     if not all_docs:
+        log.warning("retrieve_empty",
+                    kb_ids=candidate_kbs, tenant_id=ctx.tenant_id,
+                    principals=list(ctx.principals),
+                    reason="no_chunks_match_prefilter_or_milvus_zero",
+                    hint="likely empty allow_stamps or KB not authorized; check retrieve_kb_run filter_expr / stamp_empty_visibility")
+        _set_span_attrs("empty_results")
         return {"documents": [], "status": "empty_results", "chunk_ids": [], "count": 0}
 
     # ── L2: refetch if too few results (same pipeline, same filters per KB) ──
@@ -168,6 +205,8 @@ def retrieve(
     round_count = 0
     while 0 < len(all_docs) < min_results and round_count < refetch_max_rounds:
         round_count += 1
+        log.info("retrieve_refetch", round=round_count,
+                 current=len(all_docs), min_results=min_results)
         for kb_id in candidate_kbs:
             flt = compile_filter(pf, ctx, kb_id)
             filter_expr = _compile_filter_expr(flt)
@@ -207,6 +246,9 @@ def retrieve(
 
     # ── Truncate to top_k ──
     all_docs = all_docs[:top_k]
+    _set_span_attrs("ok", len(all_docs))
+    log.info("retrieve_done", count=len(all_docs), kb_ids=candidate_kbs,
+             mode=retrieval_mode, refetch_rounds=round_count)
 
     return {
         "documents": all_docs,

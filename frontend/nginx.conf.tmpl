@@ -37,6 +37,10 @@ http {
     # 上传文件大小限制（与后端对齐）
     client_max_body_size 50m;
 
+    # HTTP-only 部署：剥离 Keycloak 经 /realms 透传的 Strict-Transport-Security。
+    # TLS 由外部 LB 终结、内部全 http；HSTS 会让浏览器缓存后强制升级 https 而无法访问。
+    proxy_hide_header Strict-Transport-Security;
+
     # ── 上游服务定义 ──────────────────────────────────────────
     # Docker 环境中使用服务名；宿主机部署改为 localhost
 

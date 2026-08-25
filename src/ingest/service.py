@@ -404,6 +404,29 @@ def stamp_channel_task(
         allow_stamps = result.get("allow_stamps", [])
         deny_stamps = result.get("deny_stamps", [])
 
+        # ── 空可见性预警：allow_stamps 为空（且非 unmounted/stale，已在前处理）→ 内容对任何
+        # principal 不可见。这是上传解析后最早可判定可见性的点，必须大声暴露（警告+审计），
+        # 否则"有文档但检索不到"会被静默生产，直到查询时才暴露。 ──
+        if not allow_stamps:
+            log.warning("stamp_empty_visibility",
+                        doc_id=doc_id, kb_id=kb_id, tenant_id=tenant_id,
+                        reason="no_authorized_readers",
+                        hint="grant kb:read/kb:write or role binding in admin-console, then re-stamp")
+            from src.platform.audit.service import emit_audit_event
+            try:
+                emit_audit_event(
+                    event_type="STAMP_EMPTY_VISIBILITY",
+                    user_id="system",
+                    tenant_id=tenant_id,
+                    action="stamp",
+                    resource_type="chunk",
+                    resource_id=f"{doc_id}/{kb_id}",
+                    allowed=True,
+                    note="allow_stamps empty — content invisible to all principals",
+                )
+            except Exception:
+                pass  # fail-open：审计失败不阻塞盖戳
+
         _upsert_stamps(tenant_id, doc_id, kb_id,
                       allow_stamps=allow_stamps,
                       deny_stamps=deny_stamps,
