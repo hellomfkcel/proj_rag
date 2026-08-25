@@ -82,54 +82,10 @@ async def main():
 
         print(f"  Resource registry: admin / reader / writer registered on KB")
 
-        # ── 5. 写入主模型注册（如果 model_registry 为空） ──
-        model_count = await conn.fetchval("SELECT count(*) FROM model_registry")
-        if model_count == 0:
-            models = [
-                ("qwen3-8b", "llm", "ollama", "qwen3:8b", "http://localhost:11434", True),
-                ("deepseek-chat", "llm", "deepseek", "deepseek-v4-flash", "https://api.deepseek.com/v1", False),
-                ("qwen3-embed", "embedding", "ollama", "qwen3-embedding:0.6b", "http://localhost:11434", True),
-                ("bge-m3", "embedding", "sentence_transformers", "BAAI/bge-m3", "", True),
-                ("bge-reranker-v2-m3", "reranker", "sentence_transformers", "BAAI/bge-reranker-v2-m3", "", True),
-            ]
-            for model_id, mtype, provider, model_name, base_url, is_default in models:
-                await conn.execute("""
-                    INSERT INTO model_registry (model_id, model_type, provider, model_name, base_url, is_default)
-                    VALUES ($1, $2, $3, $4, $5, $6)
-                    ON CONFLICT DO NOTHING
-                """, model_id, mtype, provider, model_name, base_url, is_default)
-            print(f"  Model registry: {len(models)} models seeded")
-
-        # ── 6. 合成角色 Prompt 模板（幂等，模板与 chat/service.py 内联默认一致） ──
-        # 合成逻辑经 resolve_prompt(prompt_id, "v1") 读取，DB 有数据即生效；
-        # 前端设置页可直接编辑这些模板，编辑后立即影响生成行为。
-        prompt_templates = [
-            ("compact", "你是企业知识库助手，请基于以下文档内容回答问题。\n"
-             "如文档中没有相关信息，请如实说明，不要编造。\n\n"
-             "{% for doc in documents %}[来源 {{ loop.index }}] {{ doc.content }}\n{% endfor %}\n"
-             "问题：{{ query }}", "compact 单次合成"),
-            ("refine_init", "你是企业知识库助手。请基于以下文档内容回答用户问题。\n"
-             "如文档中没有足够信息，请如实说明。\n\n[文档内容]\n{{ current_doc }}\n\n问题：{{ query }}",
-             "refine 首轮初始答案"),
-            ("refine", "你是企业知识库助手。你之前生成了以下答案：\n\n[已有答案]\n{{ existing_answer }}\n\n"
-             "现在你得到了新的参考文档。请基于新文档的信息，对已有答案进行补充和完善。\n"
-             "如果新文档中有原答案未涵盖的重要信息，请补充。\n"
-             "如果新文档的信息与原答案矛盾，请修正。\n"
-             "如果新文档没有新增信息，保持原答案不变。\n\n[新文档]\n{{ current_doc }}\n\n问题：{{ query }}",
-             "refine 迭代完善"),
-            ("summarize", "请为以下文档片段提取与用户问题相关的关键信息。输出简洁的要点列表，"
-             "每个要点不超过 2 句话。\n\n{% for doc in documents %}[文档 {{ loop.index }}] {{ doc.content }}\n{% endfor %}\n"
-             "问题：{{ query }}\n\n关键信息要点：", "tree_summarize 分批摘要"),
-            ("merge", "你是企业知识库助手。以下是多篇文档的要点摘要。请基于这些摘要回答用户问题。"
-             "如摘要中没有相关信息，请如实说明。\n\n{{ summaries }}\n\n问题：{{ query }}", "tree_summarize 汇总合成"),
-        ]
-        for pid, text, desc in prompt_templates:
-            await conn.execute("""
-                INSERT INTO prompt_templates (prompt_id, version, template_text, description, is_active)
-                VALUES ($1, 'v1', $2, $3, true)
-                ON CONFLICT (prompt_id, version) DO NOTHING
-            """, pid, text, desc)
-        print(f"  Prompt templates: {len(prompt_templates)} role templates ensured")
+        # ── 5/6. 基础配置 seed（model_registry + prompt_templates）──
+        # 复用 seed_base_config（与 init_db 同一份清单，避免两处维护漂移）。
+        from src.scripts.seed_base_config import seed_base_config
+        await seed_base_config(conn)
 
         print("Seed complete — 开发环境已就绪。")
 

@@ -36,6 +36,13 @@ async def main():
         # We execute the entire SQL as one script.
         await conn.execute(sql)
         print("DB init complete — all tables created.")
+
+        # 基础配置 seed（model_registry + prompt_templates）：
+        # 新建库后必须有，否则模型管理页空白、生成缺 prompt 模板。
+        # 幂等（表空才写模型 / ON CONFLICT DO NOTHING），每次 start.sh start 自动执行。
+        from src.scripts.seed_base_config import seed_base_config
+        await seed_base_config(conn)
+        print("Base config seed complete.")
     except Exception as e:
         print(f"ERROR during init: {e}")
         raise
