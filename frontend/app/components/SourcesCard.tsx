@@ -20,25 +20,19 @@ export default function SourcesCard({ index, source }: { index: number; source: 
 
   return (
     <>
-      {/* 卡片：序号 + 文档名 + 摘要，点击查看原文 */}
+      {/* 紧凑来源标签：序号 + 文档名，一行小框；点击查看原文详情（弹窗不动） */}
       <div
         role="button"
         tabIndex={0}
         onClick={() => setOpen(true)}
         onKeyDown={(e) => { if (e.key === "Enter") setOpen(true); }}
-        title="点击查看原文"
-        className="rounded-lg border border-gray-200 bg-white p-2.5 transition cursor-pointer hover:border-blue-300 hover:bg-blue-50/60"
+        title={`${docName} — 点击查看原文`}
+        className="inline-flex items-center gap-1.5 max-w-[240px] min-w-0 rounded-md border border-blue-100 bg-blue-50 px-2 py-1 transition cursor-pointer hover:bg-blue-100 hover:border-blue-300"
       >
-        <div className="flex items-center gap-2 mb-1.5">
-          <span className="inline-flex items-center justify-center w-5 h-5 rounded-md bg-blue-100 text-blue-700 text-xs font-semibold shrink-0">
-            {index + 1}
-          </span>
-          <span className="text-xs font-medium text-gray-700 truncate">{docName}</span>
-        </div>
-        {source.content ? (
-          <p className="text-xs text-gray-500 leading-relaxed line-clamp-2">{source.content}</p>
-        ) : (
-          <p className="text-xs text-gray-400 italic">原文未加载</p>
+        <span className="shrink-0 text-[11px] font-semibold text-blue-700">{index + 1}</span>
+        <span className="truncate text-xs font-medium text-gray-700">{docName}</span>
+        {source.content && (
+          <span className="shrink-0 text-[10px] text-gray-400">⋯</span>
         )}
       </div>
 

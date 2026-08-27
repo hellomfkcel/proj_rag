@@ -186,13 +186,13 @@ export default function MessageList({ messages, msgEndRef, streamError, showThin
                 </div>
               ) : null}
 
-              {/* Sources — 来源卡片列表（序号徽标 + 文档名 + 摘要，点击看原文） */}
+              {/* Sources — 紧凑来源标签（wrap 两行内），点击看原文详情 */}
               {msg.sources && msg.sources.length > 0 && (
-                <div className="mt-3 pt-2 border-t border-gray-200">
-                  <p className="text-xs text-gray-400 mb-2">
+                <div className="mt-2 pt-2 border-t border-gray-200">
+                  <p className="text-xs text-gray-400 mb-1.5">
                     📎 引用来源（{msg.sources.length}）
                   </p>
-                  <div className="flex flex-col gap-2">
+                  <div className="flex flex-wrap gap-1.5">
                     {msg.sources.map((s, j) => (
                       <SourcesCard key={j} index={j} source={s} />
                     ))}
